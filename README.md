@@ -1,26 +1,41 @@
 
-# Trustflow Node
+# Remote Network Node
 
-> **Powering the decentralized backend of tomorrow.**
+> **Decentralized P2P networking with NAT-friendly metadata exchange.**
 
 [![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8.svg)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
-**Trustflow Node** is an open-source, decentralized framework for trust-based data exchange and secure computation across distributed networks.
-It orchestrates decentralized Docker and WASM runtimes, enabling robust, verifiable, and scalable infrastructure for the next generation of decentralized applications.
+**Remote Network Node** is a P2P networking implementation that combines BitTorrent DHT peer discovery with QUIC-based metadata exchange for NAT-friendly peer-to-peer communication.
 
 ---
 
 ## Features
 
-- 🛡️ **Decentralized Trust Infrastructure**
-- 🐳 **Docker & WASM Runtime Orchestration**
-- 📊 **Resource Monitoring**
-- 🔒 **Key Management**
-- 💬 **Modular Services**
-- 🔗 **Blockchain-Ready**
+- 🔍 **BitTorrent DHT Peer Discovery** - Uses proven DHT protocol for initial peer discovery
+- 🔐 **QUIC Metadata Exchange** - Secure, bidirectional metadata exchange over QUIC streams
+- 🗄️ **SQLite Peer Database** - Persistent storage of peer metadata with connection pooling
+- 🌐 **NAT-Friendly Architecture** - Designed for peers behind NATs with private IP discovery
+- 📊 **Memory Leak Monitoring** - Built-in pprof endpoints for performance monitoring
+- 🎯 **Node Type Detection** - Automatic detection of public vs private node configuration
+
+---
+
+## Architecture
+
+The node operates in three layers:
+
+1. **DHT Layer** - BitTorrent DHT for peer discovery using `add_peer`/`get_peers` operations
+2. **QUIC Layer** - Encrypted metadata exchange with bidirectional stream support
+3. **Database Layer** - SQLite storage for peer metadata, network topology, and capabilities
+
+### Peer Discovery Flow
+
+```
+DHT Peer Discovery → QUIC Connection → Bidirectional Metadata Exchange → SQLite Storage
+```
 
 ---
 
@@ -29,42 +44,26 @@ It orchestrates decentralized Docker and WASM runtimes, enabling robust, verifia
 ### Prerequisites
 
 - Go 1.24+
-- Docker
-- SQLite database
+- SQLite support (CGO enabled for modernc.org/sqlite)
 
 ### Installation
 
 ```bash
-git clone https://github.com/Trustflow-Network-Labs/trustflow-node.git
-cd trustflow-node
+git clone https://github.com/Trustflow-Network-Labs/remote-network-node.git
+cd remote-network-node
 
-# CLI build
-CGO_ENABLED=0 go build -o ./trustflow-node ./internal/cli.go
-
-# Wails GUI development (hot reload)
-wails dev
-
-# Wails GUI production build
-wails build
+# Build
+go build -o remote-network ./cmd/main.go
 ```
-
-### Configuration
-
-1. Copy `.env.example` to `.env` and configure environment variables.
-2. Modify `configs` for advanced settings (e.g., database, networking, runtime options).
 
 ### Running
 
 ```bash
-# interactive menu mode
-./trustflow-node start
-# end
-```
+# Start the node
+./remote-network start
 
-```bash
-# run as daemon
-./trustflow-node daemon
-# end
+# Enable memory monitoring (separate terminal)
+go tool pprof http://localhost:6060/debug/pprof/heap
 ```
 
 ---
@@ -73,14 +72,12 @@ wails build
 
 | Directory               | Purpose                                           |
 |--------------------------|---------------------------------------------------|
-| `cmd/`                   | Application entrypoint                           |
-| `node/`                  | Core node runtime logic                           |
-| `database/`              | Persistence layer                                  |
-| `keystore/`              | Key and identity management modules               |
-| `price/`                 | External price feed integrations                  |
-| `resource-utilization/`  | Node performance monitoring                       |
-| `utils/`                 | Common utilities and helpers                      |
-| `workflow/`              | Task and workflow orchestration                   |
+| `cmd/`                   | Application entrypoint and CLI                   |
+| `internal/core/`         | Core peer management and coordination            |
+| `internal/p2p/`          | DHT and QUIC protocol implementations            |
+| `internal/database/`     | SQLite peer metadata storage                     |
+| `internal/utils/`        | Network utilities and node type detection       |
+| `monitoring/`            | Memory leak and performance monitoring scripts   |
 
 ---
 
@@ -112,14 +109,45 @@ See the [LICENSE](LICENSE) file for details.
 
 ---
 
-## Workflow Example
+## Protocol Details
 
-The following diagrams illustrate examples of end-to-end ecological monitoring workflows—starting with decentralized data integration for pollinator species management in agroecosystems, and extending to satellite-based deforestation estimation.
+### DHT Implementation
 
-- Decentralized data integration for pollinator species management in agroecosystems
+- Uses standard BitTorrent DHT with `add_peer`/`get_peers` operations
+- Custom topic-based peer discovery for network segmentation
+- Automatic bootstrap node connectivity for network joining
 
-![Trustflow Workflow](./trustflow_workflow_example_1.png)
+### QUIC Metadata Exchange
 
-- Satellite-based deforestation estimation
+- TLS-encrypted streams for secure peer communication
+- Bidirectional metadata exchange on single streams (NAT-friendly)
+- Structured message protocol with request/response correlation
+- Support for future service discovery and hole punching
 
-![Trustflow Workflow](./trustflow_workflow_example_2.png)
+### Database Schema
+
+Peer metadata includes:
+- Node identification (ID, topic, endpoints)
+- Network information (public/private IPs, NAT detection)
+- Capabilities and service offerings
+- Connection quality metrics
+
+---
+
+## Development Roadmap
+
+### Completed
+- ✅ DHT peer discovery integration
+- ✅ QUIC bidirectional metadata exchange
+- ✅ SQLite peer database with connection pooling
+- ✅ Node type detection (public/private)
+- ✅ Memory leak monitoring infrastructure
+
+### In Progress
+- 🔄 NAT detection and classification
+
+### Planned
+- 📋 UDP hole punching for NAT-to-NAT communication
+- 📋 Service discovery protocol
+- 📋 Connection quality metrics and peer scoring
+- 📋 Distributed service orchestration
