@@ -1,0 +1,51 @@
+[p2p]
+# DHT and P2P Configuration
+dht_port = 30609
+dht_bootstrap_nodes = 159.65.253.245:30609, 167.86.116.185:30609, router.utorrent.com:6881, router.bittorrent.com:6881, dht.transmissionbt.com:6881, dht.aelitis.com:6881, router.silotis.us:6881, dht.libtorrent.org:25401, dht.anacrolix.link:42069, router.bittorrent.cloud:42069
+
+# QUIC Configuration
+quic_port = 30906
+quic_listen_addr = 0.0.0.0
+quic_connection_timeout = 30s
+quic_stream_timeout = 10s
+quic_max_connections = 100
+
+# Peer Discovery
+peer_discovery_interval = 30s
+peer_maintenance_interval = 5m
+max_peers_per_topic = 50
+
+[topics]
+# Topics to subscribe to (comma-separated)
+subscribe_topics = remote-network-mesh
+# Topic announcement interval
+topic_announce_interval = 60s
+# Topic refresh interval
+topic_refresh_interval = 5m
+
+[network]
+# Network timeouts and limits
+connection_timeout = 10s
+stream_read_timeout = 30s
+stream_write_timeout = 10s
+max_message_size = 1048576
+buffer_size = 65536
+
+[log]
+# Logging Configuration
+logfile = remote-network
+log_level = debug
+log_max_size_mb = 100
+log_max_age_days = 30
+log_max_backups = 10
+log_rotation_interval = daily
+log_enable_rotation = true
+
+[misc]
+# Miscellaneous settings
+node_name = remote-network-node
+pid_path = ./remote-network.pid
+
+[database]
+# Database configuration
+database_file = remote-network.db
