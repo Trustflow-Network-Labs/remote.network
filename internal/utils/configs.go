@@ -290,3 +290,43 @@ func (cm *ConfigManager) GetBootstrapNodes(key string, defaultNodes []string) []
 
 	return nodes
 }
+
+// GetConfigSlice parses a comma-separated string into a slice
+func (cm *ConfigManager) GetConfigSlice(key string, defaultValues []string) []string {
+	valueStr := cm.GetConfigWithDefault(key, strings.Join(defaultValues, ", "))
+
+	if valueStr == "" {
+		return defaultValues
+	}
+
+	var values []string
+	for _, value := range strings.Split(valueStr, ",") {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+
+	if len(values) == 0 {
+		return defaultValues
+	}
+
+	return values
+}
+
+// GetConfigBool parses a boolean from config with default fallback
+func (cm *ConfigManager) GetConfigBool(key string, defaultValue bool) bool {
+	valueStr := cm.GetConfigWithDefault(key, strconv.FormatBool(defaultValue))
+	valueStr = strings.ToLower(strings.TrimSpace(valueStr))
+
+	// Accept various boolean representations
+	switch valueStr {
+	case "true", "yes", "1", "on", "enabled":
+		return true
+	case "false", "no", "0", "off", "disabled":
+		return false
+	default:
+		fmt.Printf("Invalid boolean '%s' for key '%s', using default %v\n", valueStr, key, defaultValue)
+		return defaultValue
+	}
+}

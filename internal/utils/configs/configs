@@ -49,3 +49,29 @@ pid_path = ./remote-network.pid
 [database]
 # Database configuration
 database_file = remote-network.db
+
+[nat]
+# NAT Detection and Classification
+nat_stun_servers = stun.l.google.com:19302, stun1.l.google.com:19302, stun2.l.google.com:19302
+nat_stun_timeout = 5s
+nat_stun_buffer_size = 1024
+nat_test_hairpinning = true
+nat_default_filtering = address-port-dependent
+nat_port_prediction_samples = 3
+nat_port_prediction_max_diff = 10
+nat_hairpinning_timeout = 2s
+nat_detection_interval = 300s
+
+[relay]
+# Relay Service Configuration
+relay_mode = false
+relay_auto_select = true
+relay_max_connections = 100
+relay_connection_keepalive = 30s
+relay_discovery_interval = 60s
+relay_pricing_per_gb = 0.001
+relay_free_coordination = true
+relay_max_coordination_msg_size = 10240
+relay_batch_interval = 30s
+relay_traffic_batch_size = 100
+relay_max_circuit_age = 3600s

@@ -24,15 +24,18 @@ type TopicState struct {
 }
 
 type PeerManager struct {
-	config  *utils.ConfigManager
-	logger  *utils.LogsManager
-	dht     *p2p.DHTPeer
-	quic    *p2p.QUICPeer
-	topics  map[string]*TopicState
-	ctx     context.Context
-	cancel  context.CancelFunc
-	mutex   sync.RWMutex
-	running bool
+	config         *utils.ConfigManager
+	logger         *utils.LogsManager
+	dht            *p2p.DHTPeer
+	quic           *p2p.QUICPeer
+	natDetector    *p2p.NATDetector
+	topologyMgr    *p2p.NATTopologyManager
+	dbManager      *database.SQLiteManager
+	topics         map[string]*TopicState
+	ctx            context.Context
+	cancel         context.CancelFunc
+	mutex          sync.RWMutex
+	running        bool
 }
 
 func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*PeerManager, error) {
@@ -52,21 +55,31 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 		return nil, fmt.Errorf("failed to create QUIC peer: %v", err)
 	}
 
-	pm := &PeerManager{
-		config: config,
-		logger: logger,
-		dht:    dht,
-		quic:   quic,
-		topics: make(map[string]*TopicState),
-		ctx:    ctx,
-		cancel: cancel,
-	}
-
-	// Initialize database manager and set dependencies on QUIC peer
+	// Initialize database manager
 	dbManager, err := database.NewSQLiteManager(config)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to initialize database manager: %v", err)
+	}
+
+	// Initialize NAT detector
+	quicPort := config.GetConfigInt("quic_port", 30906, 1024, 65535)
+	natDetector := p2p.NewNATDetector(config, logger, quicPort)
+
+	// Initialize NAT topology manager
+	topologyMgr := p2p.NewNATTopologyManager(config, logger, dbManager)
+
+	pm := &PeerManager{
+		config:      config,
+		logger:      logger,
+		dht:         dht,
+		quic:        quic,
+		natDetector: natDetector,
+		topologyMgr: topologyMgr,
+		dbManager:   dbManager,
+		topics:      make(map[string]*TopicState),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 
 	// Set dependencies on QUIC peer
@@ -91,6 +104,27 @@ func (pm *PeerManager) Start() error {
 	}
 
 	pm.logger.Info("Starting Peer Manager...", "core")
+
+	// Perform NAT detection before starting network services
+	pm.logger.Info("Performing NAT detection...", "core")
+	natResult, err := pm.natDetector.DetectNATType()
+	if err != nil {
+		pm.logger.Warn(fmt.Sprintf("NAT detection failed: %v", err), "core")
+	} else {
+		pm.logger.Info(fmt.Sprintf("NAT Type: %s (Difficulty: %s, Requires Relay: %v)",
+			natResult.NATType.String(),
+			natResult.NATType.HolePunchingDifficulty(),
+			natResult.NATType.RequiresRelay()), "core")
+
+		// Detect local network topology
+		topology, err := pm.topologyMgr.DetectLocalTopology(natResult)
+		if err != nil {
+			pm.logger.Warn(fmt.Sprintf("Topology detection failed: %v", err), "core")
+		} else {
+			pm.logger.Info(fmt.Sprintf("Network Topology: Public IP=%s, Subnet=%s",
+				topology.PublicIP, topology.LocalSubnet), "core")
+		}
+	}
 
 	// Start QUIC peer FIRST - it needs to be ready to accept connections
 	// before DHT begins peer discovery
@@ -370,6 +404,22 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 		"dht_node_id":      pm.dht.NodeID(),
 		"quic_connections": pm.quic.GetConnectionCount(),
 		"topics":           make(map[string]interface{}),
+	}
+
+	// Add NAT detection info
+	if pm.natDetector != nil {
+		natResult := pm.natDetector.GetLastResult()
+		if natResult != nil {
+			stats["nat_type"] = natResult.NATType.String()
+			stats["nat_difficulty"] = natResult.NATType.HolePunchingDifficulty()
+			stats["requires_relay"] = natResult.NATType.RequiresRelay()
+			stats["public_endpoint"] = fmt.Sprintf("%s:%d", natResult.PublicIP, natResult.PublicPort)
+		}
+	}
+
+	// Add topology info
+	if pm.topologyMgr != nil {
+		stats["topology"] = pm.topologyMgr.GetTopologyStats()
 	}
 
 	topicStats := make(map[string]interface{})
