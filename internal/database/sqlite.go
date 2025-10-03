@@ -22,6 +22,7 @@ type SQLiteManager struct {
 
 	// Specialized managers
 	PeerMetadata *PeerMetadataDB
+	Relay        *RelayDB
 }
 
 // NewSQLiteManager creates a new enhanced SQLite manager with peer metadata support
@@ -124,6 +125,12 @@ func (sqlm *SQLiteManager) initializeManagers() error {
 		return fmt.Errorf("failed to initialize peer metadata manager: %v", err)
 	}
 
+	// Initialize relay database manager
+	sqlm.Relay, err = NewRelayDB(sqlm.db, logsManager)
+	if err != nil {
+		return fmt.Errorf("failed to initialize relay database manager: %v", err)
+	}
+
 	logsManager.Info("Database managers initialized successfully", "database")
 	return nil
 }
@@ -192,6 +199,12 @@ func (sqlm *SQLiteManager) Close() error {
 		}
 	}
 
+	if sqlm.Relay != nil {
+		if err := sqlm.Relay.Close(); err != nil {
+			return fmt.Errorf("failed to close relay manager: %v", err)
+		}
+	}
+
 	if sqlm.db != nil {
 		return sqlm.db.Close()
 	}
@@ -217,6 +230,11 @@ func (sqlm *SQLiteManager) GetStats() map[string]interface{} {
 		stats["peer_metadata"] = sqlm.PeerMetadata.GetStats()
 	}
 
+	// Relay stats
+	if sqlm.Relay != nil {
+		stats["relay"] = sqlm.Relay.GetStats()
+	}
+
 	return stats
 }
 
@@ -238,6 +256,17 @@ func (sqlm *SQLiteManager) PerformMaintenance() error {
 
 		if cleaned > 0 {
 			logsManager.Info(fmt.Sprintf("Maintenance: cleaned up %d old peer metadata records", cleaned), "database")
+		}
+	}
+
+	// Cleanup old relay sessions
+	if sqlm.Relay != nil {
+		sessionMaxAge := time.Duration(sqlm.cm.GetConfigInt("relay_session_cleanup_hours", 24, 1, 168)) * time.Hour
+		cleaned, err := sqlm.Relay.CleanupOldSessions(sessionMaxAge)
+		if err != nil {
+			logsManager.Log("error", fmt.Sprintf("Failed to cleanup old relay sessions: %v", err), "database")
+		} else if cleaned > 0 {
+			logsManager.Info(fmt.Sprintf("Maintenance: cleaned up %d old relay sessions", cleaned), "database")
 		}
 	}
 
