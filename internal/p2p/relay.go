@@ -1,0 +1,502 @@
+package p2p
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/quic-go/quic-go"
+
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
+)
+
+// RelaySession represents an active relay session
+type RelaySession struct {
+	SessionID         string
+	ClientNodeID      string
+	RelayNodeID       string
+	SessionType       string // "coordination" or "full_relay"
+	Connection        *quic.Conn
+	StartTime         time.Time
+	LastKeepalive     time.Time
+	KeepaliveInterval time.Duration
+	IngressBytes      int64
+	EgressBytes       int64
+	mutex             sync.RWMutex
+}
+
+// RelayPeer manages relay functionality
+type RelayPeer struct {
+	config          *utils.ConfigManager
+	logger          *utils.LogsManager
+	dbManager       *database.SQLiteManager
+	ctx             context.Context
+	cancel          context.CancelFunc
+
+	// Relay mode configuration
+	isRelayMode     bool
+	maxConnections  int
+	pricingPerGB    float64
+	freeCoordination bool
+	maxCoordMsgSize int64
+
+	// Active sessions
+	sessions        map[string]*RelaySession // key: sessionID
+	clientSessions  map[string][]*RelaySession // key: clientNodeID
+	sessionsMutex   sync.RWMutex
+
+	// Registered clients (NAT peers using this relay)
+	registeredClients map[string]*RelaySession // key: clientNodeID
+	clientsMutex      sync.RWMutex
+}
+
+// NewRelayPeer creates a new relay peer
+func NewRelayPeer(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager) *RelayPeer {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Read relay configuration
+	isRelayMode := config.GetConfigBool("relay_mode", false)
+	maxConnections := config.GetConfigInt("relay_max_connections", 100, 1, 1000)
+	pricingPerGB := config.GetConfigFloat64("relay_pricing_per_gb", 0.001, 0, 1.0)
+	freeCoordination := config.GetConfigBool("relay_free_coordination", true)
+	maxCoordMsgSize := config.GetConfigInt64("relay_max_coordination_msg_size", 10240, 1024, 1048576)
+
+	rp := &RelayPeer{
+		config:            config,
+		logger:            logger,
+		dbManager:         dbManager,
+		ctx:               ctx,
+		cancel:            cancel,
+		isRelayMode:       isRelayMode,
+		maxConnections:    maxConnections,
+		pricingPerGB:      pricingPerGB,
+		freeCoordination:  freeCoordination,
+		maxCoordMsgSize:   maxCoordMsgSize,
+		sessions:          make(map[string]*RelaySession),
+		clientSessions:    make(map[string][]*RelaySession),
+		registeredClients: make(map[string]*RelaySession),
+	}
+
+	if isRelayMode {
+		logger.Info(fmt.Sprintf("Relay mode enabled: max_connections=%d, pricing=%.4f/GB, free_coordination=%v",
+			maxConnections, pricingPerGB, freeCoordination), "relay")
+	}
+
+	return rp
+}
+
+// IsRelayMode returns true if this node is running in relay mode
+func (rp *RelayPeer) IsRelayMode() bool {
+	return rp.isRelayMode
+}
+
+// HandleRelayRegister processes relay registration requests from NAT peers
+func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remoteAddr string) *QUICMessage {
+	if !rp.isRelayMode {
+		rp.logger.Warn(fmt.Sprintf("Relay registration from %s rejected: relay mode disabled", remoteAddr), "relay")
+		return CreateRelayReject("", "", "relay mode not enabled on this node")
+	}
+
+	var data RelayRegisterData
+	if err := msg.GetDataAs(&data); err != nil {
+		rp.logger.Error(fmt.Sprintf("Failed to parse relay register from %s: %v", remoteAddr, err), "relay")
+		return CreateRelayReject("", data.NodeID, "invalid registration data")
+	}
+
+	rp.logger.Info(fmt.Sprintf("Relay registration request from %s (NAT: %s, requires_relay: %v)",
+		data.NodeID, data.NATType, data.RequiresRelay), "relay")
+
+	// Check if we can accept more connections
+	rp.sessionsMutex.RLock()
+	currentConnections := len(rp.sessions)
+	rp.sessionsMutex.RUnlock()
+
+	if currentConnections >= rp.maxConnections {
+		rp.logger.Warn(fmt.Sprintf("Relay registration from %s rejected: max connections reached (%d/%d)",
+			data.NodeID, currentConnections, rp.maxConnections), "relay")
+		return CreateRelayReject("", data.NodeID, "relay at maximum capacity")
+	}
+
+	// Create new session
+	sessionID := uuid.New().String()
+	keepaliveInterval := rp.config.GetConfigInt("relay_connection_keepalive", 30, 10, 300)
+
+	session := &RelaySession{
+		SessionID:         sessionID,
+		ClientNodeID:      data.NodeID,
+		RelayNodeID:       "", // Will be set by caller
+		SessionType:       "full_relay",
+		Connection:        conn,
+		StartTime:         time.Now(),
+		LastKeepalive:     time.Now(),
+		KeepaliveInterval: time.Duration(keepaliveInterval) * time.Second,
+		IngressBytes:      0,
+		EgressBytes:       0,
+	}
+
+	// Store session
+	rp.sessionsMutex.Lock()
+	rp.sessions[sessionID] = session
+	rp.clientSessions[data.NodeID] = append(rp.clientSessions[data.NodeID], session)
+	rp.sessionsMutex.Unlock()
+
+	rp.clientsMutex.Lock()
+	rp.registeredClients[data.NodeID] = session
+	rp.clientsMutex.Unlock()
+
+	// Record in database
+	if rp.dbManager != nil && rp.dbManager.Relay != nil {
+		sessionType := "full_relay"
+		if !data.RequiresRelay {
+			sessionType = "coordination"
+		}
+
+		err := rp.dbManager.Relay.CreateSession(sessionID, data.NodeID, "", sessionType, keepaliveInterval)
+		if err != nil {
+			rp.logger.Error(fmt.Sprintf("Failed to create session in database: %v", err), "relay")
+		}
+	}
+
+	rp.logger.Info(fmt.Sprintf("Relay session created: %s for client %s (type: %s)",
+		sessionID, data.NodeID, session.SessionType), "relay")
+
+	// Start keepalive monitor
+	go rp.monitorSession(session)
+
+	return CreateRelayAccept("", data.NodeID, sessionID, keepaliveInterval, rp.pricingPerGB)
+}
+
+// HandleRelayForward processes relay forwarding requests
+func (rp *RelayPeer) HandleRelayForward(msg *QUICMessage, remoteAddr string) error {
+	var data RelayForwardData
+	if err := msg.GetDataAs(&data); err != nil {
+		return fmt.Errorf("failed to parse relay forward: %v", err)
+	}
+
+	// Validate session
+	rp.sessionsMutex.RLock()
+	session, exists := rp.sessions[data.SessionID]
+	rp.sessionsMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("session not found: %s", data.SessionID)
+	}
+
+	// Determine if this is coordination (free) or relay (paid) traffic
+	isCoordination := data.MessageType == "hole_punch"
+	if isCoordination && rp.freeCoordination {
+		// Free hole punching coordination
+		if data.PayloadSize > rp.maxCoordMsgSize {
+			return fmt.Errorf("coordination message too large: %d bytes (max: %d)",
+				data.PayloadSize, rp.maxCoordMsgSize)
+		}
+
+		rp.logger.Debug(fmt.Sprintf("Forwarding coordination message: %s -> %s (%d bytes)",
+			data.SourceNodeID, data.TargetNodeID, data.PayloadSize), "relay")
+	} else {
+		// Paid relay traffic
+		rp.logger.Debug(fmt.Sprintf("Forwarding relay data: %s -> %s (%d bytes, billable)",
+			data.SourceNodeID, data.TargetNodeID, data.PayloadSize), "relay")
+	}
+
+	// Update traffic counters
+	session.mutex.Lock()
+	session.IngressBytes += data.PayloadSize
+	session.LastKeepalive = time.Now()
+	session.mutex.Unlock()
+
+	// Update database
+	if rp.dbManager != nil && rp.dbManager.Relay != nil {
+		rp.dbManager.Relay.UpdateSessionTraffic(data.SessionID, data.PayloadSize, 0)
+
+		// Record traffic
+		trafficType := "relay"
+		if isCoordination {
+			trafficType = "coordination"
+		}
+
+		rp.dbManager.Relay.RecordTraffic(
+			data.SessionID,
+			data.SourceNodeID,
+			session.RelayNodeID,
+			trafficType,
+			data.PayloadSize,
+			0,
+			time.Now(),
+			time.Time{},
+		)
+	}
+
+	// Forward to target (implementation depends on routing logic)
+	// This will be implemented in the message forwarding section
+
+	return nil
+}
+
+// HandleRelayData processes relay data messages
+func (rp *RelayPeer) HandleRelayData(msg *QUICMessage, remoteAddr string) error {
+	var data RelayDataData
+	if err := msg.GetDataAs(&data); err != nil {
+		return fmt.Errorf("failed to parse relay data: %v", err)
+	}
+
+	// Validate session
+	rp.sessionsMutex.RLock()
+	session, exists := rp.sessions[data.SessionID]
+	rp.sessionsMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("session not found: %s", data.SessionID)
+	}
+
+	rp.logger.Debug(fmt.Sprintf("Relay data: %s -> %s (%d bytes, seq: %d)",
+		data.SourceNodeID, data.TargetNodeID, data.DataSize, data.SequenceNum), "relay")
+
+	// Update traffic counters (this is paid traffic)
+	session.mutex.Lock()
+	session.IngressBytes += data.DataSize
+	session.LastKeepalive = time.Now()
+	session.mutex.Unlock()
+
+	// Update database
+	if rp.dbManager != nil && rp.dbManager.Relay != nil {
+		rp.dbManager.Relay.UpdateSessionTraffic(data.SessionID, data.DataSize, 0)
+
+		// Record as billable relay traffic
+		rp.dbManager.Relay.RecordTraffic(
+			data.SessionID,
+			data.SourceNodeID,
+			session.RelayNodeID,
+			"relay",
+			data.DataSize,
+			0,
+			time.Now(),
+			time.Time{},
+		)
+	}
+
+	// Forward to target
+	return rp.forwardDataToTarget(data.TargetNodeID, data.Data)
+}
+
+// HandleRelayHolePunch processes hole punching coordination
+func (rp *RelayPeer) HandleRelayHolePunch(msg *QUICMessage, remoteAddr string) error {
+	var data RelayHolePunchData
+	if err := msg.GetDataAs(&data); err != nil {
+		return fmt.Errorf("failed to parse relay hole punch: %v", err)
+	}
+
+	rp.logger.Info(fmt.Sprintf("Hole punch coordination: %s <-> %s (strategy: %s)",
+		data.InitiatorNodeID, data.TargetNodeID, data.Strategy), "relay")
+
+	// Validate session
+	rp.sessionsMutex.RLock()
+	session, exists := rp.sessions[data.SessionID]
+	rp.sessionsMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("session not found: %s", data.SessionID)
+	}
+
+	// This is free coordination traffic
+	messageSize := int64(len(data.InitiatorEndpoint) + len(data.TargetEndpoint) + 100) // Approximate
+
+	session.mutex.Lock()
+	session.IngressBytes += messageSize
+	session.LastKeepalive = time.Now()
+	session.mutex.Unlock()
+
+	// Record as free coordination traffic
+	if rp.dbManager != nil && rp.dbManager.Relay != nil {
+		rp.dbManager.Relay.RecordTraffic(
+			data.SessionID,
+			data.InitiatorNodeID,
+			session.RelayNodeID,
+			"coordination",
+			messageSize,
+			0,
+			time.Now(),
+			time.Time{},
+		)
+	}
+
+	// Forward coordination to target
+	return rp.forwardHolePunchToTarget(&data)
+}
+
+// HandleRelayDisconnect processes relay disconnection
+func (rp *RelayPeer) HandleRelayDisconnect(msg *QUICMessage, remoteAddr string) error {
+	var data RelayDisconnectData
+	if err := msg.GetDataAs(&data); err != nil {
+		return fmt.Errorf("failed to parse relay disconnect: %v", err)
+	}
+
+	rp.logger.Info(fmt.Sprintf("Relay disconnect: session=%s, node=%s, reason=%s, traffic=%.2fMB",
+		data.SessionID, data.NodeID, data.Reason,
+		float64(data.BytesIngress+data.BytesEgress)/(1024*1024)), "relay")
+
+	// Remove session
+	rp.sessionsMutex.Lock()
+	session, exists := rp.sessions[data.SessionID]
+	if exists {
+		delete(rp.sessions, data.SessionID)
+
+		// Remove from client sessions
+		if sessions, ok := rp.clientSessions[data.NodeID]; ok {
+			for i, s := range sessions {
+				if s.SessionID == data.SessionID {
+					rp.clientSessions[data.NodeID] = append(sessions[:i], sessions[i+1:]...)
+					break
+				}
+			}
+		}
+	}
+	rp.sessionsMutex.Unlock()
+
+	rp.clientsMutex.Lock()
+	delete(rp.registeredClients, data.NodeID)
+	rp.clientsMutex.Unlock()
+
+	// Close session in database
+	if rp.dbManager != nil && rp.dbManager.Relay != nil && exists {
+		rp.dbManager.Relay.CloseSession(data.SessionID)
+
+		// Record final traffic
+		rp.dbManager.Relay.RecordTraffic(
+			data.SessionID,
+			data.NodeID,
+			session.RelayNodeID,
+			"relay",
+			data.BytesIngress,
+			data.BytesEgress,
+			session.StartTime,
+			time.Now(),
+		)
+	}
+
+	return nil
+}
+
+// monitorSession monitors a relay session for keepalive
+func (rp *RelayPeer) monitorSession(session *RelaySession) {
+	ticker := time.NewTicker(session.KeepaliveInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-rp.ctx.Done():
+			return
+		case <-ticker.C:
+			session.mutex.RLock()
+			lastKeepalive := session.LastKeepalive
+			session.mutex.RUnlock()
+
+			// Check if session is still alive
+			if time.Since(lastKeepalive) > session.KeepaliveInterval*2 {
+				rp.logger.Warn(fmt.Sprintf("Session %s timed out (client: %s)",
+					session.SessionID, session.ClientNodeID), "relay")
+
+				// Terminate session
+				rp.terminateSession(session.SessionID, "keepalive timeout")
+				return
+			}
+		}
+	}
+}
+
+// terminateSession terminates a relay session
+func (rp *RelayPeer) terminateSession(sessionID, reason string) {
+	rp.sessionsMutex.Lock()
+	session, exists := rp.sessions[sessionID]
+	if !exists {
+		rp.sessionsMutex.Unlock()
+		return
+	}
+
+	delete(rp.sessions, sessionID)
+
+	// Remove from client sessions
+	if sessions, ok := rp.clientSessions[session.ClientNodeID]; ok {
+		for i, s := range sessions {
+			if s.SessionID == sessionID {
+				rp.clientSessions[session.ClientNodeID] = append(sessions[:i], sessions[i+1:]...)
+				break
+			}
+		}
+	}
+	rp.sessionsMutex.Unlock()
+
+	rp.clientsMutex.Lock()
+	delete(rp.registeredClients, session.ClientNodeID)
+	rp.clientsMutex.Unlock()
+
+	// Close in database
+	if rp.dbManager != nil && rp.dbManager.Relay != nil {
+		rp.dbManager.Relay.CloseSession(sessionID)
+	}
+
+	rp.logger.Info(fmt.Sprintf("Terminated session %s: %s", sessionID, reason), "relay")
+}
+
+// forwardDataToTarget forwards data to target client (stub for now)
+func (rp *RelayPeer) forwardDataToTarget(targetNodeID string, data []byte) error {
+	// This will be implemented in the message forwarding section
+	// For now, just log
+	rp.logger.Debug(fmt.Sprintf("Forward data to %s (%d bytes)", targetNodeID, len(data)), "relay")
+	return nil
+}
+
+// forwardHolePunchToTarget forwards hole punch coordination to target (stub for now)
+func (rp *RelayPeer) forwardHolePunchToTarget(data *RelayHolePunchData) error {
+	// This will be implemented in the message forwarding section
+	rp.logger.Debug(fmt.Sprintf("Forward hole punch coordination to %s", data.TargetNodeID), "relay")
+	return nil
+}
+
+// GetStats returns relay statistics
+func (rp *RelayPeer) GetStats() map[string]interface{} {
+	rp.sessionsMutex.RLock()
+	defer rp.sessionsMutex.RUnlock()
+
+	stats := map[string]interface{}{
+		"is_relay_mode":      rp.isRelayMode,
+		"max_connections":    rp.maxConnections,
+		"active_sessions":    len(rp.sessions),
+		"registered_clients": len(rp.registeredClients),
+		"pricing_per_gb":     rp.pricingPerGB,
+		"free_coordination":  rp.freeCoordination,
+	}
+
+	// Calculate total traffic
+	var totalIngress, totalEgress int64
+	for _, session := range rp.sessions {
+		session.mutex.RLock()
+		totalIngress += session.IngressBytes
+		totalEgress += session.EgressBytes
+		session.mutex.RUnlock()
+	}
+
+	stats["total_ingress_bytes"] = totalIngress
+	stats["total_egress_bytes"] = totalEgress
+	stats["total_bytes"] = totalIngress + totalEgress
+
+	return stats
+}
+
+// Stop stops the relay peer
+func (rp *RelayPeer) Stop() error {
+	rp.logger.Info("Stopping relay peer...", "relay")
+	rp.cancel()
+
+	// Terminate all sessions
+	rp.sessionsMutex.Lock()
+	for sessionID := range rp.sessions {
+		rp.terminateSession(sessionID, "relay shutdown")
+	}
+	rp.sessionsMutex.Unlock()
+
+	return nil
+}
