@@ -39,6 +39,7 @@ type PeerManager struct {
 	cancel         context.CancelFunc
 	mutex          sync.RWMutex
 	running        bool
+	maintenanceTicker *time.Ticker
 }
 
 func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*PeerManager, error) {
@@ -197,6 +198,7 @@ func (pm *PeerManager) Start() error {
 	// Start background tasks
 	go pm.periodicAnnounce()
 	go pm.periodicDiscovery()
+	go pm.periodicMaintenance()
 
 	pm.running = true
 	pm.logger.Info("Peer Manager started successfully", "core")
@@ -384,6 +386,40 @@ func (pm *PeerManager) periodicDiscovery() {
 	}
 }
 
+// periodicMaintenance performs periodic database maintenance tasks
+func (pm *PeerManager) periodicMaintenance() {
+	// Run maintenance every hour by default
+	maintenanceInterval := pm.config.GetConfigDuration("maintenance_interval", 1*time.Hour)
+	pm.maintenanceTicker = time.NewTicker(maintenanceInterval)
+	defer pm.maintenanceTicker.Stop()
+
+	// Run initial maintenance after 5 minutes
+	time.Sleep(5 * time.Minute)
+	pm.runMaintenance()
+
+	for {
+		select {
+		case <-pm.ctx.Done():
+			return
+		case <-pm.maintenanceTicker.C:
+			pm.runMaintenance()
+		}
+	}
+}
+
+// runMaintenance executes database maintenance tasks
+func (pm *PeerManager) runMaintenance() {
+	pm.logger.Info("Running periodic database maintenance...", "core")
+
+	if pm.dbManager != nil {
+		if err := pm.dbManager.PerformMaintenance(); err != nil {
+			pm.logger.Error(fmt.Sprintf("Database maintenance failed: %v", err), "core")
+		} else {
+			pm.logger.Info("Database maintenance completed successfully", "core")
+		}
+	}
+}
+
 func (pm *PeerManager) discoverTopicPeers(topic string) {
 	pm.logger.Info(fmt.Sprintf("Discovering peers for topic: %s", topic), "core")
 
@@ -503,6 +539,11 @@ func (pm *PeerManager) Stop() error {
 	pm.logger.Info("Stopping Peer Manager...", "core")
 
 	pm.cancel()
+
+	// Stop maintenance ticker
+	if pm.maintenanceTicker != nil {
+		pm.maintenanceTicker.Stop()
+	}
 
 	// Stop relay components
 	if pm.relayManager != nil {
