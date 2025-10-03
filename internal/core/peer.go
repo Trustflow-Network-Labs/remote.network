@@ -28,6 +28,9 @@ type PeerManager struct {
 	logger         *utils.LogsManager
 	dht            *p2p.DHTPeer
 	quic           *p2p.QUICPeer
+	relayPeer      *p2p.RelayPeer
+	relayManager   *p2p.RelayManager
+	trafficMonitor *p2p.RelayTrafficMonitor
 	natDetector    *p2p.NATDetector
 	topologyMgr    *p2p.NATTopologyManager
 	dbManager      *database.SQLiteManager
@@ -69,21 +72,51 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 	// Initialize NAT topology manager
 	topologyMgr := p2p.NewNATTopologyManager(config, logger, dbManager)
 
+	// Initialize relay traffic monitor
+	trafficMonitor := p2p.NewRelayTrafficMonitor(config, logger, dbManager)
+
+	// Initialize relay peer if relay mode is enabled
+	var relayPeer *p2p.RelayPeer
+	var relayManager *p2p.RelayManager
+
+	if config.GetConfigBool("relay_mode", false) {
+		relayPeer = p2p.NewRelayPeer(config, logger, dbManager)
+		logger.Info("Relay mode enabled - node will act as relay", "core")
+	} else {
+		// For NAT peers, initialize relay manager for connecting to relays
+		relayManager = p2p.NewRelayManager(config, logger, dbManager, quic, dht)
+		logger.Info("Relay manager initialized for NAT peer", "core")
+	}
+
 	pm := &PeerManager{
-		config:      config,
-		logger:      logger,
-		dht:         dht,
-		quic:        quic,
-		natDetector: natDetector,
-		topologyMgr: topologyMgr,
-		dbManager:   dbManager,
-		topics:      make(map[string]*TopicState),
-		ctx:         ctx,
-		cancel:      cancel,
+		config:         config,
+		logger:         logger,
+		dht:            dht,
+		quic:           quic,
+		relayPeer:      relayPeer,
+		relayManager:   relayManager,
+		trafficMonitor: trafficMonitor,
+		natDetector:    natDetector,
+		topologyMgr:    topologyMgr,
+		dbManager:      dbManager,
+		topics:         make(map[string]*TopicState),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 
 	// Set dependencies on QUIC peer
-	quic.SetDependencies(dht, dbManager)
+	quic.SetDependencies(dht, dbManager, relayPeer)
+
+	// Set up relay discovery callback for NAT peers
+	if relayManager != nil {
+		quic.SetRelayDiscoveryCallback(func(metadata *database.PeerMetadata) {
+			if err := relayManager.AddRelayCandidate(metadata); err != nil {
+				logger.Debug(fmt.Sprintf("Failed to add relay candidate %s: %v", metadata.NodeID, err), "core")
+			} else {
+				logger.Debug(fmt.Sprintf("Added relay candidate: %s", metadata.NodeID), "core")
+			}
+		})
+	}
 
 	// Set up peer discovery callback for QUIC metadata exchange
 	dht.SetPeerDiscoveredCallback(func(peerAddr string, topic string) {
@@ -135,6 +168,15 @@ func (pm *PeerManager) Start() error {
 	// Start DHT peer - this will immediately begin peer discovery
 	if err := pm.dht.Start(); err != nil {
 		return fmt.Errorf("failed to start DHT peer: %v", err)
+	}
+
+	// Start relay manager for NAT peers (after DHT/QUIC are running)
+	if pm.relayManager != nil {
+		if err := pm.relayManager.Start(); err != nil {
+			pm.logger.Warn(fmt.Sprintf("Failed to start relay manager: %v", err), "core")
+		} else {
+			pm.logger.Info("Relay manager started for NAT peer", "core")
+		}
 	}
 
 	// Subscribe to configured topics
@@ -422,6 +464,18 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 		stats["topology"] = pm.topologyMgr.GetTopologyStats()
 	}
 
+	// Add relay info
+	if pm.relayPeer != nil {
+		stats["relay_mode"] = true
+		stats["relay_stats"] = pm.relayPeer.GetStats()
+	}
+	if pm.relayManager != nil {
+		stats["relay_manager_stats"] = pm.relayManager.GetStats()
+	}
+	if pm.trafficMonitor != nil {
+		stats["traffic_stats"] = pm.trafficMonitor.GetStats()
+	}
+
 	topicStats := make(map[string]interface{})
 	for name, state := range pm.topics {
 		state.mutex.RLock()
@@ -449,6 +503,17 @@ func (pm *PeerManager) Stop() error {
 	pm.logger.Info("Stopping Peer Manager...", "core")
 
 	pm.cancel()
+
+	// Stop relay components
+	if pm.relayManager != nil {
+		pm.relayManager.Stop()
+	}
+	if pm.relayPeer != nil {
+		pm.relayPeer.Stop()
+	}
+	if pm.trafficMonitor != nil {
+		pm.trafficMonitor.Stop()
+	}
 
 	// Stop QUIC peer
 	if err := pm.quic.Stop(); err != nil {

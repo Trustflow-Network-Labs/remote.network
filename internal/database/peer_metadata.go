@@ -65,9 +65,22 @@ type NetworkInfo struct {
 
 	// Node characteristics
 	NodeType       string   `json:"node_type"`               // "public" or "private"
-	NATType        string   `json:"nat_type,omitempty"`      // Future: "full_cone", "restricted", etc.
+	NATType        string   `json:"nat_type,omitempty"`      // "full_cone", "restricted", "symmetric", etc.
 	SupportsUPnP   bool     `json:"supports_upnp,omitempty"`
 	RelayEndpoints []string `json:"relay_endpoints,omitempty"`
+
+	// Relay service info (if node offers relay services)
+	IsRelay         bool    `json:"is_relay,omitempty"`
+	RelayEndpoint   string  `json:"relay_endpoint,omitempty"`   // "IP:Port" for relay connections
+	RelayPricing    float64 `json:"relay_pricing,omitempty"`    // Price per GB
+	RelayCapacity   int     `json:"relay_capacity,omitempty"`   // Max concurrent connections
+	ReputationScore float64 `json:"reputation_score,omitempty"` // Relay reputation (0.0 - 1.0)
+
+	// NAT peer relay connection info (if using relay)
+	UsingRelay      bool   `json:"using_relay,omitempty"`
+	ConnectedRelay  string `json:"connected_relay,omitempty"`  // Relay NodeID
+	RelaySessionID  string `json:"relay_session_id,omitempty"` // Session ID for routing
+	RelayAddress    string `json:"relay_address,omitempty"`    // How to reach this peer via relay
 
 	// Protocol support
 	Protocols []Protocol `json:"protocols"`

@@ -12,6 +12,7 @@ import (
 
 var (
 	configPath  string
+	relayMode   bool
 	config      *utils.ConfigManager
 	logger      *utils.LogsManager
 	peerManager *core.PeerManager
@@ -28,6 +29,11 @@ exchange messages with other peers interested in the same topics.`,
 		// Initialize configuration
 		config = utils.NewConfigManager(configPath)
 
+		// Override relay_mode from command line flag if provided
+		if relayMode {
+			config.SetConfig("relay_mode", true)
+		}
+
 		// Initialize logging
 		logger = utils.NewLogsManager(config)
 
@@ -35,6 +41,21 @@ exchange messages with other peers interested in the same topics.`,
 		cmdName := cmd.Name()
 		if cmdName == "stop" || cmdName == "stop-node" || cmdName == "kill" {
 			return
+		}
+
+		// Validate relay mode requirements
+		if config.GetConfigBool("relay_mode", false) {
+			nodeTypeManager := utils.NewNodeTypeManager()
+			isPublic, err := nodeTypeManager.IsPublicNode()
+			if err != nil || !isPublic {
+				logger.Warn("Relay mode requested but node does not have a public IP address", "cli")
+				logger.Warn("Starting as NAT peer instead. Relay nodes require public IP addresses.", "cli")
+				fmt.Println("WARNING: Relay mode requires a public IP address")
+				fmt.Println("Starting node as NAT peer instead of relay")
+				config.SetConfig("relay_mode", false)
+			} else {
+				logger.Info("Relay mode enabled - node will act as a relay for NAT peers", "cli")
+			}
 		}
 
 		// Initialize peer manager for other commands
@@ -62,4 +83,5 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "config file path")
+	rootCmd.PersistentFlags().BoolVarP(&relayMode, "relay", "r", false, "enable relay mode (requires public IP)")
 }

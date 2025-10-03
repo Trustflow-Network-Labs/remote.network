@@ -330,3 +330,28 @@ func (cm *ConfigManager) GetConfigBool(key string, defaultValue bool) bool {
 		return defaultValue
 	}
 }
+
+// SetConfig sets a configuration value at runtime
+func (cm *ConfigManager) SetConfig(key string, value interface{}) {
+	cm.configMutex.Lock()
+	defer cm.configMutex.Unlock()
+
+	// Convert value to string
+	var strValue string
+	switch v := value.(type) {
+	case string:
+		strValue = v
+	case bool:
+		strValue = strconv.FormatBool(v)
+	case int:
+		strValue = strconv.Itoa(v)
+	case int64:
+		strValue = strconv.FormatInt(v, 10)
+	case float64:
+		strValue = strconv.FormatFloat(v, 'f', -1, 64)
+	default:
+		strValue = fmt.Sprintf("%v", v)
+	}
+
+	cm.configs[key] = strValue
+}

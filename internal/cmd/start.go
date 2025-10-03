@@ -87,6 +87,20 @@ This will:
 		stats := peerManager.GetStats()
 		logger.Info(fmt.Sprintf("Node started with DHT Node ID: %s", stats["dht_node_id"]), "cli")
 
+		// Show relay mode status
+		if relayMode, ok := stats["relay_mode"].(bool); ok && relayMode {
+			logger.Info("Node is running in RELAY MODE", "cli")
+			fmt.Println("✓ Relay mode enabled - accepting relay connections from NAT peers")
+		} else {
+			// Check NAT type
+			if natType, ok := stats["nat_type"].(string); ok {
+				logger.Info(fmt.Sprintf("NAT Type: %s", natType), "cli")
+				if requiresRelay, ok := stats["requires_relay"].(bool); ok && requiresRelay {
+					fmt.Println("ℹ NAT type requires relay - will connect via relay peers")
+				}
+			}
+		}
+
 		topics := peerManager.GetTopics()
 		if len(topics) > 0 {
 			logger.Info(fmt.Sprintf("Subscribed to topics: %v", topics), "cli")

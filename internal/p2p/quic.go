@@ -35,6 +35,10 @@ type QUICPeer struct {
 	dbManager   *database.SQLiteManager
 	// DHT peer reference to get node ID
 	dhtPeer     *DHTPeer
+	// Relay peer reference for relay service info
+	relayPeer   *RelayPeer
+	// Callback for relay peer discovery
+	onRelayDiscovered func(*database.PeerMetadata)
 }
 
 func NewQUICPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*QUICPeer, error) {
@@ -60,10 +64,16 @@ func NewQUICPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*QUICP
 	}, nil
 }
 
-// SetDependencies sets the DHT peer and database manager references
-func (q *QUICPeer) SetDependencies(dhtPeer *DHTPeer, dbManager *database.SQLiteManager) {
+// SetDependencies sets the DHT peer, database manager, and relay peer references
+func (q *QUICPeer) SetDependencies(dhtPeer *DHTPeer, dbManager *database.SQLiteManager, relayPeer *RelayPeer) {
 	q.dhtPeer = dhtPeer
 	q.dbManager = dbManager
+	q.relayPeer = relayPeer
+}
+
+// SetRelayDiscoveryCallback sets a callback for when relay peers are discovered
+func (q *QUICPeer) SetRelayDiscoveryCallback(callback func(*database.PeerMetadata)) {
+	q.onRelayDiscovered = callback
 }
 
 func generateTLSConfig() (*tls.Config, error) {
@@ -277,6 +287,26 @@ func (q *QUICPeer) generateOurMetadata(nodeID, topic string) (*database.PeerMeta
 		},
 	}
 
+	// Add relay service information if this node is in relay mode
+	if q.relayPeer != nil && q.relayPeer.isRelayMode {
+		networkInfo.IsRelay = true
+		networkInfo.RelayEndpoint = fmt.Sprintf("%s:%d", externalIP, q.port)
+		networkInfo.RelayPricing = q.relayPeer.pricingPerGB
+		networkInfo.RelayCapacity = q.relayPeer.maxConnections
+
+		// Get reputation score from database if available
+		if q.dbManager != nil && q.dbManager.Relay != nil {
+			stats := q.dbManager.Relay.GetStats()
+			// Simple reputation calculation: starts at 0.5, increases with successful sessions
+			if activeSessions, ok := stats["active_sessions"].(int); ok {
+				networkInfo.ReputationScore = 0.5 + float64(activeSessions)*0.01
+				if networkInfo.ReputationScore > 1.0 {
+					networkInfo.ReputationScore = 1.0
+				}
+			}
+		}
+	}
+
 	// Create metadata for our node
 	metadata := &database.PeerMetadata{
 		NodeID:      nodeID,
@@ -323,6 +353,12 @@ func (q *QUICPeer) handleMetadataRequest(msg *QUICMessage, remoteAddr string) *Q
 			} else {
 				q.logger.Info(fmt.Sprintf("Successfully stored requester metadata from %s (Node ID: %s, Topic: %s)",
 					remoteAddr, requestData.MyMetadata.NodeID, requestData.MyMetadata.Topic), "quic")
+
+				// Notify relay discovery callback if this is a relay peer
+				if requestData.MyMetadata.NetworkInfo.IsRelay && q.onRelayDiscovered != nil {
+					q.logger.Debug(fmt.Sprintf("Discovered relay peer: %s", requestData.MyMetadata.NodeID), "quic")
+					q.onRelayDiscovered(requestData.MyMetadata)
+				}
 			}
 		}
 	}
@@ -627,6 +663,54 @@ func (q *QUICPeer) GetConnectionCount() int {
 	defer q.connMutex.RUnlock()
 
 	return len(q.connections)
+}
+
+// Ping sends a ping message to a peer and waits for pong response
+func (q *QUICPeer) Ping(addr string) error {
+	conn, err := q.ConnectToPeer(addr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %v", addr, err)
+	}
+
+	stream, err := conn.OpenStreamSync(q.ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open stream to %s: %v", addr, err)
+	}
+	defer stream.Close()
+
+	// Create ping message
+	pingMsg := CreatePing("relay-latency-check", "ping")
+	msgBytes, err := pingMsg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal ping message: %v", err)
+	}
+
+	// Send ping
+	_, err = stream.Write(msgBytes)
+	if err != nil {
+		return fmt.Errorf("failed to send ping to %s: %v", addr, err)
+	}
+
+	// Wait for pong response with timeout
+	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buffer := make([]byte, 4096)
+	n, err := stream.Read(buffer)
+	if err != nil {
+		return fmt.Errorf("failed to read pong from %s: %v", addr, err)
+	}
+
+	// Parse response
+	response, err := UnmarshalQUICMessage(buffer[:n])
+	if err != nil {
+		return fmt.Errorf("failed to parse pong from %s: %v", addr, err)
+	}
+
+	if response.Type != MessageTypePong {
+		return fmt.Errorf("expected pong but got %s from %s", response.Type, addr)
+	}
+
+	q.logger.Debug(fmt.Sprintf("Successfully pinged %s", addr), "quic")
+	return nil
 }
 
 func (q *QUICPeer) Stop() error {
