@@ -27,6 +27,15 @@ const (
 	MessageTypeServiceResponse  MessageType = "service_response"
 	MessageTypeServiceCatalogue MessageType = "service_catalogue"
 
+	// Relay system
+	MessageTypeRelayRegister    MessageType = "relay_register"
+	MessageTypeRelayAccept      MessageType = "relay_accept"
+	MessageTypeRelayReject      MessageType = "relay_reject"
+	MessageTypeRelayForward     MessageType = "relay_forward"
+	MessageTypeRelayData        MessageType = "relay_data"
+	MessageTypeRelayHolePunch   MessageType = "relay_hole_punch"
+	MessageTypeRelayDisconnect  MessageType = "relay_disconnect"
+
 	// Legacy support
 	MessageTypeEcho             MessageType = "echo"
 )
@@ -306,4 +315,154 @@ func (msg *QUICMessage) Validate() error {
 	}
 
 	return nil
+}
+
+// Relay message data structures
+
+// RelayRegisterData contains relay registration request
+type RelayRegisterData struct {
+	NodeID          string  `json:"node_id"`
+	Topic           string  `json:"topic"`
+	NATType         string  `json:"nat_type"`
+	PublicEndpoint  string  `json:"public_endpoint,omitempty"`
+	PrivateEndpoint string  `json:"private_endpoint,omitempty"`
+	RequiresRelay   bool    `json:"requires_relay"`
+}
+
+// RelayAcceptData contains relay registration acceptance
+type RelayAcceptData struct {
+	RelayNodeID     string  `json:"relay_node_id"`
+	ClientNodeID    string  `json:"client_node_id"`
+	SessionID       string  `json:"session_id"`
+	KeepAliveInterval int   `json:"keepalive_interval_seconds"`
+	PricingPerGB    float64 `json:"pricing_per_gb,omitempty"`
+}
+
+// RelayRejectData contains relay registration rejection
+type RelayRejectData struct {
+	RelayNodeID  string `json:"relay_node_id"`
+	ClientNodeID string `json:"client_node_id"`
+	Reason       string `json:"reason"`
+}
+
+// RelayForwardData contains relay message forwarding request
+type RelayForwardData struct {
+	SessionID      string `json:"session_id"`
+	SourceNodeID   string `json:"source_node_id"`
+	TargetNodeID   string `json:"target_node_id"`
+	MessageType    string `json:"message_type"` // "hole_punch", "data"
+	Payload        []byte `json:"payload"`
+	PayloadSize    int64  `json:"payload_size"`
+}
+
+// RelayDataData contains actual data being relayed
+type RelayDataData struct {
+	SessionID    string `json:"session_id"`
+	SourceNodeID string `json:"source_node_id"`
+	TargetNodeID string `json:"target_node_id"`
+	Data         []byte `json:"data"`
+	DataSize     int64  `json:"data_size"`
+	SequenceNum  int64  `json:"sequence_num,omitempty"`
+}
+
+// RelayHolePunchData contains hole punching coordination data
+type RelayHolePunchData struct {
+	SessionID       string `json:"session_id"`
+	InitiatorNodeID string `json:"initiator_node_id"`
+	TargetNodeID    string `json:"target_node_id"`
+	InitiatorEndpoint string `json:"initiator_endpoint"`
+	TargetEndpoint    string `json:"target_endpoint"`
+	CoordinationTime  time.Time `json:"coordination_time"`
+	Strategy        string `json:"strategy"` // "simultaneous", "sequential"
+}
+
+// RelayDisconnectData contains relay disconnection notification
+type RelayDisconnectData struct {
+	SessionID    string `json:"session_id"`
+	NodeID       string `json:"node_id"`
+	Reason       string `json:"reason"`
+	BytesIngress int64  `json:"bytes_ingress"`
+	BytesEgress  int64  `json:"bytes_egress"`
+	Duration     int64  `json:"duration_seconds"`
+}
+
+// CreateRelayRegister creates a relay registration request
+func CreateRelayRegister(nodeID, topic, natType, publicEndpoint, privateEndpoint string, requiresRelay bool) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelayRegister, &RelayRegisterData{
+		NodeID:          nodeID,
+		Topic:           topic,
+		NATType:         natType,
+		PublicEndpoint:  publicEndpoint,
+		PrivateEndpoint: privateEndpoint,
+		RequiresRelay:   requiresRelay,
+	})
+}
+
+// CreateRelayAccept creates a relay acceptance response
+func CreateRelayAccept(relayNodeID, clientNodeID, sessionID string, keepAliveInterval int, pricingPerGB float64) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelayAccept, &RelayAcceptData{
+		RelayNodeID:       relayNodeID,
+		ClientNodeID:      clientNodeID,
+		SessionID:         sessionID,
+		KeepAliveInterval: keepAliveInterval,
+		PricingPerGB:      pricingPerGB,
+	})
+}
+
+// CreateRelayReject creates a relay rejection response
+func CreateRelayReject(relayNodeID, clientNodeID, reason string) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelayReject, &RelayRejectData{
+		RelayNodeID:  relayNodeID,
+		ClientNodeID: clientNodeID,
+		Reason:       reason,
+	})
+}
+
+// CreateRelayForward creates a relay forward request
+func CreateRelayForward(sessionID, sourceNodeID, targetNodeID, messageType string, payload []byte) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelayForward, &RelayForwardData{
+		SessionID:    sessionID,
+		SourceNodeID: sourceNodeID,
+		TargetNodeID: targetNodeID,
+		MessageType:  messageType,
+		Payload:      payload,
+		PayloadSize:  int64(len(payload)),
+	})
+}
+
+// CreateRelayData creates a relay data message
+func CreateRelayData(sessionID, sourceNodeID, targetNodeID string, data []byte, sequenceNum int64) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelayData, &RelayDataData{
+		SessionID:    sessionID,
+		SourceNodeID: sourceNodeID,
+		TargetNodeID: targetNodeID,
+		Data:         data,
+		DataSize:     int64(len(data)),
+		SequenceNum:  sequenceNum,
+	})
+}
+
+// CreateRelayHolePunch creates a hole punching coordination message
+func CreateRelayHolePunch(sessionID, initiatorNodeID, targetNodeID, initiatorEndpoint, targetEndpoint, strategy string) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelayHolePunch, &RelayHolePunchData{
+		SessionID:         sessionID,
+		InitiatorNodeID:   initiatorNodeID,
+		TargetNodeID:      targetNodeID,
+		InitiatorEndpoint: initiatorEndpoint,
+		TargetEndpoint:    targetEndpoint,
+		CoordinationTime:  time.Now(),
+		Strategy:          strategy,
+	})
+}
+
+// CreateRelayDisconnect creates a relay disconnection message
+func CreateRelayDisconnect(sessionID, nodeID, reason string, bytesIngress, bytesEgress, duration int64) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelayDisconnect, &RelayDisconnectData{
+		SessionID:    sessionID,
+		NodeID:       nodeID,
+		Reason:       reason,
+		BytesIngress: bytesIngress,
+		BytesEgress:  bytesEgress,
+		Duration:     duration,
+	})
 }
