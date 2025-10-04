@@ -200,14 +200,14 @@ func (cm *ConfigManager) GetConfigInt64(key string, defaultValue int64, min int6
 
 // GetConfigFloat64 parses a float64 from config with validation
 func (cm *ConfigManager) GetConfigFloat64(key string, defaultValue float64, min float64, max float64) float64 {
-	valueStr := cm.GetConfigWithDefault(key, fmt.Sprintf("%.1f", defaultValue))
+	valueStr := cm.GetConfigWithDefault(key, fmt.Sprintf("%g", defaultValue))
 	value, err := strconv.ParseFloat(valueStr, 64)
 	if err != nil {
-		fmt.Printf("Invalid float '%s' for key '%s', using default %.1f\n", valueStr, key, defaultValue)
+		fmt.Printf("Invalid float '%s' for key '%s', using default %g\n", valueStr, key, defaultValue)
 		return defaultValue
 	}
 	if value < min || value > max {
-		fmt.Printf("Value %.1f for key '%s' out of range [%.1f, %.1f], using default %.1f\n", value, key, min, max, defaultValue)
+		fmt.Printf("Value %g for key '%s' out of range [%g, %g], using default %g\n", value, key, min, max, defaultValue)
 		return defaultValue
 	}
 	return value

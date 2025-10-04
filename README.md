@@ -66,6 +66,38 @@ go build -o remote-network ./cmd/main.go
 go tool pprof http://localhost:6060/debug/pprof/heap
 ```
 
+### Linux Server Configuration
+
+For optimal QUIC performance on Linux servers, configure UDP buffer sizes:
+
+```bash
+# Create sysctl configuration file
+sudo nano /etc/sysctl.d/90-quic-buffers.conf
+```
+
+Add the following content:
+
+```
+# QUIC UDP buffer sizes
+net.core.rmem_max=7500000
+net.core.rmem_default=2500000
+net.core.wmem_max=7500000
+net.core.wmem_default=2500000
+```
+
+Apply the configuration:
+
+```bash
+# Apply the new settings
+sudo sysctl -p /etc/sysctl.d/90-quic-buffers.conf
+
+# Or reload all sysctl configs
+sudo sysctl --system
+
+# Verify settings
+sysctl net.core.rmem_max net.core.wmem_max
+```
+
 ---
 
 ## Project Structure

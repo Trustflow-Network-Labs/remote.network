@@ -137,6 +137,11 @@ func (lm *LogsManager) Log(level string, message string, category string) {
 	lm.mutex.RLock()
 	defer lm.mutex.RUnlock()
 
+	// Check if file is closed - silently return if so (happens during shutdown)
+	if lm.File == nil {
+		return
+	}
+
 	// Create log entry with fields
 	entry := lm.logger.WithFields(log.Fields{
 		"category": category,
@@ -190,7 +195,9 @@ func (lm *LogsManager) Close() error {
 	defer lm.mutex.Unlock()
 
 	if lm.File != nil {
-		return lm.File.Close()
+		err := lm.File.Close()
+		lm.File = nil // Set to nil to prevent further writes
+		return err
 	}
 	return nil
 }
@@ -257,6 +264,7 @@ func (lm *LogsManager) rotateWithBackup(reason string) {
 	// Close current file
 	if lm.File != nil {
 		lm.File.Close()
+		lm.File = nil // Set to nil to prevent writes during rotation
 	}
 
 	// Rename current log to backup

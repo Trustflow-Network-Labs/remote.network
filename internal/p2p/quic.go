@@ -123,7 +123,7 @@ func (q *QUICPeer) Start() error {
 	q.logger.Info(fmt.Sprintf("Starting QUIC peer on %s", addr), "quic")
 
 	listener, err := quic.ListenAddr(addr, q.tlsConfig, &quic.Config{
-		MaxIdleTimeout: q.config.GetConfigDuration("quic_connection_timeout", 30*time.Second),
+		MaxIdleTimeout: q.config.GetConfigDuration("quic_connection_timeout", 5*time.Minute),
 	})
 
 	if err != nil {
@@ -198,8 +198,6 @@ func (q *QUICPeer) handleConnection(conn *quic.Conn, remoteAddr string) {
 }
 
 func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
-	defer stream.Close()
-
 	q.logger.Debug(fmt.Sprintf("Handling stream from %s", remoteAddr), "quic")
 
 	// Read message with buffer - don't wait for EOF
@@ -238,6 +236,11 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		response = q.handlePing(msg, remoteAddr)
 	case MessageTypeEcho:
 		response = q.handleEcho(msg, remoteAddr)
+	case MessageTypeRelayRegister:
+		response = q.handleRelayRegister(msg, remoteAddr)
+	case MessageTypeRelayData:
+		q.handleRelayData(msg, remoteAddr)
+		// Relay data is forwarded, no response to sender
 	default:
 		q.logger.Warn(fmt.Sprintf("Unknown message type %s from %s", msg.Type, remoteAddr), "quic")
 		return
@@ -288,11 +291,19 @@ func (q *QUICPeer) generateOurMetadata(nodeID, topic string) (*database.PeerMeta
 	}
 
 	// Add relay service information if this node is in relay mode
-	if q.relayPeer != nil && q.relayPeer.isRelayMode {
+	if q.relayPeer != nil && q.relayPeer.IsRelayMode() {
+		q.logger.Debug(fmt.Sprintf("Setting IsRelay=true in metadata for topic %s", topic), "quic")
 		networkInfo.IsRelay = true
 		networkInfo.RelayEndpoint = fmt.Sprintf("%s:%d", externalIP, q.port)
-		networkInfo.RelayPricing = q.relayPeer.pricingPerGB
-		networkInfo.RelayCapacity = q.relayPeer.maxConnections
+
+		// Get relay peer stats to populate pricing and capacity
+		relayStats := q.relayPeer.GetStats()
+		if pricing, ok := relayStats["pricing_per_gb"].(float64); ok {
+			networkInfo.RelayPricing = pricing
+		}
+		if capacity, ok := relayStats["max_connections"].(int); ok {
+			networkInfo.RelayCapacity = capacity
+		}
 
 		// Get reputation score from database if available
 		if q.dbManager != nil && q.dbManager.Relay != nil {
@@ -354,6 +365,10 @@ func (q *QUICPeer) handleMetadataRequest(msg *QUICMessage, remoteAddr string) *Q
 				q.logger.Info(fmt.Sprintf("Successfully stored requester metadata from %s (Node ID: %s, Topic: %s)",
 					remoteAddr, requestData.MyMetadata.NodeID, requestData.MyMetadata.Topic), "quic")
 
+				// Debug: log IsRelay status
+				q.logger.Debug(fmt.Sprintf("Metadata from %s: IsRelay=%v, callback=%v",
+					requestData.MyMetadata.NodeID, requestData.MyMetadata.NetworkInfo.IsRelay, q.onRelayDiscovered != nil), "quic")
+
 				// Notify relay discovery callback if this is a relay peer
 				if requestData.MyMetadata.NetworkInfo.IsRelay && q.onRelayDiscovered != nil {
 					q.logger.Debug(fmt.Sprintf("Discovered relay peer: %s", requestData.MyMetadata.NodeID), "quic")
@@ -410,7 +425,13 @@ func (q *QUICPeer) handlePing(msg *QUICMessage, remoteAddr string) *QUICMessage 
 		return nil
 	}
 
-	q.logger.Debug(fmt.Sprintf("Ping from %s: id=%s", remoteAddr, pingData.ID), "quic")
+	q.logger.Debug(fmt.Sprintf("Ping from %s: id=%s, message=%s", remoteAddr, pingData.ID, pingData.Message), "quic")
+
+	// Check if this is a relay session keepalive
+	if pingData.Message == "keepalive" && q.relayPeer != nil {
+		// ID should be the session ID
+		q.relayPeer.UpdateSessionKeepalive(pingData.ID)
+	}
 
 	// Calculate RTT
 	rtt := time.Since(pingData.Timestamp).Milliseconds()
@@ -546,6 +567,16 @@ func (q *QUICPeer) RequestPeerMetadata(peerAddr string, topic string) error {
 
 		q.logger.Info(fmt.Sprintf("Successfully stored metadata from peer %s (Node ID: %s, Topic: %s)",
 			peerAddr, responseData.Metadata.NodeID, responseData.Metadata.Topic), "quic")
+
+		// Debug: log IsRelay status
+		q.logger.Debug(fmt.Sprintf("Metadata from %s: IsRelay=%v, callback=%v",
+			responseData.Metadata.NodeID, responseData.Metadata.NetworkInfo.IsRelay, q.onRelayDiscovered != nil), "quic")
+
+		// Notify relay discovery callback if this is a relay peer
+		if responseData.Metadata.NetworkInfo.IsRelay && q.onRelayDiscovered != nil {
+			q.logger.Debug(fmt.Sprintf("Discovered relay peer: %s", responseData.Metadata.NodeID), "quic")
+			q.onRelayDiscovered(responseData.Metadata)
+		}
 	}
 
 	return nil
@@ -569,7 +600,7 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 	}
 
 	conn, err := quic.DialAddr(q.ctx, addr, tlsConfig, &quic.Config{
-		MaxIdleTimeout: q.config.GetConfigDuration("quic_connection_timeout", 30*time.Second),
+		MaxIdleTimeout: q.config.GetConfigDuration("quic_connection_timeout", 5*time.Minute),
 	})
 
 	if err != nil {
@@ -711,6 +742,42 @@ func (q *QUICPeer) Ping(addr string) error {
 
 	q.logger.Debug(fmt.Sprintf("Successfully pinged %s", addr), "quic")
 	return nil
+}
+
+// handleRelayRegister processes relay registration requests from NAT peers
+func (q *QUICPeer) handleRelayRegister(msg *QUICMessage, remoteAddr string) *QUICMessage {
+	// Only handle if we have a relay peer (we're in relay mode)
+	if q.relayPeer == nil {
+		q.logger.Warn(fmt.Sprintf("Received relay_register from %s but relay mode is not enabled", remoteAddr), "quic")
+		return CreateRelayReject("", "", "relay mode not enabled")
+	}
+
+	// Get connection for this remote address
+	q.connMutex.RLock()
+	conn, exists := q.connections[remoteAddr]
+	q.connMutex.RUnlock()
+
+	if !exists {
+		q.logger.Error(fmt.Sprintf("No connection found for %s during relay registration", remoteAddr), "quic")
+		return CreateRelayReject("", "", "no active connection")
+	}
+
+	// Delegate to relay peer for registration
+	return q.relayPeer.HandleRelayRegister(msg, conn, remoteAddr)
+}
+
+// handleRelayData processes relay data forwarding
+func (q *QUICPeer) handleRelayData(msg *QUICMessage, remoteAddr string) {
+	// Only handle if we have a relay peer (we're in relay mode)
+	if q.relayPeer == nil {
+		q.logger.Warn(fmt.Sprintf("Received relay_data from %s but relay mode is not enabled", remoteAddr), "quic")
+		return
+	}
+
+	// Delegate to relay peer - HandleRelayForward handles both relay_forward and relay_data
+	if err := q.relayPeer.HandleRelayForward(msg, remoteAddr); err != nil {
+		q.logger.Error(fmt.Sprintf("Failed to handle relay data from %s: %v", remoteAddr, err), "quic")
+	}
 }
 
 func (q *QUICPeer) Stop() error {

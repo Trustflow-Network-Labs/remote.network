@@ -6,7 +6,7 @@ dht_bootstrap_nodes = 159.65.253.245:30609, 167.86.116.185:30609, router.utorren
 # QUIC Configuration
 quic_port = 30906
 quic_listen_addr = 0.0.0.0
-quic_connection_timeout = 30s
+quic_connection_timeout = 5m
 quic_stream_timeout = 10s
 quic_max_connections = 100
 
@@ -68,7 +68,7 @@ relay_mode = false
 relay_auto_select = true
 relay_max_connections = 100
 relay_connection_keepalive = 30s
-relay_keepalive_interval = 30s
+relay_keepalive_interval = 20s
 relay_discovery_interval = 60s
 relay_pricing_per_gb = 0.001
 relay_free_coordination = true
@@ -83,4 +83,4 @@ relay_min_reputation = 0.3
 relay_max_pricing = 0.01
 relay_switch_threshold = 0.2
 relay_evaluation_interval = 5m
-relay_candidate_max_age = 10m
+relay_candidate_max_age = 30m

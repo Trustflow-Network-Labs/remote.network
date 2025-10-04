@@ -213,6 +213,22 @@ func (rdb *RelayDB) UpdateSessionTraffic(sessionID string, ingressBytes, egressB
 	return nil
 }
 
+// UpdateSessionKeepalive updates the last keepalive timestamp for a session
+func (rdb *RelayDB) UpdateSessionKeepalive(sessionID string) error {
+	query := `
+		UPDATE relay_sessions
+		SET last_keepalive = ?
+		WHERE session_id = ? AND status = 'active'
+	`
+
+	_, err := rdb.db.Exec(query, time.Now().Unix(), sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to update session keepalive: %v", err)
+	}
+
+	return nil
+}
+
 // CloseSession closes an active relay session
 func (rdb *RelayDB) CloseSession(sessionID string) error {
 	query := `

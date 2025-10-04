@@ -500,3 +500,25 @@ func (rp *RelayPeer) Stop() error {
 
 	return nil
 }
+
+// UpdateSessionKeepalive updates the last keepalive timestamp for a session
+func (rp *RelayPeer) UpdateSessionKeepalive(sessionID string) {
+	rp.sessionsMutex.RLock()
+	session, exists := rp.sessions[sessionID]
+	rp.sessionsMutex.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	session.mutex.Lock()
+	session.LastKeepalive = time.Now()
+	session.mutex.Unlock()
+
+	rp.logger.Debug(fmt.Sprintf("Updated keepalive for session %s (client: %s)", sessionID, session.ClientNodeID), "relay")
+
+	// Update database
+	if rp.dbManager != nil && rp.dbManager.Relay != nil {
+		rp.dbManager.Relay.UpdateSessionKeepalive(sessionID)
+	}
+}
