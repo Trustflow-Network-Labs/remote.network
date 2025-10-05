@@ -119,6 +119,11 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 		})
 	}
 
+	// Set up connection failure callback for peer reachability verification
+	quic.SetConnectionFailureCallback(func(addr string) {
+		pm.HandleConnectionFailure(addr)
+	})
+
 	// Set up peer discovery callback for QUIC metadata exchange
 	dht.SetPeerDiscoveredCallback(func(peerAddr string, topic string) {
 		if err := quic.RequestPeerMetadata(peerAddr, topic); err != nil {
@@ -199,6 +204,7 @@ func (pm *PeerManager) Start() error {
 	go pm.periodicAnnounce()
 	go pm.periodicDiscovery()
 	go pm.periodicMaintenance()
+	go pm.periodicPeerReachabilityCheck()
 
 	pm.running = true
 	pm.logger.Info("Peer Manager started successfully", "core")
@@ -570,4 +576,246 @@ func (pm *PeerManager) Stop() error {
 	pm.logger.Info("Peer Manager stopped", "core")
 
 	return nil
+}
+
+// periodicPeerReachabilityCheck periodically verifies peer reachability and removes unreachable peers
+func (pm *PeerManager) periodicPeerReachabilityCheck() {
+	// Check frequently (default 5 minutes) to find stale peers (older than 24h)
+	checkInterval := pm.config.GetConfigDuration("peer_reachability_check_interval", 5*time.Minute)
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			pm.logger.Info("Starting periodic peer reachability check...", "core")
+			pm.verifyAllPeerReachability()
+
+		case <-pm.ctx.Done():
+			pm.logger.Debug("Stopping peer reachability check", "core")
+			return
+		}
+	}
+}
+
+// verifyAllPeerReachability checks peers that haven't been seen recently and removes unreachable ones
+func (pm *PeerManager) verifyAllPeerReachability() {
+	pm.logger.Info("Verifying peer reachability for stale peers...", "core")
+
+	// Get all topics to iterate through peer metadata
+	pm.mutex.RLock()
+	topics := make([]string, 0, len(pm.topics))
+	for topic := range pm.topics {
+		topics = append(topics, topic)
+	}
+	pm.mutex.RUnlock()
+
+	// Get the age threshold - peers older than this need verification
+	maxAge := pm.config.GetConfigDuration("peer_metadata_max_age", 24*time.Hour)
+	cutoff := time.Now().Add(-maxAge)
+
+	reachableCount := 0
+	unreachableCount := 0
+	checkedPeers := 0
+	skippedPeers := 0
+
+	for _, topic := range topics {
+		// Get all peer metadata for this topic
+		allMetadata, err := pm.dbManager.PeerMetadata.GetPeersByTopic(topic)
+		if err != nil {
+			pm.logger.Error(fmt.Sprintf("Failed to get peer metadata for topic %s: %v", topic, err), "core")
+			continue
+		}
+
+		for _, metadata := range allMetadata {
+			// Only verify peers that are older than the cutoff (1 day by default)
+			if metadata.LastSeen.After(cutoff) {
+				// Peer is fresh, skip verification
+				skippedPeers++
+				continue
+			}
+
+			checkedPeers++
+			pm.logger.Debug(fmt.Sprintf("Peer %s is stale (last seen: %v ago), verifying reachability",
+				metadata.NodeID, time.Since(metadata.LastSeen)), "core")
+
+			reachable := pm.verifyPeerReachability(metadata)
+			if reachable {
+				reachableCount++
+				// Update LastSeen to prevent re-checking for another day
+				if err := pm.dbManager.PeerMetadata.UpdateLastSeen(metadata.NodeID, topic, "reachability-check"); err != nil {
+					pm.logger.Error(fmt.Sprintf("Failed to update LastSeen for peer %s: %v", metadata.NodeID, err), "core")
+				} else {
+					pm.logger.Debug(fmt.Sprintf("Peer %s is reachable, updated LastSeen", metadata.NodeID), "core")
+				}
+			} else {
+				unreachableCount++
+				// Remove unreachable peer
+				if err := pm.dbManager.PeerMetadata.DeletePeerMetadata(metadata.NodeID, topic); err != nil {
+					pm.logger.Error(fmt.Sprintf("Failed to delete unreachable peer %s: %v", metadata.NodeID, err), "core")
+				} else {
+					endpoint := fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, metadata.NetworkInfo.PublicPort)
+					pm.logger.Info(fmt.Sprintf("Removed unreachable peer: %s (endpoint: %s, last seen: %v ago)",
+						metadata.NodeID, endpoint, time.Since(metadata.LastSeen)), "core")
+				}
+			}
+		}
+	}
+
+	pm.logger.Info(fmt.Sprintf("Peer reachability check complete: %d peers checked, %d still reachable (LastSeen updated), %d removed, %d skipped (fresh)",
+		checkedPeers, reachableCount, unreachableCount, skippedPeers), "core")
+}
+
+// verifyPeerReachability checks if a specific peer is reachable
+func (pm *PeerManager) verifyPeerReachability(metadata *database.PeerMetadata) bool {
+	// Case 1: Regular peer or relay peer (not using relay) - direct ping
+	if !metadata.NetworkInfo.UsingRelay {
+		endpoint := fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, metadata.NetworkInfo.PublicPort)
+		if metadata.NetworkInfo.PublicIP == "" || metadata.NetworkInfo.PublicPort == 0 {
+			pm.logger.Debug(fmt.Sprintf("Peer %s has no public endpoint, marking unreachable", metadata.NodeID), "core")
+			return false
+		}
+
+		err := pm.quic.Ping(endpoint)
+		if err != nil {
+			pm.logger.Debug(fmt.Sprintf("Direct ping to peer %s (%s) failed: %v", metadata.NodeID, endpoint, err), "core")
+			return false
+		}
+
+		pm.logger.Debug(fmt.Sprintf("Peer %s is reachable via direct ping", metadata.NodeID), "core")
+		return true
+	}
+
+	// Case 2: NAT peer using relay - verify through its relay
+	relayNodeID := metadata.NetworkInfo.ConnectedRelay
+	if relayNodeID == "" {
+		pm.logger.Debug(fmt.Sprintf("NAT peer %s has no relay info, marking unreachable", metadata.NodeID), "core")
+		return false
+	}
+
+	// Get relay peer metadata - try to find it in any topic
+	var relayMetadata *database.PeerMetadata
+	pm.mutex.RLock()
+	topics := make([]string, 0, len(pm.topics))
+	for topic := range pm.topics {
+		topics = append(topics, topic)
+	}
+	pm.mutex.RUnlock()
+
+	for _, topic := range topics {
+		rm, err := pm.dbManager.PeerMetadata.GetPeerMetadata(relayNodeID, topic)
+		if err == nil {
+			relayMetadata = rm
+			break
+		}
+	}
+
+	if relayMetadata == nil {
+		pm.logger.Debug(fmt.Sprintf("NAT peer %s relay %s not found in database, marking unreachable", metadata.NodeID, relayNodeID), "core")
+		return false
+	}
+
+	// First verify relay is reachable
+	relayEndpoint := relayMetadata.NetworkInfo.RelayEndpoint
+	if relayEndpoint == "" {
+		relayEndpoint = fmt.Sprintf("%s:%d", relayMetadata.NetworkInfo.PublicIP, relayMetadata.NetworkInfo.PublicPort)
+	}
+	if relayEndpoint == "" {
+		pm.logger.Debug(fmt.Sprintf("Relay %s has no endpoint, NAT peer %s marked unreachable", relayNodeID, metadata.NodeID), "core")
+		return false
+	}
+
+	err := pm.quic.Ping(relayEndpoint)
+	if err != nil {
+		pm.logger.Debug(fmt.Sprintf("Relay %s unreachable, NAT peer %s marked unreachable", relayNodeID, metadata.NodeID), "core")
+		// Also remove the unreachable relay from all topics
+		for _, topic := range topics {
+			if err := pm.dbManager.PeerMetadata.DeletePeerMetadata(relayNodeID, topic); err != nil {
+				pm.logger.Debug(fmt.Sprintf("Failed to delete unreachable relay %s from topic %s: %v", relayNodeID, topic, err), "core")
+			}
+		}
+		pm.logger.Info(fmt.Sprintf("Removed unreachable relay: %s", relayNodeID), "core")
+		return false
+	}
+
+	// Query relay to verify NAT peer has active session
+	hasActiveSession, err := pm.quic.QueryRelayForSession(relayEndpoint, metadata.NodeID, pm.dht.NodeID())
+	if err != nil {
+		pm.logger.Debug(fmt.Sprintf("Failed to query relay %s for NAT peer %s session: %v", relayNodeID, metadata.NodeID, err), "core")
+		// If query fails but relay is reachable, consider it a communication error, not peer unreachability
+		// Don't remove the peer - it will be checked again next cycle
+		return true
+	}
+
+	if !hasActiveSession {
+		pm.logger.Debug(fmt.Sprintf("NAT peer %s has no active session on relay %s", metadata.NodeID, relayNodeID), "core")
+		return false
+	}
+
+	pm.logger.Debug(fmt.Sprintf("NAT peer %s has active session on relay %s", metadata.NodeID, relayNodeID), "core")
+	return true
+}
+
+// HandleConnectionFailure handles a connection failure to an address by looking up the peer and verifying reachability
+func (pm *PeerManager) HandleConnectionFailure(addr string) {
+	// Parse address to get IP and port
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		pm.logger.Debug(fmt.Sprintf("Failed to parse address %s: %v", addr, err), "core")
+		return
+	}
+
+	port := 0
+	fmt.Sscanf(portStr, "%d", &port)
+
+	// Find which peer has this address
+	pm.mutex.RLock()
+	topics := make([]string, 0, len(pm.topics))
+	for topic := range pm.topics {
+		topics = append(topics, topic)
+	}
+	pm.mutex.RUnlock()
+
+	for _, topic := range topics {
+		allMetadata, err := pm.dbManager.PeerMetadata.GetPeersByTopic(topic)
+		if err != nil {
+			continue
+		}
+
+		for _, metadata := range allMetadata {
+			// Check if this peer matches the failed address
+			if metadata.NetworkInfo.PublicIP == host && metadata.NetworkInfo.PublicPort == port {
+				pm.logger.Debug(fmt.Sprintf("Connection failure to %s matched peer %s in topic %s", addr, metadata.NodeID, topic), "core")
+				pm.VerifyPeerReachabilityOnFailure(metadata.NodeID, topic)
+				return
+			}
+		}
+	}
+
+	pm.logger.Debug(fmt.Sprintf("Connection failure to %s but no matching peer found in database", addr), "core")
+}
+
+// VerifyPeerReachabilityOnFailure verifies and cleans up peer on connection failure
+// This is called when a connection attempt to a peer fails
+func (pm *PeerManager) VerifyPeerReachabilityOnFailure(nodeID string, topic string) {
+	metadata, err := pm.dbManager.PeerMetadata.GetPeerMetadata(nodeID, topic)
+	if err != nil {
+		pm.logger.Debug(fmt.Sprintf("Peer %s not in database for topic %s, skipping reachability check", nodeID, topic), "core")
+		return
+	}
+
+	pm.logger.Debug(fmt.Sprintf("Connection to peer %s failed, verifying reachability", nodeID), "core")
+
+	reachable := pm.verifyPeerReachability(metadata)
+	if reachable {
+		pm.logger.Debug(fmt.Sprintf("Peer %s is still reachable despite connection failure, keeping it", nodeID), "core")
+		return
+	}
+
+	// Peer is unreachable, remove it
+	if err := pm.dbManager.PeerMetadata.DeletePeerMetadata(nodeID, topic); err != nil {
+		pm.logger.Error(fmt.Sprintf("Failed to delete unreachable peer %s: %v", nodeID, err), "core")
+	} else {
+		pm.logger.Info(fmt.Sprintf("Removed unreachable peer after connection failure: %s (topic: %s)", nodeID, topic), "core")
+	}
 }

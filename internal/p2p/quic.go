@@ -39,6 +39,8 @@ type QUICPeer struct {
 	relayPeer   *RelayPeer
 	// Callback for relay peer discovery
 	onRelayDiscovered func(*database.PeerMetadata)
+	// Callback for connection failures
+	onConnectionFailure func(string)
 }
 
 func NewQUICPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*QUICPeer, error) {
@@ -74,6 +76,11 @@ func (q *QUICPeer) SetDependencies(dhtPeer *DHTPeer, dbManager *database.SQLiteM
 // SetRelayDiscoveryCallback sets a callback for when relay peers are discovered
 func (q *QUICPeer) SetRelayDiscoveryCallback(callback func(*database.PeerMetadata)) {
 	q.onRelayDiscovered = callback
+}
+
+// SetConnectionFailureCallback sets a callback for when connections to peers fail
+func (q *QUICPeer) SetConnectionFailureCallback(callback func(string)) {
+	q.onConnectionFailure = callback
 }
 
 func generateTLSConfig() (*tls.Config, error) {
@@ -241,6 +248,8 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 	case MessageTypeRelayData:
 		q.handleRelayData(msg, remoteAddr)
 		// Relay data is forwarded, no response to sender
+	case MessageTypeRelaySessionQuery:
+		response = q.handleRelaySessionQuery(msg, remoteAddr)
 	default:
 		q.logger.Warn(fmt.Sprintf("Unknown message type %s from %s", msg.Type, remoteAddr), "quic")
 		return
@@ -604,6 +613,10 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 	})
 
 	if err != nil {
+		// Notify about connection failure if callback is set
+		if q.onConnectionFailure != nil {
+			go q.onConnectionFailure(addr)
+		}
 		return nil, fmt.Errorf("failed to connect to peer %s: %v", addr, err)
 	}
 
@@ -744,6 +757,62 @@ func (q *QUICPeer) Ping(addr string) error {
 	return nil
 }
 
+// QueryRelayForSession queries a relay to check if a NAT peer has an active session
+func (q *QUICPeer) QueryRelayForSession(relayAddr string, clientNodeID string, queryNodeID string) (bool, error) {
+	conn, err := q.ConnectToPeer(relayAddr)
+	if err != nil {
+		return false, fmt.Errorf("failed to connect to relay %s: %v", relayAddr, err)
+	}
+
+	stream, err := conn.OpenStreamSync(q.ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to open stream to relay %s: %v", relayAddr, err)
+	}
+	defer stream.Close()
+
+	// Create session query message
+	queryMsg := CreateRelaySessionQuery(clientNodeID, queryNodeID)
+	msgBytes, err := queryMsg.Marshal()
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal session query: %v", err)
+	}
+
+	// Send query
+	_, err = stream.Write(msgBytes)
+	if err != nil {
+		return false, fmt.Errorf("failed to send session query to %s: %v", relayAddr, err)
+	}
+
+	// Wait for status response with timeout
+	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buffer := make([]byte, 4096)
+	n, err := stream.Read(buffer)
+	if err != nil {
+		return false, fmt.Errorf("failed to read session status from %s: %v", relayAddr, err)
+	}
+
+	// Parse response
+	response, err := UnmarshalQUICMessage(buffer[:n])
+	if err != nil {
+		return false, fmt.Errorf("failed to parse session status from %s: %v", relayAddr, err)
+	}
+
+	if response.Type != MessageTypeRelaySessionStatus {
+		return false, fmt.Errorf("expected relay_session_status but got %s from %s", response.Type, relayAddr)
+	}
+
+	// Extract status data
+	var statusData RelaySessionStatusData
+	if err := response.GetDataAs(&statusData); err != nil {
+		return false, fmt.Errorf("failed to parse session status data: %v", err)
+	}
+
+	q.logger.Debug(fmt.Sprintf("Relay session query for %s: hasSession=%v, sessionActive=%v",
+		clientNodeID, statusData.HasSession, statusData.SessionActive), "quic")
+
+	return statusData.HasSession && statusData.SessionActive, nil
+}
+
 // handleRelayRegister processes relay registration requests from NAT peers
 func (q *QUICPeer) handleRelayRegister(msg *QUICMessage, remoteAddr string) *QUICMessage {
 	// Only handle if we have a relay peer (we're in relay mode)
@@ -778,6 +847,19 @@ func (q *QUICPeer) handleRelayData(msg *QUICMessage, remoteAddr string) {
 	if err := q.relayPeer.HandleRelayForward(msg, remoteAddr); err != nil {
 		q.logger.Error(fmt.Sprintf("Failed to handle relay data from %s: %v", remoteAddr, err), "quic")
 	}
+}
+
+// handleRelaySessionQuery processes relay session query requests
+func (q *QUICPeer) handleRelaySessionQuery(msg *QUICMessage, remoteAddr string) *QUICMessage {
+	// Only handle if we have a relay peer (we're in relay mode)
+	if q.relayPeer == nil {
+		q.logger.Warn(fmt.Sprintf("Received relay_session_query from %s but relay mode is not enabled", remoteAddr), "quic")
+		// Return negative response
+		return CreateRelaySessionStatus("", false, "", false, 0)
+	}
+
+	// Delegate to relay peer
+	return q.relayPeer.HandleRelaySessionQuery(msg, remoteAddr)
 }
 
 func (q *QUICPeer) Stop() error {

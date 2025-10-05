@@ -48,16 +48,16 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 	selector := NewRelaySelector(config, logger, dbManager, quicPeer)
 
 	return &RelayManager{
-		config:           config,
-		logger:           logger,
-		dbManager:        dbManager,
-		quicPeer:         quicPeer,
-		dhtPeer:          dhtPeer,
-		selector:         selector,
-		ctx:              ctx,
-		cancel:           cancel,
-		keepaliveStop:    make(chan struct{}),
-		evaluationStop:   make(chan struct{}),
+		config:         config,
+		logger:         logger,
+		dbManager:      dbManager,
+		quicPeer:       quicPeer,
+		dhtPeer:        dhtPeer,
+		selector:       selector,
+		ctx:            ctx,
+		cancel:         cancel,
+		keepaliveStop:  make(chan struct{}),
+		evaluationStop: make(chan struct{}),
 	}
 }
 
@@ -423,10 +423,6 @@ func (rm *RelayManager) periodicRelayEvaluation() {
 		select {
 		case <-rm.evaluationTicker.C:
 			rm.logger.Debug("Performing periodic relay evaluation...", "relay-manager")
-
-			// Cleanup stale candidates
-			maxAge := rm.config.GetConfigDuration("relay_candidate_max_age", 30*time.Minute)
-			rm.selector.CleanupStaleCandidates(maxAge)
 
 			// Re-evaluate and potentially switch relay
 			if err := rm.SelectAndConnectRelay(); err != nil {

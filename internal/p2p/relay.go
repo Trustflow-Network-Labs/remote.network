@@ -380,6 +380,49 @@ func (rp *RelayPeer) HandleRelayDisconnect(msg *QUICMessage, remoteAddr string) 
 	return nil
 }
 
+// HandleRelaySessionQuery handles session status queries
+func (rp *RelayPeer) HandleRelaySessionQuery(msg *QUICMessage, remoteAddr string) *QUICMessage {
+	var data RelaySessionQueryData
+	if err := msg.GetDataAs(&data); err != nil {
+		rp.logger.Error(fmt.Sprintf("Failed to parse relay session query: %v", err), "relay")
+		// Return negative response on parse error
+		return CreateRelaySessionStatus(data.ClientNodeID, false, "", false, 0)
+	}
+
+	rp.logger.Debug(fmt.Sprintf("Session query for client %s from %s", data.ClientNodeID, data.QueryNodeID), "relay")
+
+	// Check if client has an active session
+	hasSession, sessionID, err := rp.dbManager.Relay.HasActiveSession(data.ClientNodeID)
+	if err != nil {
+		rp.logger.Error(fmt.Sprintf("Failed to query session for %s: %v", data.ClientNodeID, err), "relay")
+		return CreateRelaySessionStatus(data.ClientNodeID, false, "", false, 0)
+	}
+
+	if !hasSession {
+		rp.logger.Debug(fmt.Sprintf("Client %s has no active session", data.ClientNodeID), "relay")
+		return CreateRelaySessionStatus(data.ClientNodeID, false, "", false, 0)
+	}
+
+	// Check session in memory for real-time status
+	rp.sessionsMutex.RLock()
+	session, exists := rp.sessions[sessionID]
+	rp.sessionsMutex.RUnlock()
+
+	if !exists {
+		// Session in DB but not in memory - might be stale
+		rp.logger.Debug(fmt.Sprintf("Client %s session %s found in DB but not in memory", data.ClientNodeID, sessionID), "relay")
+		return CreateRelaySessionStatus(data.ClientNodeID, true, sessionID, false, 0)
+	}
+
+	// Session exists and is active
+	session.mutex.RLock()
+	lastKeepalive := session.LastKeepalive.Unix()
+	session.mutex.RUnlock()
+
+	rp.logger.Debug(fmt.Sprintf("Client %s has active session %s", data.ClientNodeID, sessionID), "relay")
+	return CreateRelaySessionStatus(data.ClientNodeID, true, sessionID, true, lastKeepalive)
+}
+
 // monitorSession monitors a relay session for keepalive
 func (rp *RelayPeer) monitorSession(session *RelaySession) {
 	ticker := time.NewTicker(session.KeepaliveInterval)

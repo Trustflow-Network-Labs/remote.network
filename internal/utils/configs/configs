@@ -15,6 +15,10 @@ peer_discovery_interval = 30s
 peer_maintenance_interval = 5m
 max_peers_per_topic = 50
 
+# Peer Metadata Aging and Reachability
+peer_metadata_max_age = 24h
+peer_reachability_check_interval = 5m
+
 [topics]
 # Topics to subscribe to (comma-separated)
 subscribe_topics = remote-network-mesh
@@ -84,3 +88,4 @@ relay_max_pricing = 0.01
 relay_switch_threshold = 0.2
 relay_evaluation_interval = 5m
 relay_candidate_max_age = 30m
+relay_metadata_refresh_interval = 15m

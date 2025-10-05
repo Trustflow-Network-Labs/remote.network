@@ -28,13 +28,15 @@ const (
 	MessageTypeServiceCatalogue MessageType = "service_catalogue"
 
 	// Relay system
-	MessageTypeRelayRegister    MessageType = "relay_register"
-	MessageTypeRelayAccept      MessageType = "relay_accept"
-	MessageTypeRelayReject      MessageType = "relay_reject"
-	MessageTypeRelayForward     MessageType = "relay_forward"
-	MessageTypeRelayData        MessageType = "relay_data"
-	MessageTypeRelayHolePunch   MessageType = "relay_hole_punch"
-	MessageTypeRelayDisconnect  MessageType = "relay_disconnect"
+	MessageTypeRelayRegister      MessageType = "relay_register"
+	MessageTypeRelayAccept        MessageType = "relay_accept"
+	MessageTypeRelayReject        MessageType = "relay_reject"
+	MessageTypeRelayForward       MessageType = "relay_forward"
+	MessageTypeRelayData          MessageType = "relay_data"
+	MessageTypeRelayHolePunch     MessageType = "relay_hole_punch"
+	MessageTypeRelayDisconnect    MessageType = "relay_disconnect"
+	MessageTypeRelaySessionQuery  MessageType = "relay_session_query"
+	MessageTypeRelaySessionStatus MessageType = "relay_session_status"
 
 	// Legacy support
 	MessageTypeEcho             MessageType = "echo"
@@ -386,6 +388,21 @@ type RelayDisconnectData struct {
 	Duration     int64  `json:"duration_seconds"`
 }
 
+// RelaySessionQueryData contains relay session query request
+type RelaySessionQueryData struct {
+	ClientNodeID string `json:"client_node_id"` // NAT peer we're asking about
+	QueryNodeID  string `json:"query_node_id"`  // Who is asking (for logging)
+}
+
+// RelaySessionStatusData contains relay session status response
+type RelaySessionStatusData struct {
+	ClientNodeID  string `json:"client_node_id"`
+	HasSession    bool   `json:"has_session"`
+	SessionID     string `json:"session_id,omitempty"`
+	SessionActive bool   `json:"session_active"`
+	LastKeepalive int64  `json:"last_keepalive,omitempty"` // Unix timestamp
+}
+
 // CreateRelayRegister creates a relay registration request
 func CreateRelayRegister(nodeID, topic, natType, publicEndpoint, privateEndpoint string, requiresRelay bool) *QUICMessage {
 	return NewQUICMessage(MessageTypeRelayRegister, &RelayRegisterData{
@@ -464,5 +481,24 @@ func CreateRelayDisconnect(sessionID, nodeID, reason string, bytesIngress, bytes
 		BytesIngress: bytesIngress,
 		BytesEgress:  bytesEgress,
 		Duration:     duration,
+	})
+}
+
+// CreateRelaySessionQuery creates a relay session query request
+func CreateRelaySessionQuery(clientNodeID, queryNodeID string) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelaySessionQuery, &RelaySessionQueryData{
+		ClientNodeID: clientNodeID,
+		QueryNodeID:  queryNodeID,
+	})
+}
+
+// CreateRelaySessionStatus creates a relay session status response
+func CreateRelaySessionStatus(clientNodeID string, hasSession bool, sessionID string, sessionActive bool, lastKeepalive int64) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelaySessionStatus, &RelaySessionStatusData{
+		ClientNodeID:  clientNodeID,
+		HasSession:    hasSession,
+		SessionID:     sessionID,
+		SessionActive: sessionActive,
+		LastKeepalive: lastKeepalive,
 	})
 }

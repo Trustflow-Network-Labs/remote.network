@@ -291,6 +291,29 @@ func (rdb *RelayDB) GetSessionStats(sessionID string) (map[string]interface{}, e
 	return stats, nil
 }
 
+// HasActiveSession checks if a client node has an active session
+func (rdb *RelayDB) HasActiveSession(clientNodeID string) (bool, string, error) {
+	query := `
+		SELECT session_id, relay_node_id
+		FROM relay_sessions
+		WHERE client_node_id = ? AND status = 'active'
+		ORDER BY start_time DESC
+		LIMIT 1
+	`
+
+	var sessionID, relayNodeID string
+	err := rdb.db.QueryRow(query, clientNodeID).Scan(&sessionID, &relayNodeID)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, "", nil
+		}
+		return false, "", fmt.Errorf("failed to check active session: %v", err)
+	}
+
+	return true, sessionID, nil
+}
+
 // UpsertRelayService creates or updates relay service information
 func (rdb *RelayDB) UpsertRelayService(relayNodeID, publicIP string, publicPort int, pricingPerGB float64) error {
 	query := `
