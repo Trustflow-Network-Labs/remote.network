@@ -1,0 +1,119 @@
+@startuml system-architecture
+!define RECTANGLE class
+
+skinparam componentStyle rectangle
+
+title System Architecture - Peer Management & NAT Traversal
+
+package "Core Layer" {
+    [PeerManager] as PM
+    note right of PM
+        - Orchestrates all P2P operations
+        - Manages peer lifecycle
+        - Coordinates DHT & QUIC
+        - Handles callbacks
+    end note
+}
+
+package "P2P Layer" {
+    [DHTPeer] as DHT
+    [QUICPeer] as QUIC
+    [RelayManager] as RM
+    [RelaySelector] as RS
+    [RelayPeer] as RP
+    [NATDetector] as NAT
+    [NATTopologyManager] as NTM
+    [RelayTrafficMonitor] as RTM
+
+    note right of DHT
+        - Peer discovery via DHT
+        - Topic announcements
+        - Bootstrap management
+        - Routing table
+    end note
+
+    note right of QUIC
+        - QUIC connections
+        - Message handling
+        - Ping/Pong
+        - Relay session queries
+    end note
+
+    note right of RM
+        - For NAT peers
+        - Selects best relay
+        - Maintains connection
+        - Handles failover
+    end note
+
+    note right of RP
+        - For relay nodes
+        - Handles registrations
+        - Forwards traffic
+        - Session management
+    end note
+}
+
+package "Database Layer" {
+    [SQLiteManager] as SQL
+    [PeerMetadataDB] as PMD
+    [RelayDB] as RDB
+
+    note right of PMD
+        - Stores peer metadata
+        - Topics, endpoints
+        - LastSeen tracking
+        - Network info
+    end note
+
+    note right of RDB
+        - Relay sessions
+        - Traffic logs
+        - Billing records
+        - Service info
+    end note
+}
+
+package "Utils Layer" {
+    [ConfigManager] as CFG
+    [LogsManager] as LOG
+}
+
+' Core relationships
+PM --> DHT : uses
+PM --> QUIC : uses
+PM --> RM : manages
+PM --> RP : manages
+PM --> NAT : uses
+PM --> NTM : uses
+PM --> RTM : monitors
+PM --> SQL : persists to
+
+' P2P layer relationships
+DHT ..> QUIC : triggers metadata\nrequest
+QUIC ..> DHT : uses NodeID
+RM --> RS : uses
+RM --> QUIC : sends messages
+RP --> RDB : persists
+QUIC --> RP : delegates relay\nmessages
+
+' Database relationships
+SQL *-- PMD
+SQL *-- RDB
+PM --> PMD : reads/writes
+PM --> RDB : queries
+
+' Utils relationships
+PM --> CFG : configuration
+PM --> LOG : logging
+DHT --> CFG
+DHT --> LOG
+QUIC --> CFG
+QUIC --> LOG
+
+' Callbacks (dashed lines)
+QUIC .up.> PM : onConnectionFailure\ncallback
+QUIC .up.> PM : onRelayDiscovered\ncallback
+DHT .up.> PM : onPeerDiscovered\ncallback
+
+@enduml

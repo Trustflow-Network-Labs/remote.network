@@ -1,0 +1,146 @@
+@startuml peer-lifecycle-state-machine
+title Peer Lifecycle State Machine
+
+[*] --> Discovered : DHT discovers peer
+
+state Discovered {
+    [*] --> MetadataRequested
+    MetadataRequested : Send metadata request
+    MetadataRequested --> MetadataReceived : Response received
+    MetadataReceived : Parse and validate
+}
+
+Discovered --> Fresh : Metadata stored\nLastSeen = now
+
+state Fresh {
+    Fresh : LastSeen < 24h
+    Fresh : No verification needed
+}
+
+Fresh --> Stale : Time passes\nLastSeen > 24h
+
+state Stale {
+    Stale : LastSeen > 24h
+    Stale : Needs verification
+}
+
+Stale --> Verifying : Periodic check\nevery 5 minutes
+
+state Verifying {
+    [*] --> CheckingType
+    CheckingType : Is NAT peer?
+
+    state "Public Peer" as Public {
+        Public : Send QUIC Ping
+        Public --> PingSuccess : Pong received
+        Public --> PingFailed : No response
+    }
+
+    state "NAT Peer" as NATPeer {
+        NATPeer : Get relay info
+        NATPeer --> RelayPing : Ping relay
+
+        state RelayPing {
+            RelayPing --> RelayReachable : Relay responds
+            RelayPing --> RelayUnreachable : Relay timeout
+        }
+
+        RelayReachable --> SessionQuery : Query session
+
+        state SessionQuery {
+            SessionQuery --> SessionActive : Active session\nwith keepalive
+            SessionQuery --> SessionInactive : No session or\nstale keepalive
+        }
+    }
+
+    CheckingType --> Public : Public peer
+    CheckingType --> NATPeer : NAT peer
+
+    PingSuccess --> VerifiedReachable
+    SessionActive --> VerifiedReachable
+
+    PingFailed --> VerifiedUnreachable
+    SessionInactive --> VerifiedUnreachable
+    RelayUnreachable --> VerifiedUnreachable
+}
+
+Verifying --> Fresh : VerifiedReachable\nUpdate LastSeen = now
+
+Verifying --> [*] : VerifiedUnreachable\nDelete from database
+
+state ConnectionAttempt {
+    ConnectionAttempt : Application tries\nto connect
+}
+
+Fresh --> ConnectionAttempt : SendMessage(addr)
+Stale --> ConnectionAttempt : SendMessage(addr)
+
+ConnectionAttempt --> Fresh : Connection\nsucceeds
+
+ConnectionAttempt --> FailureVerifying : Connection\nfails
+
+state FailureVerifying {
+    FailureVerifying : Lookup peer by address
+    FailureVerifying --> FailureCheck : Found in DB
+    FailureVerifying --> [*] : Not found\n(might be relay)
+
+    state FailureCheck {
+        FailureCheck : Run same verification\nas periodic check
+        FailureCheck --> StillReachable : Ping/session OK
+        FailureCheck --> ConfirmedDead : Unreachable
+    }
+}
+
+FailureVerifying --> Fresh : StillReachable\nKeep peer
+
+FailureVerifying --> [*] : ConfirmedDead\nDelete from database
+
+state "Relay Peer Discovery" as RelayDiscovery {
+    RelayDiscovery : NetworkInfo.IsRelay = true
+}
+
+Discovered --> RelayDiscovery : Metadata shows\nrelay capability
+
+RelayDiscovery --> RelayCandidate : Add to relay\ncandidate pool
+
+state RelayCandidate {
+    RelayCandidate : Available for NAT\npeer connections
+    RelayCandidate : Latency measured
+    RelayCandidate : Scored by:\n- Latency (50%)
+    RelayCandidate : - Reputation (30%)
+    RelayCandidate : - Pricing (20%)
+}
+
+RelayCandidate --> Fresh : Also tracked as\nregular peer
+
+note right of Fresh
+    Peers transition between states:
+    - Fresh (< 24h old)
+    - Stale (> 24h old)
+    - Verifying (being checked)
+    - Deleted (unreachable)
+
+    Events that trigger verification:
+    1. Periodic check (every 5 min)
+    2. Connection failure
+
+    LastSeen timestamp:
+    - Set on discovery
+    - Updated on successful verification
+    - Used to determine staleness
+end note
+
+note left of Verifying
+    For Public Peers:
+    - Direct QUIC ping
+    - 5 second timeout
+
+    For NAT Peers:
+    1. Ping relay peer
+    2. Query relay for session
+    3. Check session active + keepalive
+    4. If relay unreachable:
+       Remove both relay and NAT peer
+end note
+
+@enduml

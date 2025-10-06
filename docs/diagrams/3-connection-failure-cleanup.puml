@@ -1,0 +1,92 @@
+@startuml connection-failure-cleanup
+title Connection Failure Based Cleanup
+
+participant "Application" as APP
+participant "QUICPeer" as QUIC
+participant "PeerManager" as PM
+participant "Database" as DB
+participant "TargetPeer" as TP
+
+== Connection Attempt ==
+APP -> QUIC: SendMessage(addr, message)
+QUIC -> QUIC: ConnectToPeer(addr)
+
+QUIC -> TP: QUIC DialAddr()
+note right: Attempt connection\nto 192.168.1.100:30906
+
+alt Connection succeeds
+    TP --> QUIC: Connection established
+    QUIC -> QUIC: Store connection
+    QUIC --> APP: Success
+    note right: No cleanup needed
+
+else Connection fails
+    TP --> QUIC: Connection failed
+    note right: Peer unreachable
+
+    == Trigger Failure Callback ==
+    QUIC -> QUIC: Check onConnectionFailure != nil
+    QUIC -> PM: onConnectionFailure(addr)
+    note left: Async callback with\nfailed address
+
+    == Lookup Peer by Address ==
+    PM -> PM: HandleConnectionFailure(addr)
+    PM -> PM: Parse addr to (host, port)
+
+    loop For each topic
+        PM -> DB: GetPeersByTopic(topic)
+        DB --> PM: List of peers
+
+        loop For each peer metadata
+            PM -> PM: Check if metadata.PublicIP == host\nAND metadata.PublicPort == port
+
+            alt Match found
+                PM -> PM: VerifyPeerReachabilityOnFailure(nodeID, topic)
+                note right: Found peer with\naddress 192.168.1.100:30906
+
+                == Verify Peer Reachability ==
+                PM -> DB: GetPeerMetadata(nodeID, topic)
+                DB --> PM: peer metadata
+
+                PM -> PM: verifyPeerReachability(metadata)
+                note right: Same logic as periodic check
+
+                alt Public Peer
+                    PM -> QUIC: Ping(endpoint)
+                    QUIC -> TP: QUIC Ping
+                    alt Peer responds
+                        TP --> QUIC: Pong
+                        QUIC --> PM: Success
+                        note right: Peer reachable\nKeep it
+                        PM -> PM: Log: Peer still reachable
+                    else Peer doesn't respond
+                        QUIC --> PM: Error
+                        PM -> DB: DeletePeerMetadata(nodeID, topic)
+                        note right: Confirmed unreachable\nRemove peer
+                    end
+
+                else NAT Peer
+                    PM -> PM: Verify via relay
+                    note right: Check relay + session\n(same as aging check)
+                    alt Session active
+                        PM -> PM: Keep peer
+                    else No session
+                        PM -> DB: DeletePeerMetadata(nodeID, topic)
+                    end
+                end
+
+                PM -> PM: return
+                note right: Stop searching
+            end
+        end
+    end
+
+    alt No matching peer found
+        PM -> PM: Log: No peer found for addr
+        note right: Might be a relay or\nunknown address
+    end
+
+    QUIC --> APP: Error: failed to connect
+end
+
+@enduml

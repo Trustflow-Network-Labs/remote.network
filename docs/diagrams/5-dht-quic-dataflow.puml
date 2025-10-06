@@ -1,0 +1,125 @@
+@startuml dht-quic-communication-flow
+title DHT/QUIC Communication Data Flow
+
+participant "PeerManager\n(Node A)" as PM_A
+participant "DHTPeer\n(Node A)" as DHT_A
+participant "QUICPeer\n(Node A)" as QUIC_A
+database "PeerMetadataDB\n(Node A)" as DB_A
+
+participant "DHT Network\n(Bootstrap)" as DHTNet
+participant "QUICPeer\n(Node B)" as QUIC_B
+database "PeerMetadataDB\n(Node B)" as DB_B
+
+participant "RelayPeer\n(Node C)" as RP_C
+participant "QUICPeer\n(Node C)" as QUIC_C
+database "RelayDB\n(Node C)" as RDB_C
+
+== DHT Peer Discovery ==
+
+DHT_A -> DHTNet: 1. Bootstrap (UDP)
+DHTNet --> DHT_A: 2. Known nodes
+
+DHT_A -> DHTNet: 3. Announce topic\n(get_peers query)
+DHTNet --> DHT_A: 4. Peers for topic\n(NodeAddr list)
+
+DHT_A -> PM_A: 5. onPeerDiscovered\ncallback(addr, topic)
+
+== QUIC Metadata Exchange ==
+
+PM_A -> QUIC_A: 6. RequestPeerMetadata\n(addr, topic)
+
+QUIC_A -> QUIC_B: 7. QUIC Stream\nMetadataRequest
+note right
+    MessageTypeMetadataRequest
+    - NodeID
+    - Topic
+    - Fields requested
+    - Our metadata attached
+end note
+
+QUIC_B -> DB_B: 8. Store Node A metadata
+
+QUIC_B -> QUIC_B: 9. Generate our metadata
+
+QUIC_B -> QUIC_A: 10. MetadataResponse\n+ Node B metadata
+note left
+    MessageTypeMetadataResponse
+    - Node B's NetworkInfo
+    - IsRelay flag
+    - Capabilities
+    - Endpoints
+end note
+
+QUIC_A -> PM_A: 11. Check if relay peer
+
+alt Node B is relay
+    PM_A -> PM_A: 12. onRelayDiscovered callback
+    PM_A -> DB_A: 13. Store as relay candidate
+end
+
+QUIC_A -> DB_A: 14. Store Node B metadata
+
+== Periodic Peer Reachability Check (Every 5 min) ==
+
+PM_A -> DB_A: 15. GetPeersByTopic()
+DB_A --> PM_A: Stale peers (LastSeen > 24h)
+
+PM_A -> QUIC_A: 16. Ping(peer)
+QUIC_A -> QUIC_B: 17. QUIC Ping
+QUIC_B --> QUIC_A: 18. Pong
+QUIC_A --> PM_A: 19. Reachable
+
+PM_A -> DB_A: 20. UpdateLastSeen()
+
+== NAT Peer Session Verification via Relay ==
+
+PM_A -> QUIC_A: 21. QueryRelayForSession\n(relayAddr, natPeerID)
+
+QUIC_A -> QUIC_C: 22. QUIC Stream\nRelaySessionQuery
+note right
+    MessageTypeRelaySessionQuery
+    - clientNodeID (NAT peer)
+    - queryNodeID (us)
+end note
+
+QUIC_C -> RP_C: 23. Handle query
+
+RP_C -> RDB_C: 24. HasActiveSession?
+RDB_C --> RP_C: Session status
+
+RP_C -> RP_C: 25. Check memory
+
+QUIC_C -> QUIC_A: 26. RelaySessionStatus
+note left
+    MessageTypeRelaySessionStatus
+    - hasSession
+    - sessionActive
+    - lastKeepalive
+end note
+
+QUIC_A --> PM_A: 27. Session active?
+
+alt Session active
+    PM_A -> DB_A: 28. UpdateLastSeen()
+else Session inactive
+    PM_A -> DB_A: 29. DeletePeerMetadata()
+end
+
+== Connection Failure Based Cleanup ==
+
+PM_A -> QUIC_A: 30. SendMessage(addr)
+
+QUIC_A -X QUIC_B: 31. Connection fails
+
+QUIC_A -> PM_A: 32. onConnectionFailure\ncallback(addr)
+
+PM_A -> DB_A: 33. Lookup peer by address
+DB_A --> PM_A: NodeID + Topic
+
+PM_A -> PM_A: 34. Verify reachability
+
+alt Unreachable
+    PM_A -> DB_A: 35. Delete peer
+end
+
+@enduml

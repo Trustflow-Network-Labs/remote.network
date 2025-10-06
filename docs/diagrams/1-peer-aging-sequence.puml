@@ -1,0 +1,78 @@
+@startuml 1-day-peer-aging-mechanism
+title 1-Day Peer Aging with Reachability Verification
+
+participant "PeerManager" as PM
+participant "Config" as CFG
+participant "Database" as DB
+participant "QUICPeer" as QUIC
+participant "PublicPeer" as PP
+participant "RelayPeer" as RP
+participant "NATPeer" as NP
+
+== Periodic Check (Every 5 Minutes) ==
+PM -> PM: periodicPeerReachabilityCheck()
+activate PM
+note right: Runs every 5 minutes\n(peer_reachability_check_interval)
+
+PM -> CFG: GetConfigDuration("peer_metadata_max_age")
+CFG --> PM: 24 hours
+
+PM -> PM: Calculate cutoff = now - 24h
+
+loop For each topic
+    PM -> DB: GetPeersByTopic(topic)
+    DB --> PM: List of peer metadata
+
+    loop For each peer
+        alt Peer.LastSeen < cutoff (stale)
+            PM -> PM: verifyPeerReachability(peer)
+
+            alt Public Peer
+                PM -> QUIC: Ping(endpoint)
+                QUIC -> PP: QUIC Ping message
+                PP --> QUIC: Pong response
+                QUIC --> PM: Success
+
+                PM -> DB: UpdateLastSeen(nodeID, topic)
+                note right: Reset 24h timer
+
+            else NAT Peer
+                PM -> PM: Get relay metadata
+                PM -> QUIC: Ping(relayEndpoint)
+                QUIC -> RP: QUIC Ping
+                RP --> QUIC: Pong
+
+                alt Relay reachable
+                    PM -> QUIC: QueryRelayForSession(relayAddr, natPeerID)
+                    QUIC -> RP: RelaySessionQuery message
+                    RP -> RP: Check database + memory
+                    alt Has active session
+                        RP --> QUIC: RelaySessionStatus(active=true)
+                        QUIC --> PM: true
+                        PM -> DB: UpdateLastSeen(nodeID, topic)
+                        note right: NAT peer still active
+                    else No session or inactive
+                        RP --> QUIC: RelaySessionStatus(active=false)
+                        QUIC --> PM: false
+                        PM -> DB: DeletePeerMetadata(nodeID, topic)
+                        note right: Remove stale NAT peer
+                    end
+                else Relay unreachable
+                    QUIC --> PM: Error
+                    PM -> DB: DeletePeerMetadata(relayNodeID, topic)
+                    note right: Remove unreachable relay
+                    PM -> DB: DeletePeerMetadata(natPeerNodeID, topic)
+                    note right: Remove NAT peer too
+                end
+            end
+
+        else Peer is fresh (LastSeen >= cutoff)
+            note right: Skip - no verification needed
+        end
+    end
+end
+
+PM -> PM: Log results
+deactivate PM
+
+@enduml
