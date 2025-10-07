@@ -150,8 +150,12 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 		return fmt.Errorf("failed to connect to relay %s: %v", relay.NodeID, err)
 	}
 
-	// Send relay registration message
-	stream, err := conn.OpenStreamSync(rm.ctx)
+	// Send relay registration message with timeout
+	streamOpenTimeout := rm.config.GetConfigDuration("quic_stream_open_timeout", 5*time.Second)
+	streamCtx, cancel := context.WithTimeout(rm.ctx, streamOpenTimeout)
+	stream, err := conn.OpenStreamSync(streamCtx)
+	cancel()
+
 	if err != nil {
 		conn.CloseWithError(0, "failed to open stream")
 		return fmt.Errorf("failed to open stream to relay: %v", err)
@@ -265,9 +269,13 @@ func (rm *RelayManager) DisconnectRelay() {
 	default:
 	}
 
-	// Send disconnect message
+	// Send disconnect message with timeout
 	if rm.currentRelayConn != nil {
-		stream, err := rm.currentRelayConn.OpenStreamSync(rm.ctx)
+		streamOpenTimeout := rm.config.GetConfigDuration("quic_stream_open_timeout", 5*time.Second)
+		streamCtx, cancel := context.WithTimeout(rm.ctx, streamOpenTimeout)
+		stream, err := rm.currentRelayConn.OpenStreamSync(streamCtx)
+		cancel()
+
 		if err == nil {
 			disconnectMsg := CreateRelayDisconnect(
 				rm.sessionID,
@@ -298,9 +306,6 @@ func (rm *RelayManager) sendKeepalives() {
 	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
 
-	consecutiveFailures := 0
-	maxFailures := 3
-
 	for {
 		select {
 		case <-ticker.C:
@@ -317,17 +322,16 @@ func (rm *RelayManager) sendKeepalives() {
 				return
 			}
 
-			// Send ping as keepalive
-			stream, err := conn.OpenStreamSync(rm.ctx)
+			// Send ping as keepalive with timeout to prevent blocking indefinitely
+			streamOpenTimeout := rm.config.GetConfigDuration("quic_stream_open_timeout", 5*time.Second)
+			streamCtx, cancel := context.WithTimeout(rm.ctx, streamOpenTimeout)
+			stream, err := conn.OpenStreamSync(streamCtx)
+			cancel() // Clean up timeout context
+
 			if err != nil {
-				rm.logger.Warn(fmt.Sprintf("Keepalive failed to open stream: %v", err), "relay-manager")
-				consecutiveFailures++
-				if consecutiveFailures >= maxFailures {
-					rm.logger.Error(fmt.Sprintf("Relay connection lost after %d failed keepalives, reconnecting...", maxFailures), "relay-manager")
-					go rm.handleRelayConnectionLoss()
-					return
-				}
-				continue
+				rm.logger.Warn(fmt.Sprintf("Keepalive failed to open stream: %v - triggering reconnection", err), "relay-manager")
+				go rm.handleRelayConnectionLoss()
+				return
 			}
 
 			pingMsg := CreatePing(sessionID, "keepalive")
@@ -340,15 +344,10 @@ func (rm *RelayManager) sendKeepalives() {
 
 			_, err = stream.Write(msgBytes)
 			if err != nil {
-				rm.logger.Warn(fmt.Sprintf("Failed to write keepalive: %v", err), "relay-manager")
+				rm.logger.Warn(fmt.Sprintf("Failed to write keepalive: %v - triggering reconnection", err), "relay-manager")
 				stream.Close()
-				consecutiveFailures++
-				if consecutiveFailures >= maxFailures {
-					rm.logger.Error(fmt.Sprintf("Relay connection lost after %d failed keepalives, reconnecting...", maxFailures), "relay-manager")
-					go rm.handleRelayConnectionLoss()
-					return
-				}
-				continue
+				go rm.handleRelayConnectionLoss()
+				return
 			}
 
 			// Wait for response (pong) to ensure message was received
@@ -358,18 +357,12 @@ func (rm *RelayManager) sendKeepalives() {
 			stream.Close()
 
 			if err != nil {
-				rm.logger.Warn(fmt.Sprintf("Keepalive response failed from relay %s: %v", relayNodeID, err), "relay-manager")
-				consecutiveFailures++
-				if consecutiveFailures >= maxFailures {
-					rm.logger.Error(fmt.Sprintf("Relay connection lost after %d failed keepalives, reconnecting...", maxFailures), "relay-manager")
-					go rm.handleRelayConnectionLoss()
-					return
-				}
-				continue
+				rm.logger.Warn(fmt.Sprintf("Keepalive response failed from relay %s: %v - triggering reconnection", relayNodeID, err), "relay-manager")
+				go rm.handleRelayConnectionLoss()
+				return
 			}
 
-			// Success - reset failure counter
-			consecutiveFailures = 0
+			// Success
 			rm.logger.Debug("Sent keepalive to relay", "relay-manager")
 
 		case <-rm.keepaliveStop:
@@ -387,34 +380,122 @@ func (rm *RelayManager) handleRelayConnectionLoss() {
 
 	// Get the failed relay info before disconnecting
 	rm.relayMutex.RLock()
+	failedRelay := rm.currentRelay
 	failedRelayNodeID := ""
-	if rm.currentRelay != nil {
-		failedRelayNodeID = rm.currentRelay.NodeID
+	if failedRelay != nil {
+		failedRelayNodeID = failedRelay.NodeID
 	}
 	rm.relayMutex.RUnlock()
 
-	// Disconnect from current relay
+	// Step 1: Disconnect from current relay (closes stale QUIC connection)
 	rm.DisconnectRelay()
 
-	// Remove failed relay from candidates to avoid reconnecting to it
-	if failedRelayNodeID != "" {
+	// Step 2-4: Try reconnecting to the SAME relay with a NEW QUIC connection
+	// This handles NAT UDP mapping expiration (30-min timeout) where the relay
+	// is still reachable but the old NAT mapping is stale
+	if failedRelay != nil {
+		rm.logger.Info(fmt.Sprintf("Attempting to reconnect to same relay %s with new QUIC connection (may be NAT mapping timeout)...", failedRelayNodeID), "relay-manager")
+
+		// Wait briefly to allow old connection cleanup
+		time.Sleep(2 * time.Second)
+
+		// Try connecting to the same relay with a new QUIC connection
+		if err := rm.ConnectToRelay(failedRelay); err != nil {
+			rm.logger.Warn(fmt.Sprintf("Failed to reconnect to same relay %s: %v", failedRelayNodeID, err), "relay-manager")
+			// Will try different relay below
+		} else {
+			// Successfully reconnected to same relay with new connection
+			rm.logger.Info(fmt.Sprintf("Successfully reconnected to same relay %s with new QUIC connection", failedRelayNodeID), "relay-manager")
+			return
+		}
+
+		// Step 5: If reconnection to same relay failed, remove it and try a different relay
 		rm.logger.Info(fmt.Sprintf("Removing failed relay %s from candidates", failedRelayNodeID), "relay-manager")
 		rm.selector.RemoveCandidate(failedRelayNodeID)
+
+		// Log remaining candidates
+		remainingCount := rm.selector.GetCandidateCount()
+		rm.logger.Info(fmt.Sprintf("Remaining relay candidates after removal: %d", remainingCount), "relay-manager")
 	}
 
-	// Wait a bit before reconnecting to avoid rapid reconnection loops
+	// Wait a bit before trying a different relay
+	rm.logger.Debug("Waiting 5 seconds before attempting connection to different relay...", "relay-manager")
 	time.Sleep(5 * time.Second)
 
-	// Try to reconnect to a different relay
+	// Try to connect to a different relay
+	rm.logger.Info("Attempting to connect to a different relay...", "relay-manager")
 	if err := rm.SelectAndConnectRelay(); err != nil {
 		rm.logger.Error(fmt.Sprintf("Failed to reconnect to relay: %v", err), "relay-manager")
 
+		// Check if we have no relay candidates left
+		if rm.selector.GetCandidateCount() == 0 {
+			rm.logger.Warn("No relay candidates available, attempting to re-discover relays...", "relay-manager")
+			if rediscovered := rm.rediscoverRelayCandidates(); rediscovered > 0 {
+				rm.logger.Info(fmt.Sprintf("Re-discovered %d relay candidates from peer metadata", rediscovered), "relay-manager")
+			} else {
+				rm.logger.Warn("No relay candidates found in peer metadata, will retry during next periodic evaluation", "relay-manager")
+			}
+		}
+
 		// Schedule retry
+		rm.logger.Info("Waiting 30 seconds before second reconnection attempt...", "relay-manager")
 		time.Sleep(30 * time.Second)
+		rm.logger.Info("Second reconnection attempt starting...", "relay-manager")
 		if err := rm.SelectAndConnectRelay(); err != nil {
 			rm.logger.Error(fmt.Sprintf("Second reconnection attempt failed: %v. Will retry during next periodic evaluation.", err), "relay-manager")
+
+			// Final check - if still no candidates, try rediscovery again
+			if rm.selector.GetCandidateCount() == 0 {
+				rm.logger.Warn("Still no relay candidates after retry, re-attempting discovery...", "relay-manager")
+				rm.rediscoverRelayCandidates()
+			}
 		}
 	}
+}
+
+// rediscoverRelayCandidates queries the peer metadata database for relay peers and re-adds them
+func (rm *RelayManager) rediscoverRelayCandidates() int {
+	rm.logger.Info("Re-discovering relay candidates from peer metadata database...", "relay-manager")
+
+	// Get all peers for our subscribed topics
+	topics := rm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	if len(topics) == 0 {
+		rm.logger.Warn("No topics configured, cannot re-discover relays", "relay-manager")
+		return 0
+	}
+
+	addedCount := 0
+	for _, topic := range topics {
+		peers, err := rm.dbManager.PeerMetadata.GetPeersByTopic(topic)
+		if err != nil {
+			rm.logger.Warn(fmt.Sprintf("Failed to get peers for topic %s: %v", topic, err), "relay-manager")
+			continue
+		}
+
+		rm.logger.Debug(fmt.Sprintf("Checking %d peers from topic %s for relay capabilities", len(peers), topic), "relay-manager")
+
+		for _, peer := range peers {
+			// Only consider peers that are relays
+			if peer.NetworkInfo.IsRelay {
+				rm.logger.Debug(fmt.Sprintf("Found relay peer in database: %s (endpoint: %s)", peer.NodeID, peer.NetworkInfo.RelayEndpoint), "relay-manager")
+
+				// Add to relay candidate pool
+				if err := rm.selector.AddCandidate(peer); err != nil {
+					rm.logger.Debug(fmt.Sprintf("Failed to add relay candidate %s: %v", peer.NodeID, err), "relay-manager")
+				} else {
+					addedCount++
+				}
+			}
+		}
+	}
+
+	if addedCount > 0 {
+		rm.logger.Info(fmt.Sprintf("Re-discovered and added %d relay candidates", addedCount), "relay-manager")
+	} else {
+		rm.logger.Warn("No relay peers found in database during re-discovery", "relay-manager")
+	}
+
+	return addedCount
 }
 
 // periodicRelayEvaluation periodically evaluates and switches to better relays
@@ -423,6 +504,12 @@ func (rm *RelayManager) periodicRelayEvaluation() {
 		select {
 		case <-rm.evaluationTicker.C:
 			rm.logger.Debug("Performing periodic relay evaluation...", "relay-manager")
+
+			// Check if we have relay candidates, if not try to rediscover
+			if rm.selector.GetCandidateCount() == 0 {
+				rm.logger.Warn("No relay candidates available during periodic evaluation, attempting rediscovery...", "relay-manager")
+				rm.rediscoverRelayCandidates()
+			}
 
 			// Re-evaluate and potentially switch relay
 			if err := rm.SelectAndConnectRelay(); err != nil {

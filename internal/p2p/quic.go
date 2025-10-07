@@ -127,10 +127,14 @@ func (q *QUICPeer) Start() error {
 	listenAddr := q.config.GetConfigWithDefault("quic_listen_addr", "0.0.0.0")
 	addr := fmt.Sprintf("%s:%d", listenAddr, q.port)
 
-	q.logger.Info(fmt.Sprintf("Starting QUIC peer on %s", addr), "quic")
+	idleTimeout := q.config.GetConfigDuration("quic_connection_timeout", 5*time.Minute)
+	keepAlivePeriod := q.config.GetConfigDuration("quic_keepalive_period", 15*time.Second)
+
+	q.logger.Info(fmt.Sprintf("Starting QUIC peer on %s (MaxIdleTimeout=%v, KeepAlivePeriod=%v)", addr, idleTimeout, keepAlivePeriod), "quic")
 
 	listener, err := quic.ListenAddr(addr, q.tlsConfig, &quic.Config{
-		MaxIdleTimeout: q.config.GetConfigDuration("quic_connection_timeout", 5*time.Minute),
+		MaxIdleTimeout:  idleTimeout,
+		KeepAlivePeriod: keepAlivePeriod,
 	})
 
 	if err != nil {
@@ -500,7 +504,7 @@ func (q *QUICPeer) RequestPeerMetadata(peerAddr string, topic string) error {
 		return err
 	}
 
-	stream, err := conn.OpenStreamSync(q.ctx)
+	stream, err := q.openStreamWithTimeout(conn)
 	if err != nil {
 		q.logger.Error(fmt.Sprintf("Failed to open stream to %s: %v", peerAddr, err), "quic")
 		return err
@@ -608,8 +612,14 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 		NextProtos:         []string{"remote-network-p2p"},
 	}
 
+	idleTimeout := q.config.GetConfigDuration("quic_connection_timeout", 5*time.Minute)
+	keepAlivePeriod := q.config.GetConfigDuration("quic_keepalive_period", 15*time.Second)
+
+	q.logger.Debug(fmt.Sprintf("Dialing %s with QUIC config: MaxIdleTimeout=%v, KeepAlivePeriod=%v", addr, idleTimeout, keepAlivePeriod), "quic")
+
 	conn, err := quic.DialAddr(q.ctx, addr, tlsConfig, &quic.Config{
-		MaxIdleTimeout: q.config.GetConfigDuration("quic_connection_timeout", 5*time.Minute),
+		MaxIdleTimeout:  idleTimeout,
+		KeepAlivePeriod: keepAlivePeriod,
 	})
 
 	if err != nil {
@@ -620,7 +630,7 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 		return nil, fmt.Errorf("failed to connect to peer %s: %v", addr, err)
 	}
 
-	q.logger.Info(fmt.Sprintf("Successfully connected to peer %s", addr), "quic")
+	q.logger.Info(fmt.Sprintf("Successfully connected to peer %s (MaxIdleTimeout=%v, KeepAlivePeriod=%v)", addr, idleTimeout, keepAlivePeriod), "quic")
 
 	// Store connection
 	q.connMutex.Lock()
@@ -649,7 +659,7 @@ func (q *QUICPeer) SendMessage(addr string, message []byte) error {
 		return err
 	}
 
-	stream, err := conn.OpenStreamSync(q.ctx)
+	stream, err := q.openStreamWithTimeout(conn)
 	if err != nil {
 		return fmt.Errorf("failed to open stream to %s: %v", addr, err)
 	}
@@ -716,7 +726,7 @@ func (q *QUICPeer) Ping(addr string) error {
 		return fmt.Errorf("failed to connect to %s: %v", addr, err)
 	}
 
-	stream, err := conn.OpenStreamSync(q.ctx)
+	stream, err := q.openStreamWithTimeout(conn)
 	if err != nil {
 		return fmt.Errorf("failed to open stream to %s: %v", addr, err)
 	}
@@ -764,7 +774,7 @@ func (q *QUICPeer) QueryRelayForSession(relayAddr string, clientNodeID string, q
 		return false, fmt.Errorf("failed to connect to relay %s: %v", relayAddr, err)
 	}
 
-	stream, err := conn.OpenStreamSync(q.ctx)
+	stream, err := q.openStreamWithTimeout(conn)
 	if err != nil {
 		return false, fmt.Errorf("failed to open stream to relay %s: %v", relayAddr, err)
 	}
@@ -860,6 +870,15 @@ func (q *QUICPeer) handleRelaySessionQuery(msg *QUICMessage, remoteAddr string) 
 
 	// Delegate to relay peer
 	return q.relayPeer.HandleRelaySessionQuery(msg, remoteAddr)
+}
+
+// openStreamWithTimeout opens a QUIC stream with configurable timeout to prevent blocking
+func (q *QUICPeer) openStreamWithTimeout(conn *quic.Conn) (*quic.Stream, error) {
+	streamOpenTimeout := q.config.GetConfigDuration("quic_stream_open_timeout", 5*time.Second)
+	streamCtx, cancel := context.WithTimeout(q.ctx, streamOpenTimeout)
+	defer cancel()
+
+	return conn.OpenStreamSync(streamCtx)
 }
 
 func (q *QUICPeer) Stop() error {

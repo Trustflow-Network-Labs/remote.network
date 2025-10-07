@@ -799,7 +799,7 @@ func (pm *PeerManager) HandleConnectionFailure(addr string) {
 // This is called when a connection attempt to a peer fails
 func (pm *PeerManager) VerifyPeerReachabilityOnFailure(nodeID string, topic string) {
 	metadata, err := pm.dbManager.PeerMetadata.GetPeerMetadata(nodeID, topic)
-	if err != nil {
+	if err != nil || metadata == nil {
 		pm.logger.Debug(fmt.Sprintf("Peer %s not in database for topic %s, skipping reachability check", nodeID, topic), "core")
 		return
 	}

@@ -75,8 +75,10 @@ func (rs *RelaySelector) AddCandidate(metadata *database.PeerMetadata) error {
 	}
 
 	rs.candidates[metadata.NodeID] = candidate
+	totalCandidates := len(rs.candidates)
 	rs.logger.Debug(fmt.Sprintf("Added relay candidate: %s (endpoint: %s, reputation: %.2f, pricing: %.4f)",
 		metadata.NodeID, candidate.Endpoint, candidate.ReputationScore, candidate.PricingPerGB), "relay-selector")
+	rs.logger.Info(fmt.Sprintf("Total relay candidates: %d", totalCandidates), "relay-selector")
 
 	return nil
 }
@@ -88,6 +90,13 @@ func (rs *RelaySelector) RemoveCandidate(nodeID string) {
 
 	delete(rs.candidates, nodeID)
 	rs.logger.Debug(fmt.Sprintf("Removed relay candidate: %s", nodeID), "relay-selector")
+}
+
+// GetCandidateCount returns the number of available relay candidates
+func (rs *RelaySelector) GetCandidateCount() int {
+	rs.candidatesMutex.RLock()
+	defer rs.candidatesMutex.RUnlock()
+	return len(rs.candidates)
 }
 
 // MeasureLatency measures latency to a relay candidate using QUIC ping
@@ -251,13 +260,6 @@ func (rs *RelaySelector) ShouldSwitchRelay(currentRelay *RelayCandidate, newRela
 	}
 
 	return shouldSwitch
-}
-
-// GetCandidateCount returns the number of relay candidates
-func (rs *RelaySelector) GetCandidateCount() int {
-	rs.candidatesMutex.RLock()
-	defer rs.candidatesMutex.RUnlock()
-	return len(rs.candidates)
 }
 
 // GetCandidates returns all relay candidates
