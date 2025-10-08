@@ -170,7 +170,7 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 
 	registerMsg := CreateRelayRegister(
 		rm.dhtPeer.NodeID(),
-		"", // topic - will be filled by relay if needed
+		"",    // topic - will be filled by relay if needed
 		"nat", // natType
 		publicEndpoint,
 		privateEndpoint,
@@ -302,7 +302,7 @@ func (rm *RelayManager) DisconnectRelay() {
 
 // sendKeepalives sends periodic keepalive messages to maintain relay connection
 func (rm *RelayManager) sendKeepalives() {
-	keepaliveInterval := rm.config.GetConfigDuration("relay_keepalive_interval", 20*time.Second)
+	keepaliveInterval := rm.config.GetConfigDuration("relay_keepalive_interval", 5*time.Second)
 	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
 

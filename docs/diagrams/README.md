@@ -170,5 +170,5 @@ peer_reachability_check_interval = 5m
 
 # Relay configuration
 relay_mode = false
-relay_keepalive_interval = 20s
+relay_keepalive_interval = 5s
 ```
