@@ -23,6 +23,9 @@ type RelayManager struct {
 	// Relay selection
 	selector *RelaySelector
 
+	// Metadata broadcaster
+	broadcaster *MetadataBroadcaster
+
 	// Current relay connection
 	currentRelay     *RelayCandidate
 	currentRelayConn *quic.Conn
@@ -42,7 +45,7 @@ type RelayManager struct {
 }
 
 // NewRelayManager creates a new relay manager for NAT peers
-func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, dhtPeer *DHTPeer) *RelayManager {
+func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, dhtPeer *DHTPeer, broadcaster *MetadataBroadcaster) *RelayManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	selector := NewRelaySelector(config, logger, dbManager, quicPeer)
@@ -54,6 +57,7 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 		quicPeer:       quicPeer,
 		dhtPeer:        dhtPeer,
 		selector:       selector,
+		broadcaster:    broadcaster,
 		ctx:            ctx,
 		cancel:         cancel,
 		keepaliveStop:  make(chan struct{}),
@@ -81,6 +85,11 @@ func (rm *RelayManager) Start() error {
 	}()
 
 	return nil
+}
+
+// SetBroadcaster sets the metadata broadcaster (called after initialization)
+func (rm *RelayManager) SetBroadcaster(broadcaster *MetadataBroadcaster) {
+	rm.broadcaster = broadcaster
 }
 
 // Stop stops the relay manager
@@ -293,6 +302,44 @@ func (rm *RelayManager) DisconnectRelay() {
 
 		// Close connection
 		rm.currentRelayConn.CloseWithError(0, "disconnecting")
+	}
+
+	// Broadcast relay disconnection if broadcaster is available
+	if rm.broadcaster != nil {
+		topics := rm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+		if len(topics) > 0 {
+			topic := topics[0]
+			ourNodeID := rm.dhtPeer.NodeID()
+			metadata, err := rm.dbManager.PeerMetadata.GetPeerMetadata(ourNodeID, topic)
+			if err == nil {
+				// Update metadata to reflect no relay
+				metadata.NetworkInfo.UsingRelay = false
+				metadata.NetworkInfo.ConnectedRelay = ""
+				metadata.NetworkInfo.RelaySessionID = ""
+				metadata.NetworkInfo.RelayAddress = ""
+				metadata.Version++
+				metadata.Timestamp = time.Now()
+				metadata.LastSeen = time.Now()
+
+				// Store updated metadata
+				if err := rm.dbManager.PeerMetadata.StorePeerMetadata(metadata); err != nil {
+					rm.logger.Warn(fmt.Sprintf("Failed to store metadata after relay disconnect: %v", err), "relay-manager")
+				}
+
+				// Broadcast the change
+				relayUpdate := &RelayUpdateInfo{
+					UsingRelay:     false,
+					ConnectedRelay: "",
+					SessionID:      "",
+					RelayAddress:   "",
+				}
+				if err := rm.broadcaster.BroadcastMetadataChange("relay", metadata, relayUpdate, nil); err != nil {
+					rm.logger.Warn(fmt.Sprintf("Failed to broadcast relay disconnect: %v", err), "relay-manager")
+				} else {
+					rm.logger.Info("Broadcast relay disconnection to peers", "relay-manager")
+				}
+			}
+		}
 	}
 
 	rm.currentRelay = nil
@@ -527,13 +574,74 @@ func (rm *RelayManager) periodicRelayEvaluation() {
 
 // updateOurMetadataWithRelay updates our peer metadata to include relay connection info
 func (rm *RelayManager) updateOurMetadataWithRelay(relay *RelayCandidate, sessionID string) error {
-	// This would update the metadata that we advertise to other peers
-	// so they know we're connected via relay and how to reach us
-	rm.logger.Debug(fmt.Sprintf("Updated metadata with relay info: relay=%s, session=%s",
-		relay.NodeID, sessionID), "relay-manager")
+	// Get our current metadata
+	topics := rm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	if len(topics) == 0 {
+		return fmt.Errorf("no topics configured")
+	}
+	topic := topics[0]
 
-	// The actual implementation would store this in database and
-	// include it in our metadata responses
+	// Get or create our metadata
+	ourNodeID := rm.dhtPeer.NodeID()
+	metadata, err := rm.dbManager.PeerMetadata.GetPeerMetadata(ourNodeID, topic)
+	if err != nil {
+		// Create new metadata if doesn't exist
+		nodeTypeManager := utils.NewNodeTypeManager()
+		publicIP, _ := nodeTypeManager.GetExternalIP()
+		privateIP, _ := nodeTypeManager.GetLocalIP()
+		quicPort := rm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
+
+		metadata = &database.PeerMetadata{
+			NodeID:    ourNodeID,
+			Topic:     topic,
+			Version:   1,
+			Timestamp: time.Now(),
+			NetworkInfo: database.NetworkInfo{
+				PublicIP:    publicIP,
+				PublicPort:  quicPort,
+				PrivateIP:   privateIP,
+				PrivatePort: quicPort,
+				NodeType:    "private",
+			},
+			Capabilities: []string{"metadata_exchange", "relay_client"},
+			Services:     make(map[string]database.Service),
+			Extensions:   make(map[string]interface{}),
+		}
+	}
+
+	// Update relay information
+	metadata.NetworkInfo.UsingRelay = true
+	metadata.NetworkInfo.ConnectedRelay = relay.NodeID
+	metadata.NetworkInfo.RelaySessionID = sessionID
+	metadata.NetworkInfo.RelayAddress = relay.Endpoint
+	metadata.Version++
+	metadata.Timestamp = time.Now()
+	metadata.LastSeen = time.Now()
+
+	// Store in database
+	if err := rm.dbManager.PeerMetadata.StorePeerMetadata(metadata); err != nil {
+		return fmt.Errorf("failed to store metadata: %v", err)
+	}
+
+	// Broadcast the change if broadcaster is available
+	if rm.broadcaster != nil {
+		relayUpdate := &RelayUpdateInfo{
+			UsingRelay:     true,
+			ConnectedRelay: relay.NodeID,
+			SessionID:      sessionID,
+			RelayAddress:   relay.Endpoint,
+		}
+
+		if err := rm.broadcaster.BroadcastMetadataChange("relay", metadata, relayUpdate, nil); err != nil {
+			rm.logger.Warn(fmt.Sprintf("Failed to broadcast relay change: %v", err), "relay-manager")
+			// Don't fail the whole operation if broadcast fails
+		} else {
+			rm.logger.Info(fmt.Sprintf("Broadcast relay connection to peers: relay=%s, session=%s", relay.NodeID, sessionID), "relay-manager")
+		}
+	}
+
+	rm.logger.Info(fmt.Sprintf("Updated metadata with relay info: relay=%s, session=%s", relay.NodeID, sessionID), "relay-manager")
+
 	return nil
 }
 

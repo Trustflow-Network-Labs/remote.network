@@ -42,8 +42,12 @@ const (
 	MessageTypeHolePunchConnect MessageType = "hole_punch_connect"
 	MessageTypeHolePunchSync    MessageType = "hole_punch_sync"
 
+	// Metadata Broadcast
+	MessageTypePeerMetadataUpdate    MessageType = "peer_metadata_update"
+	MessageTypePeerMetadataUpdateAck MessageType = "peer_metadata_update_ack"
+
 	// Legacy support
-	MessageTypeEcho             MessageType = "echo"
+	MessageTypeEcho MessageType = "echo"
 )
 
 // QUICMessage represents a structured message sent over QUIC
@@ -553,5 +557,92 @@ func CreateHolePunchConnect(nodeID string, observedAddrs, privateAddrs []string,
 func CreateHolePunchSync(rtt int64) *QUICMessage {
 	return NewQUICMessage(MessageTypeHolePunchSync, &HolePunchSyncData{
 		RTT: rtt,
+	})
+}
+
+// ============================================================================
+// Metadata Broadcast Messages
+// ============================================================================
+
+// PeerMetadataUpdateData contains metadata update information
+type PeerMetadataUpdateData struct {
+	NodeID    string    `json:"node_id"`    // Who is sending
+	Topic     string    `json:"topic"`      // Topic context
+	Version   int       `json:"version"`    // Metadata version
+	Timestamp time.Time `json:"timestamp"`  // When change occurred
+
+	// What changed
+	ChangeType string `json:"change_type"` // "relay", "network", "capability", "full"
+
+	// Full metadata (for new peers or "full" change type)
+	Metadata *database.PeerMetadata `json:"metadata,omitempty"`
+
+	// Partial updates (more efficient for small changes)
+	RelayUpdate   *RelayUpdateInfo   `json:"relay_update,omitempty"`
+	NetworkUpdate *NetworkUpdateInfo `json:"network_update,omitempty"`
+
+	// Broadcast metadata
+	Sequence int64 `json:"sequence"` // For deduplication
+	TTL      int   `json:"ttl"`      // Prevent infinite loops
+}
+
+// RelayUpdateInfo contains relay connection change information
+type RelayUpdateInfo struct {
+	UsingRelay     bool   `json:"using_relay"`
+	ConnectedRelay string `json:"connected_relay"` // New relay NodeID
+	SessionID      string `json:"session_id"`      // New session ID
+	RelayAddress   string `json:"relay_address"`   // How to reach via relay
+}
+
+// NetworkUpdateInfo contains network configuration changes
+type NetworkUpdateInfo struct {
+	PublicIP    string `json:"public_ip,omitempty"`
+	PublicPort  int    `json:"public_port,omitempty"`
+	PrivateIP   string `json:"private_ip,omitempty"`
+	PrivatePort int    `json:"private_port,omitempty"`
+	NATType     string `json:"nat_type,omitempty"`
+}
+
+// PeerMetadataUpdateAckData contains metadata update acknowledgment
+type PeerMetadataUpdateAckData struct {
+	NodeID   string `json:"node_id"`           // Who is acknowledging
+	Sequence int64  `json:"sequence"`          // Sequence being acknowledged
+	Status   string `json:"status"`            // "received", "applied", "error"
+	Error    string `json:"error,omitempty"`   // Error message if status is "error"
+}
+
+// CreatePeerMetadataUpdate creates a metadata update message
+func CreatePeerMetadataUpdate(
+	nodeID string,
+	topic string,
+	version int,
+	changeType string,
+	sequence int64,
+	ttl int,
+	metadata *database.PeerMetadata,
+	relayUpdate *RelayUpdateInfo,
+	networkUpdate *NetworkUpdateInfo,
+) *QUICMessage {
+	return NewQUICMessage(MessageTypePeerMetadataUpdate, &PeerMetadataUpdateData{
+		NodeID:        nodeID,
+		Topic:         topic,
+		Version:       version,
+		Timestamp:     time.Now(),
+		ChangeType:    changeType,
+		Metadata:      metadata,
+		RelayUpdate:   relayUpdate,
+		NetworkUpdate: networkUpdate,
+		Sequence:      sequence,
+		TTL:           ttl,
+	})
+}
+
+// CreatePeerMetadataUpdateAck creates a metadata update acknowledgment message
+func CreatePeerMetadataUpdateAck(nodeID string, sequence int64, status string, errorMsg string) *QUICMessage {
+	return NewQUICMessage(MessageTypePeerMetadataUpdateAck, &PeerMetadataUpdateAckData{
+		NodeID:   nodeID,
+		Sequence: sequence,
+		Status:   status,
+		Error:    errorMsg,
 	})
 }

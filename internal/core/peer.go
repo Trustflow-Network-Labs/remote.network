@@ -24,23 +24,24 @@ type TopicState struct {
 }
 
 type PeerManager struct {
-	config         *utils.ConfigManager
-	logger         *utils.LogsManager
-	dht            *p2p.DHTPeer
-	quic           *p2p.QUICPeer
-	relayPeer      *p2p.RelayPeer
-	relayManager   *p2p.RelayManager
-	trafficMonitor *p2p.RelayTrafficMonitor
-	natDetector    *p2p.NATDetector
-	topologyMgr    *p2p.NATTopologyManager
-	holePuncher    *p2p.HolePuncher
-	dbManager      *database.SQLiteManager
-	topics         map[string]*TopicState
-	ctx            context.Context
-	cancel         context.CancelFunc
-	mutex          sync.RWMutex
-	running        bool
-	maintenanceTicker *time.Ticker
+	config              *utils.ConfigManager
+	logger              *utils.LogsManager
+	dht                 *p2p.DHTPeer
+	quic                *p2p.QUICPeer
+	relayPeer           *p2p.RelayPeer
+	relayManager        *p2p.RelayManager
+	trafficMonitor      *p2p.RelayTrafficMonitor
+	natDetector         *p2p.NATDetector
+	topologyMgr         *p2p.NATTopologyManager
+	holePuncher         *p2p.HolePuncher
+	metadataBroadcaster *p2p.MetadataBroadcaster
+	dbManager           *database.SQLiteManager
+	topics              map[string]*TopicState
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	mutex               sync.RWMutex
+	running             bool
+	maintenanceTicker   *time.Ticker
 }
 
 func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*PeerManager, error) {
@@ -84,12 +85,16 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 	var relayPeer *p2p.RelayPeer
 	var relayManager *p2p.RelayManager
 
+	// Pre-initialize broadcaster before relay manager (will be fully set up after hole puncher)
+	var metadataBroadcaster *p2p.MetadataBroadcaster
+
 	if config.GetConfigBool("relay_mode", false) {
 		relayPeer = p2p.NewRelayPeer(config, logger, dbManager)
 		logger.Info("Relay mode enabled - node will act as relay", "core")
 	} else {
 		// For NAT peers, initialize relay manager for connecting to relays
-		relayManager = p2p.NewRelayManager(config, logger, dbManager, quic, dht)
+		// Pass nil for broadcaster initially - will be set after hole puncher initialization
+		relayManager = p2p.NewRelayManager(config, logger, dbManager, quic, dht, metadataBroadcaster)
 		logger.Info("Relay manager initialized for NAT peer", "core")
 	}
 
@@ -118,6 +123,16 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 		pm.holePuncher = p2p.NewHolePuncher(config, logger, quic, dht, dbManager, natDetector)
 		quic.SetHolePuncher(pm.holePuncher)
 		logger.Info("Hole puncher initialized for NAT traversal", "core")
+
+		// Initialize metadata broadcaster (uses hole puncher for NAT-to-NAT broadcasts)
+		pm.metadataBroadcaster = p2p.NewMetadataBroadcaster(config, logger, dbManager, quic, dht, pm.holePuncher)
+		logger.Info("Metadata broadcaster initialized", "core")
+
+		// Wire broadcaster into relay manager if it exists
+		if relayManager != nil {
+			relayManager.SetBroadcaster(pm.metadataBroadcaster)
+			logger.Info("Metadata broadcaster wired into relay manager", "core")
+		}
 	}
 
 	// Set up relay discovery callback for NAT peers
@@ -203,6 +218,15 @@ func (pm *PeerManager) Start() error {
 			pm.logger.Warn(fmt.Sprintf("Failed to start hole puncher: %v", err), "core")
 		} else {
 			pm.logger.Info("Hole puncher started for NAT traversal", "core")
+		}
+	}
+
+	// Start metadata broadcaster (after hole puncher is started)
+	if pm.metadataBroadcaster != nil {
+		if err := pm.metadataBroadcaster.Start(); err != nil {
+			pm.logger.Warn(fmt.Sprintf("Failed to start metadata broadcaster: %v", err), "core")
+		} else {
+			pm.logger.Info("Metadata broadcaster started", "core")
 		}
 	}
 
@@ -544,6 +568,11 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 		stats["hole_punch_metrics"] = pm.holePuncher.GetMetrics()
 	}
 
+	// Add metadata broadcaster metrics
+	if pm.metadataBroadcaster != nil {
+		stats["metadata_broadcast_metrics"] = pm.metadataBroadcaster.GetMetrics()
+	}
+
 	topicStats := make(map[string]interface{})
 	for name, state := range pm.topics {
 		state.mutex.RLock()
@@ -586,6 +615,13 @@ func (pm *PeerManager) Stop() error {
 	}
 	if pm.trafficMonitor != nil {
 		pm.trafficMonitor.Stop()
+	}
+
+	// Stop metadata broadcaster
+	if pm.metadataBroadcaster != nil {
+		if err := pm.metadataBroadcaster.Stop(); err != nil {
+			pm.logger.Warn(fmt.Sprintf("Error stopping metadata broadcaster: %v", err), "core")
+		}
 	}
 
 	// Stop hole puncher

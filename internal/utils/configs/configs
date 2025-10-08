@@ -105,3 +105,24 @@ hole_punch_lan_subnet_mask = 24
 
 # Metrics
 hole_punch_metrics_enabled = true
+
+[metadata_broadcast]
+# Metadata Broadcast Configuration
+metadata_broadcast_enabled = true
+
+# Broadcast behavior
+metadata_broadcast_batch_interval = 5s
+metadata_broadcast_max_batch_size = 50
+metadata_broadcast_ttl = 3
+
+# Delivery
+metadata_broadcast_timeout = 10s
+metadata_broadcast_max_retries = 3
+metadata_broadcast_retry_interval = 30s
+
+# Deduplication
+metadata_broadcast_dedupe_window = 5m
+
+# Hole punching for broadcasts
+metadata_broadcast_hole_punch_enabled = true
+metadata_broadcast_hole_punch_timeout = 10s
