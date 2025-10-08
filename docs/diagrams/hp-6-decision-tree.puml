@@ -1,0 +1,80 @@
+@startuml hole-punch-decision-tree
+title Connection Decision Tree
+
+start
+
+:Want to connect\nto Peer B;
+
+:1. Check existing\ndirect connection;
+
+if (Direct connection\nexists?) then (yes)
+    #lightgreen:Use existing\nconnection;
+    stop
+endif
+
+:2. LAN Peer Detection;
+:Get peer metadata;
+
+if (Same public IP?) then (no)
+    goto check_public
+endif
+
+if (Same private\nsubnet?) then (yes)
+    #lightgreen:Direct LAN Dial;
+    :Connect to\nprivate IP;
+
+    if (LAN dial\nsuccess?) then (yes)
+        #lightgreen:**SUCCESS**\nLAN Connection;
+        stop
+    else (no)
+        :Log LAN dial failure;
+        goto check_public
+    endif
+endif
+
+label check_public
+:3. Check for\npublic address;
+
+if (Peer has public\naddress?) then (yes)
+    #cyan:Direct Dial Attempt;
+    :Connect to\npublic address;
+
+    if (Direct dial\nsuccess?) then (yes)
+        #lightgreen:**SUCCESS**\nDirect Connection;
+        stop
+    else (no)
+        :Log direct dial failure;
+        goto hole_punch
+    endif
+endif
+
+label hole_punch
+:4. Hole Punch Protocol;
+
+:Open stream via relay;
+:Exchange CONNECT messages;
+:Measure RTT;
+:Send SYNC;
+:Wait RTT/2;
+:Simultaneous dial;
+
+if (Hole punch\nsuccess?) then (yes)
+    #lightgreen:**SUCCESS**\nHole Punched\nDirect Connection;
+    stop
+else (no)
+    :Log hole punch failure;
+    :Update metrics;
+endif
+
+:5. Fallback to Relay;
+#lightyellow:**FALLBACK**\nRelay Forwarding;
+
+note right
+Connection established,
+but via relay overhead.
+May retry hole punch later.
+end note
+
+stop
+
+@enduml

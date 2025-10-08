@@ -1,0 +1,108 @@
+@startuml rtt-measurement-and-synchronization
+title RTT Measurement and Synchronization
+
+participant "Peer A\n(Initiator)" as PA
+participant "Relay\nServer" as Relay
+participant "Peer B\n(Receiver)" as PB
+
+== RTT Measurement ==
+
+note over PA: **T1 = 0ms**
+PA -> Relay: CONNECT message\n{send_time: T1 = 0}
+activate PA
+
+note right: Start RTT timer
+
+Relay -> PB: Forward CONNECT
+note over PB: **T1 + 10ms**
+activate PB
+
+PB -> PB: Process CONNECT\nExtract addresses
+note over PB: **T1 + 12ms**
+
+PB -> Relay: CONNECT response\n{send_time: T2}
+note left: T2 = T1 + 12ms
+
+Relay -> PA: Forward CONNECT
+note over PA: **T3 = 35ms**
+
+PA -> PA: **Calculate RTT**
+note right
+RTT = T3 - T1
+RTT = 35ms - 0ms
+**RTT = 35ms**
+end note
+
+== Synchronization ==
+
+PA -> Relay: SYNC message\n{rtt: 35ms}
+note over PA: **T3 + 2ms = 37ms**
+
+Relay -> PB: Forward SYNC
+note over PB: **T3 + 7ms = 42ms**
+
+PB -> PB: Read RTT value
+note right: RTT = 35ms
+
+== Coordinated Waiting ==
+
+PA -> PA: **Wait RTT/2**
+note right
+Wait time = 35/2 = 17.5ms
+Current: 37ms
+Start dial at: 54.5ms
+end note
+
+PB -> PB: **Wait RTT/2**
+note left
+Wait time = 35/2 = 17.5ms
+Current: 42ms
+Start dial at: 59.5ms
+end note
+
+note over PA, PB
+**Simultaneous Window**
+Both peers dial within ~5ms
+Close enough for NAT traversal
+end note
+
+== Simultaneous Dial ==
+
+note over PA: **54.5ms**
+PA -> PB: Direct QUIC SYN
+note right: Create NAT mapping\nfor outbound packet
+
+note over PB: **59.5ms**
+PB -> PA: Direct QUIC SYN
+note left: Create NAT mapping\nfor outbound packet
+
+note over PA, PB #lightgreen
+**NAT Mappings Created!**
+Packets traverse new mappings
+end note
+
+PA <-> PB: QUIC Handshake
+
+PA <--> PB: **Connection Established**
+
+deactivate PA
+deactivate PB
+
+== Timing Breakdown ==
+
+note right of Relay
+**Time Analysis:**
+• Message latency: ~10ms
+• Processing time: ~2ms
+• Total RTT: 35ms
+• Half RTT: 17.5ms
+• Dial window: 5ms difference
+• Total setup: ~60ms
+
+**Why RTT/2?**
+Accounts for propagation delay
+so packets arrive simultaneously
+at the NATs.
+end note
+
+@enduml

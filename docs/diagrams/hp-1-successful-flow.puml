@@ -1,0 +1,95 @@
+@startuml hole-punch-successful-flow
+title Successful Hole Punch Flow (Standard Case)
+
+participant "NAT Peer A\n(Initiator)" as PA
+participant "Relay Server" as Relay
+participant "NAT Peer B\n(Receiver)" as PB
+
+== Initial State ==
+note over PA, PB
+Both peers already connected to relay
+with active sessions established
+end note
+
+== Connection Attempt ==
+PA -> PA: DirectConnect(peerB)
+activate PA
+
+PA -> PA: 1. Check existing\ndirect connections
+note right: None found
+
+PA -> PA: 2. Check if LAN peer\n(same public IP + subnet)
+note right: Not LAN peer
+
+PA -> PA: 3. Check if peer has\npublic address
+note right: No public address
+
+== Hole Punch Protocol ==
+
+PA -> Relay: 4. Open hole punch stream
+note right: Via existing relay connection
+Relay -> PB: Forward stream
+activate PB
+
+PA -> PB: 5. CONNECT message
+note left
+{
+  "node_id": "peer-a",
+  "observed_addrs": ["203.0.113.1:30906"],
+  "private_addrs": ["192.168.1.10:30906"],
+  "public_ip": "203.0.113.1",
+  "private_ip": "192.168.1.10",
+  "nat_type": "cone",
+  "send_time": T1
+}
+end note
+
+PB -> PB: 6. Extract addresses\nfrom CONNECT
+
+PB -> PA: 7. CONNECT response
+note right
+{
+  "node_id": "peer-b",
+  "observed_addrs": ["203.0.113.2:30906"],
+  "private_addrs": ["192.168.2.20:30906"],
+  "public_ip": "203.0.113.2",
+  "private_ip": "192.168.2.20",
+  "nat_type": "symmetric",
+  "send_time": T2
+}
+end note
+
+PA -> PA: 8. Receive at T3\nCalculate RTT = T3 - T1
+
+PA -> PB: 9. SYNC message
+note left: {rtt: 45ms}
+
+PA -> PA: 10. Wait RTT/2 (22ms)
+PB -> PB: 10. Wait RTT/2 (22ms)
+
+PA -> Relay: Close hole punch stream
+PB -> Relay: Close hole punch stream
+
+== Simultaneous Connection ==
+
+PA -> PB: 11. Direct QUIC dial\nto 203.0.113.2:30906
+PB -> PA: 11. Direct QUIC dial\nto 203.0.113.1:30906
+
+note over PA, PB
+Simultaneous packets create
+NAT mappings on both sides!
+end note
+
+PA <--> PB: 12. Direct connection\nestablished!
+
+deactivate PA
+deactivate PB
+
+PA <--> PB: 13. Data flows directly\n(no relay overhead)
+
+note over PA, PB #lightgreen
+SUCCESS: Direct P2P connection
+Latency reduced, relay freed
+end note
+
+@enduml

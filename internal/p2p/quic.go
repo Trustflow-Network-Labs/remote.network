@@ -37,6 +37,8 @@ type QUICPeer struct {
 	dhtPeer     *DHTPeer
 	// Relay peer reference for relay service info
 	relayPeer   *RelayPeer
+	// Hole puncher for NAT traversal
+	holePuncher *HolePuncher
 	// Callback for relay peer discovery
 	onRelayDiscovered func(*database.PeerMetadata)
 	// Callback for connection failures
@@ -71,6 +73,11 @@ func (q *QUICPeer) SetDependencies(dhtPeer *DHTPeer, dbManager *database.SQLiteM
 	q.dhtPeer = dhtPeer
 	q.dbManager = dbManager
 	q.relayPeer = relayPeer
+}
+
+// SetHolePuncher sets the hole puncher for NAT traversal
+func (q *QUICPeer) SetHolePuncher(holePuncher *HolePuncher) {
+	q.holePuncher = holePuncher
 }
 
 // SetRelayDiscoveryCallback sets a callback for when relay peers are discovered
@@ -254,6 +261,17 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		// Relay data is forwarded, no response to sender
 	case MessageTypeRelaySessionQuery:
 		response = q.handleRelaySessionQuery(msg, remoteAddr)
+	case MessageTypeHolePunchConnect, MessageTypeHolePunchSync:
+		// Hole punch messages are handled by the HolePuncher
+		// The HolePuncher reads the stream directly, so we pass control to it
+		if q.holePuncher != nil {
+			if err := q.holePuncher.HandleHolePunchStream(stream); err != nil {
+				q.logger.Error(fmt.Sprintf("Hole punch stream handling failed: %v", err), "quic")
+			}
+		} else {
+			q.logger.Warn("Received hole punch message but hole puncher is not initialized", "quic")
+		}
+		return
 	default:
 		q.logger.Warn(fmt.Sprintf("Unknown message type %s from %s", msg.Type, remoteAddr), "quic")
 		return

@@ -1,0 +1,81 @@
+@startuml lan-peer-detection
+title LAN Peer Detection (Same Network Optimization)
+
+participant "NAT Peer A\n192.168.1.10\nPublic: 203.0.113.1" as PA
+participant "Relay Server" as Relay
+participant "NAT Peer B\n192.168.1.20\nPublic: 203.0.113.1" as PB
+
+== Discovery Phase ==
+
+PA -> Relay: Request metadata for peer-b
+activate PA
+Relay --> PA: Peer B metadata
+note right
+{
+  "node_id": "peer-b",
+  "public_ip": "203.0.113.1",
+  "private_ip": "192.168.1.20",
+  "quic_port": 30906,
+  "nat_type": "cone"
+}
+end note
+
+== LAN Detection ==
+
+PA -> PA: DirectConnect(peerB)
+PA -> PA: 1. Check existing connection
+note right: None found
+
+PA -> PA: 2. IsLANPeer(peerB)?
+
+PA -> PA: Check public IP:\npeerB.PublicIP == ourPublicIP
+note right
+203.0.113.1 == 203.0.113.1
+✓ MATCH
+end note
+
+PA -> PA: Check subnet:\ngetSubnet(peerB.PrivateIP, /24) ==\ngetSubnet(ourPrivateIP, /24)
+note right
+192.168.1.0/24 == 192.168.1.0/24
+✓ MATCH
+end note
+
+PA -> PA: **LAN PEER DETECTED!**
+note right #lightgreen
+Both behind same NAT gateway
+Same local subnet
+Can communicate directly via LAN
+end note
+
+== Direct LAN Connection ==
+
+PA -> PA: DirectLANDial(peerB)
+note right: Skip relay completely
+
+PA -> PB: Direct QUIC dial\nto 192.168.1.20:30906
+note over PA, PB
+Using PRIVATE IP address
+No NAT traversal needed
+end note
+
+PA <--> PB: LAN connection established
+
+deactivate PA
+
+note over PA, PB #lightgreen
+**SUCCESS: LAN Connection**
+• Gigabit speed
+• <1ms latency
+• Zero relay overhead
+• No hole punching needed
+end note
+
+== Comparison ==
+
+note right of Relay
+**Relay not used at all!**
+Saves bandwidth and latency
+for both relay and peers
+end note
+
+@enduml

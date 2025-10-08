@@ -38,6 +38,10 @@ const (
 	MessageTypeRelaySessionQuery  MessageType = "relay_session_query"
 	MessageTypeRelaySessionStatus MessageType = "relay_session_status"
 
+	// Hole Punching (DCUtR-style protocol)
+	MessageTypeHolePunchConnect MessageType = "hole_punch_connect"
+	MessageTypeHolePunchSync    MessageType = "hole_punch_sync"
+
 	// Legacy support
 	MessageTypeEcho             MessageType = "echo"
 )
@@ -403,6 +407,34 @@ type RelaySessionStatusData struct {
 	LastKeepalive int64  `json:"last_keepalive,omitempty"` // Unix timestamp
 }
 
+// HolePunchConnectData contains hole punch CONNECT message data
+// Sent by both initiator and receiver to exchange observed addresses and measure RTT
+type HolePunchConnectData struct {
+	NodeID string `json:"node_id"` // Sender's node ID
+
+	// Observed addresses (public addresses where this peer can be reached)
+	// Format: "IP:Port" (e.g., "203.0.113.1:30906")
+	ObservedAddrs []string `json:"observed_addrs"`
+
+	// Private addresses for LAN detection
+	PrivateAddrs []string `json:"private_addrs,omitempty"`
+
+	// Network information for connection strategy
+	PublicIP  string `json:"public_ip"`           // Public IP address
+	PrivateIP string `json:"private_ip"`          // Private IP address
+	NATType   string `json:"nat_type,omitempty"`  // NAT type classification
+	IsRelay   bool   `json:"is_relay,omitempty"`  // Is this peer a relay?
+
+	// Timing information
+	SendTime int64 `json:"send_time"` // Unix timestamp in milliseconds when message sent
+}
+
+// HolePunchSyncData contains hole punch SYNC message data
+// Sent by initiator to signal that hole punching should begin
+type HolePunchSyncData struct {
+	RTT int64 `json:"rtt"` // Measured RTT in milliseconds
+}
+
 // CreateRelayRegister creates a relay registration request
 func CreateRelayRegister(nodeID, topic, natType, publicEndpoint, privateEndpoint string, requiresRelay bool) *QUICMessage {
 	return NewQUICMessage(MessageTypeRelayRegister, &RelayRegisterData{
@@ -500,5 +532,26 @@ func CreateRelaySessionStatus(clientNodeID string, hasSession bool, sessionID st
 		SessionID:     sessionID,
 		SessionActive: sessionActive,
 		LastKeepalive: lastKeepalive,
+	})
+}
+
+// CreateHolePunchConnect creates a hole punch CONNECT message
+func CreateHolePunchConnect(nodeID string, observedAddrs, privateAddrs []string, publicIP, privateIP, natType string, isRelay bool) *QUICMessage {
+	return NewQUICMessage(MessageTypeHolePunchConnect, &HolePunchConnectData{
+		NodeID:        nodeID,
+		ObservedAddrs: observedAddrs,
+		PrivateAddrs:  privateAddrs,
+		PublicIP:      publicIP,
+		PrivateIP:     privateIP,
+		NATType:       natType,
+		IsRelay:       isRelay,
+		SendTime:      time.Now().UnixMilli(),
+	})
+}
+
+// CreateHolePunchSync creates a hole punch SYNC message
+func CreateHolePunchSync(rtt int64) *QUICMessage {
+	return NewQUICMessage(MessageTypeHolePunchSync, &HolePunchSyncData{
+		RTT: rtt,
 	})
 }

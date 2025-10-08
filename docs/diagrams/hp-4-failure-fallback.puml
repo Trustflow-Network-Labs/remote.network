@@ -1,0 +1,104 @@
+@startuml hole-punch-failure-fallback
+title Hole Punch Failure (Fallback to Relay Forwarding)
+
+participant "NAT Peer A\n(Strict Firewall)" as PA
+participant "Relay Server" as Relay
+participant "NAT Peer B\n(Strict Firewall)" as PB
+
+== Initial Connection Attempt ==
+
+PA -> PA: DirectConnect(peerB)
+activate PA
+
+PA -> PA: 1-3. Checks pass,\nproceed to hole punch
+
+== Hole Punch Protocol (Steps 4-10) ==
+
+PA -> PB: 4-7. CONNECT exchange\n(via relay)
+PB -> PA:
+note over PA, PB: RTT measured successfully
+
+PA -> PB: 8-9. SYNC message
+PA -> PA: 10. Wait RTT/2
+PB -> PB: 10. Wait RTT/2
+
+== Simultaneous Dial Attempt ==
+
+PA -x PB: 11. Direct QUIC dial\nto peer B
+PB -x PA: 11. Direct QUIC dial\nto peer A
+
+note over PA, PB #pink
+**BOTH CONNECTIONS FAIL**
+Strict NAT/firewall rules
+block incoming packets
+end note
+
+PA -> PA: Connection timeout (5s)
+PB -> PB: Connection timeout (5s)
+
+== Hole Punch Failure ==
+
+PA -> PA: Log hole punch failure
+note right
+**Metrics Updated:**
+• FailedPunches++
+• NATType: symmetric-symmetric
+• Reason: timeout
+end note
+
+PB -> PB: Log hole punch failure
+
+== Fallback to Relay ==
+
+PA -> PA: Keep relay connection active
+note right #lightyellow
+Relay connection already exists
+from initial registration
+end note
+
+deactivate PA
+
+PA -> Relay: Send data via relay
+activate PA
+note left
+MessageType: relay_data
+{
+  "session_id": "session-123",
+  "source_node_id": "peer-a",
+  "target_node_id": "peer-b",
+  "data": <encrypted payload>
+}
+end note
+
+Relay -> Relay: Lookup session for peer-b
+Relay -> PB: Forward data
+activate PB
+
+PB --> Relay: ACK
+Relay --> PA: ACK
+
+PA <--> Relay: Continue data exchange
+Relay <--> PB: via relay forwarding
+
+deactivate PA
+deactivate PB
+
+note over PA, Relay, PB #lightyellow
+**FALLBACK ACTIVE**
+• Direct connection failed
+• Using relay for data forwarding
+• Higher latency, but functional
+• Relay bandwidth consumed
+end note
+
+== Retry Strategy ==
+
+note over PA
+**Optional: Retry Later**
+• Wait 5 minutes
+• Network conditions may change
+• Attempt hole punch again
+• Success rate improves over time
+end note
+
+@enduml

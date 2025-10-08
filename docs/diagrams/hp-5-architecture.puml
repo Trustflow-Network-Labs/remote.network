@@ -1,0 +1,76 @@
+@startuml hole-punch-architecture
+title Hole Punching System Architecture
+
+package "NAT Peer Node" {
+
+    component "HolePuncher" as HP {
+        [LAN Peer Detector]
+        [Direct Dial Handler]
+        [Hole Punch Initiator]
+        [Hole Punch Receiver]
+        [RTT Measurement]
+        [Active Attempts Tracker]
+        [Metrics Collector]
+    }
+
+    component "QUICPeer" as QP {
+        [Connection Manager]
+        [Stream Handler]
+        [Message Codec]
+    }
+
+    component "NATDetector" as ND {
+        [STUN Client]
+        [NAT Classification]
+        [Port Prediction]
+    }
+
+    component "PeerMetadataManager" as PMM {
+        [Metadata Cache]
+        [Address Book]
+    }
+
+    component "RelayManager" as RM {
+        [Relay Selector]
+        [Session Manager]
+        [Keepalive Handler]
+    }
+
+    database "SQLite\nDatabase" as DB
+}
+
+cloud "Network" {
+    [Relay Server] as Relay
+    [Other NAT Peers] as Peers
+}
+
+HP --> QP: Use for connections
+HP --> ND: Get NAT info
+HP --> PMM: Query peer metadata
+HP ..> RM: Fallback on failure
+
+QP --> DB: Store metadata
+QP --> Relay: Via relay connection
+QP --> Peers: Direct connections
+
+RM --> Relay: Maintain session
+ND --> Relay: STUN queries
+
+note right of HP
+**Connection Decision Logic**
+1. Check existing connection
+2. Detect LAN peer
+3. Try direct dial (public)
+4. Attempt hole punch
+5. Fallback to relay
+end note
+
+note bottom of DB
+**Stored Data**
+• Peer metadata
+• NAT classifications
+• Relay sessions
+• Hole punch metrics
+end note
+
+@enduml

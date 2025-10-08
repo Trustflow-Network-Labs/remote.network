@@ -33,6 +33,7 @@ type PeerManager struct {
 	trafficMonitor *p2p.RelayTrafficMonitor
 	natDetector    *p2p.NATDetector
 	topologyMgr    *p2p.NATTopologyManager
+	holePuncher    *p2p.HolePuncher
 	dbManager      *database.SQLiteManager
 	topics         map[string]*TopicState
 	ctx            context.Context
@@ -76,6 +77,9 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 	// Initialize relay traffic monitor
 	trafficMonitor := p2p.NewRelayTrafficMonitor(config, logger, dbManager)
 
+	// Initialize hole puncher for NAT traversal (will be set on QUIC peer later)
+	var holePuncher *p2p.HolePuncher
+
 	// Initialize relay peer if relay mode is enabled
 	var relayPeer *p2p.RelayPeer
 	var relayManager *p2p.RelayManager
@@ -99,6 +103,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 		trafficMonitor: trafficMonitor,
 		natDetector:    natDetector,
 		topologyMgr:    topologyMgr,
+		holePuncher:    holePuncher,
 		dbManager:      dbManager,
 		topics:         make(map[string]*TopicState),
 		ctx:            ctx,
@@ -107,6 +112,13 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 
 	// Set dependencies on QUIC peer
 	quic.SetDependencies(dht, dbManager, relayPeer)
+
+	// Initialize and set hole puncher if not in relay mode
+	if !config.GetConfigBool("relay_mode", false) && config.GetConfigBool("hole_punch_enabled", true) {
+		pm.holePuncher = p2p.NewHolePuncher(config, logger, quic, dht, dbManager, natDetector)
+		quic.SetHolePuncher(pm.holePuncher)
+		logger.Info("Hole puncher initialized for NAT traversal", "core")
+	}
 
 	// Set up relay discovery callback for NAT peers
 	if relayManager != nil {
@@ -182,6 +194,15 @@ func (pm *PeerManager) Start() error {
 			pm.logger.Warn(fmt.Sprintf("Failed to start relay manager: %v", err), "core")
 		} else {
 			pm.logger.Info("Relay manager started for NAT peer", "core")
+		}
+	}
+
+	// Start hole puncher for NAT traversal (after NAT detection is complete)
+	if pm.holePuncher != nil {
+		if err := pm.holePuncher.Start(); err != nil {
+			pm.logger.Warn(fmt.Sprintf("Failed to start hole puncher: %v", err), "core")
+		} else {
+			pm.logger.Info("Hole puncher started for NAT traversal", "core")
 		}
 	}
 
@@ -518,6 +539,11 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 		stats["traffic_stats"] = pm.trafficMonitor.GetStats()
 	}
 
+	// Add hole puncher metrics
+	if pm.holePuncher != nil {
+		stats["hole_punch_metrics"] = pm.holePuncher.GetMetrics()
+	}
+
 	topicStats := make(map[string]interface{})
 	for name, state := range pm.topics {
 		state.mutex.RLock()
@@ -560,6 +586,13 @@ func (pm *PeerManager) Stop() error {
 	}
 	if pm.trafficMonitor != nil {
 		pm.trafficMonitor.Stop()
+	}
+
+	// Stop hole puncher
+	if pm.holePuncher != nil {
+		if err := pm.holePuncher.Stop(); err != nil {
+			pm.logger.Warn(fmt.Sprintf("Error stopping hole puncher: %v", err), "core")
+		}
 	}
 
 	// Stop QUIC peer

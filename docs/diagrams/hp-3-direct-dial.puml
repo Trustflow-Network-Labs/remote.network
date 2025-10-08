@@ -1,0 +1,86 @@
+@startuml direct-dial-public-peer
+title Direct Dial to Public Peer (No Hole Punch Needed)
+
+participant "NAT Peer A" as PA
+participant "Relay Server" as Relay
+participant "Public Peer B\n203.0.113.42:30906\n(No NAT)" as PB
+
+== Discovery Phase ==
+
+PA -> Relay: Request metadata for peer-b
+activate PA
+Relay --> PA: Peer B metadata
+note right
+{
+  "node_id": "peer-b",
+  "observed_addrs": [
+    "203.0.113.42:30906"
+  ],
+  "public_ip": "203.0.113.42",
+  "nat_type": "none",
+  "is_relay": false
+}
+end note
+
+== Connection Attempt ==
+
+PA -> PA: DirectConnect(peerB)
+
+PA -> PA: 1. Check existing connection
+note right: None found
+
+PA -> PA: 2. IsLANPeer(peerB)?
+note right: Different public IP - Not LAN
+
+PA -> PA: 3. HasPublicAddress(peerB)?
+PA -> PA: Check observed_addrs
+note right
+Found public address:
+203.0.113.42:30906
+✓ PUBLIC PEER DETECTED
+end note
+
+== Direct Dial ==
+
+PA -> PA: DirectDialPublic(peerB)
+note right #lightgreen
+Skip hole punching!
+Peer B is publicly reachable
+end note
+
+PA -> PB: Direct QUIC dial\nto 203.0.113.42:30906
+note over PA, PB
+Standard QUIC connection
+No relay coordination needed
+end note
+
+alt Connection Successful
+
+    PB --> PA: QUIC handshake complete
+    PA <--> PB: Direct connection established
+
+    deactivate PA
+
+    note over PA, PB #lightgreen
+    **SUCCESS: Direct Connection**
+    • No relay overhead
+    • No hole punching delay
+    • Simple and fast
+    end note
+
+else Connection Failed
+
+    PB --x PA: Timeout / Connection refused
+
+    PA -> PA: Fallback to hole punch
+    note right
+    Maybe firewall blocking?
+    Try hole punch as backup
+    end note
+
+    PA -> Relay: Initiate hole punch
+    note right: Continue with\nstandard hole punch flow
+
+end
+
+@enduml
