@@ -37,17 +37,33 @@ func NewNodeTypeManager() *NodeTypeManager {
 }
 
 // getLocalIP returns the local IP address of the machine
+// Prioritizes physical network adapters (WiFi, Ethernet) over virtual adapters (Hyper-V, Docker)
 func (nt *NodeTypeManager) getLocalIP() (string, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return "", err
 	}
 
+	type ipCandidate struct {
+		ip       string
+		priority int
+	}
+
+	var candidates []ipCandidate
+
 	for _, iface := range interfaces {
 		// Skip loopback and down interfaces
 		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
 			continue
 		}
+
+		// Skip virtual adapters by name patterns
+		ifaceName := strings.ToLower(iface.Name)
+		isVirtual := strings.Contains(ifaceName, "vethernet") ||
+			strings.Contains(ifaceName, "docker") ||
+			strings.Contains(ifaceName, "vmware") ||
+			strings.Contains(ifaceName, "virtualbox") ||
+			strings.Contains(ifaceName, "hyper-v")
 
 		addrs, err := iface.Addrs()
 		if err != nil {
@@ -64,13 +80,60 @@ func (nt *NodeTypeManager) getLocalIP() (string, error) {
 			}
 
 			// Only consider IPv4 addresses
-			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
-				return ip.String(), nil
+			if ip == nil || ip.To4() == nil || ip.IsLoopback() {
+				continue
+			}
+
+			ipStr := ip.String()
+
+			// Calculate priority based on IP range and adapter type
+			priority := 0
+
+			// Highest priority: 192.168.x.x on physical adapters (common home/office LANs)
+			if strings.HasPrefix(ipStr, "192.168.") {
+				priority = 100
+			} else if strings.HasPrefix(ipStr, "10.") {
+				// Second priority: 10.x.x.x (also common in enterprise LANs)
+				priority = 90
+			} else if strings.HasPrefix(ipStr, "172.") {
+				// 172.16-31.x.x range - could be LAN or virtual adapter
+				// Parse second octet to check if it's in 16-31 range
+				parts := strings.Split(ipStr, ".")
+				if len(parts) >= 2 {
+					var secondOctet int
+					fmt.Sscanf(parts[1], "%d", &secondOctet)
+					if secondOctet >= 16 && secondOctet <= 31 {
+						// In private range, but often used by virtual adapters
+						priority = 50
+					}
+				}
+			}
+
+			// Reduce priority for virtual adapters
+			if isVirtual {
+				priority -= 40
+			}
+
+			// Skip if priority is too low (likely virtual adapter)
+			if priority > 0 {
+				candidates = append(candidates, ipCandidate{ip: ipStr, priority: priority})
 			}
 		}
 	}
 
-	return "", fmt.Errorf("no suitable local IP found")
+	// Return the highest priority IP
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no suitable local IP found")
+	}
+
+	bestCandidate := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if candidate.priority > bestCandidate.priority {
+			bestCandidate = candidate
+		}
+	}
+
+	return bestCandidate.ip, nil
 }
 
 // isPrivateIP checks if the given IP is in private address ranges
