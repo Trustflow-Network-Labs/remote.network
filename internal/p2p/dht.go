@@ -314,6 +314,15 @@ func (d *DHTPeer) addCustomBootstrapNodes() {
 		} else {
 			d.logger.Info(fmt.Sprintf("Added %s bootstrap node %s to DHT routing table (ID: %x)", nodeType, nodeAddr, nodeInfo.ID), "dht")
 
+			// Trigger QUIC metadata exchange for the bootstrap node itself
+			// Bootstrap nodes are peers too and need their metadata stored
+			if d.onPeerDiscovered != nil {
+				quicPort := d.config.GetConfigInt("quic_port", 30906, 1024, 65535)
+				bootstrapQuicAddr := fmt.Sprintf("%s:%d", nodeInfo.Addr.IP.String(), quicPort)
+				d.logger.Debug(fmt.Sprintf("Triggering QUIC metadata exchange with bootstrap node %s", bootstrapQuicAddr), "dht")
+				go d.onPeerDiscovered(bootstrapQuicAddr, "remote-network-mesh")
+			}
+
 			// A3.1: Exchange topic peers with successfully added bootstrap node
 			// This allows us to discover topic peers from bootstrap nodes that have them
 			go func(nodeAddr krpc.NodeAddr) {

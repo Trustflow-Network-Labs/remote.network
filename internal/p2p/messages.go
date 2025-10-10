@@ -66,14 +66,18 @@ type MetadataRequestData struct {
 	Includes []string                 `json:"includes,omitempty"` // What metadata to include: "network", "services", "capabilities"
 	// Bidirectional exchange: requester includes their own metadata
 	MyMetadata *database.PeerMetadata `json:"my_metadata,omitempty"` // Requester's metadata for bidirectional exchange
+	// Peer exchange: requester includes known peers to share
+	KnownPeers []*PeerInfo `json:"known_peers,omitempty"` // Peers known by requester (peer exchange)
 }
 
 // MetadataResponseData contains peer metadata in response
 type MetadataResponseData struct {
-	Topic    string                    `json:"topic"`
-	NodeID   string                    `json:"node_id"`
-	Metadata *database.PeerMetadata    `json:"metadata,omitempty"`
-	Error    string                    `json:"error,omitempty"`
+	Topic      string                 `json:"topic"`
+	NodeID     string                 `json:"node_id"`
+	Metadata   *database.PeerMetadata `json:"metadata,omitempty"`
+	Error      string                 `json:"error,omitempty"`
+	// Peer exchange: responder includes known peers to share
+	KnownPeers []*PeerInfo `json:"known_peers,omitempty"` // Peers known by responder (peer exchange)
 }
 
 // PeerAnnounceData contains peer announcement information
@@ -584,6 +588,9 @@ type PeerMetadataUpdateData struct {
 	// Broadcast metadata
 	Sequence int64 `json:"sequence"` // For deduplication
 	TTL      int   `json:"ttl"`      // Prevent infinite loops
+
+	// Peer exchange: sender includes known peers to share
+	KnownPeers []*PeerInfo `json:"known_peers,omitempty"` // Peers known by sender (peer exchange)
 }
 
 // RelayUpdateInfo contains relay connection change information

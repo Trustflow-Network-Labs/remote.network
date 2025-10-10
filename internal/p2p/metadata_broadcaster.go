@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ type MetadataBroadcaster struct {
 	quicPeer    *QUICPeer
 	dhtPeer     *DHTPeer
 	holePuncher *HolePuncher
+	peerExchange *PeerExchange
 
 	// Broadcast tracking
 	sequenceNum   int64
@@ -67,6 +69,12 @@ func NewMetadataBroadcaster(
 
 	dedupeWindow := config.GetConfigDuration("metadata_broadcast_dedupe_window", 5*time.Minute)
 
+	// Initialize peer exchange
+	var peerExchange *PeerExchange
+	if dhtPeer != nil && dbManager != nil {
+		peerExchange = NewPeerExchange(dbManager, config, logger, dhtPeer.NodeID())
+	}
+
 	return &MetadataBroadcaster{
 		config:               config,
 		logger:               logger,
@@ -74,6 +82,7 @@ func NewMetadataBroadcaster(
 		quicPeer:             quicPeer,
 		dhtPeer:              dhtPeer,
 		holePuncher:          holePuncher,
+		peerExchange:         peerExchange,
 		sequenceNum:          0,
 		recentBroadcasts:     make(map[string]int64),
 		dedupeWindow:         dedupeWindow,
@@ -137,6 +146,19 @@ func (mb *MetadataBroadcaster) BroadcastMetadataChange(
 		networkUpdate,
 	)
 
+	// Peer exchange: add known peers to broadcast
+	if mb.peerExchange != nil {
+		knownPeers := mb.peerExchange.SelectPeersToShare(nil, metadata.Topic) // nil = no specific requester
+		if updateData, ok := msg.Data.(*PeerMetadataUpdateData); ok {
+			updateData.KnownPeers = knownPeers
+			mb.logger.Debug(fmt.Sprintf("Including %d known peers in broadcast", len(knownPeers)), "metadata-broadcaster")
+		}
+	}
+
+	// Debug: verify metadata in broadcast message
+	mb.logger.Debug(fmt.Sprintf("Creating broadcast message: seq=%d, version=%d, using_relay=%v, connected_relay=%s",
+		sequence, metadata.Version, metadata.NetworkInfo.UsingRelay, metadata.NetworkInfo.ConnectedRelay), "metadata-broadcaster")
+
 	// Record our own broadcast to prevent loops
 	mb.recordBroadcast(mb.dhtPeer.NodeID(), sequence)
 
@@ -189,6 +211,22 @@ func (mb *MetadataBroadcaster) attemptDelivery(peer *database.PeerMetadata, task
 	task.Attempts++
 	task.LastAttempt = time.Now()
 
+	// Validate peer metadata has network info
+	if peer == nil {
+		mb.logger.Warn("Attempted delivery to nil peer", "metadata-broadcaster")
+		mb.markFailed(task)
+		return
+	}
+	if peer.NetworkInfo.PublicIP == "" && peer.NetworkInfo.PrivateIP == "" {
+		mb.logger.Warn(fmt.Sprintf("Peer %s has no network information, skipping delivery", peer.NodeID), "metadata-broadcaster")
+		mb.markFailed(task)
+		return
+	}
+
+	mb.logger.Debug(fmt.Sprintf("Attempting delivery to %s: using_relay=%v, connected_relay=%s, public_ip=%s, private_ip=%s",
+		peer.NodeID, peer.NetworkInfo.UsingRelay, peer.NetworkInfo.ConnectedRelay,
+		peer.NetworkInfo.PublicIP, peer.NetworkInfo.PrivateIP), "metadata-broadcaster")
+
 	timeout := mb.config.GetConfigDuration("metadata_broadcast_timeout", 10*time.Second)
 	ctx, cancel := context.WithTimeout(mb.ctx, timeout)
 	defer cancel()
@@ -227,12 +265,17 @@ func (mb *MetadataBroadcaster) attemptDelivery(peer *database.PeerMetadata, task
 
 	// 4. Try via relay (for NAT peers using relay)
 	if peer.NetworkInfo.UsingRelay && peer.NetworkInfo.ConnectedRelay != "" {
+		mb.logger.Debug(fmt.Sprintf("Attempting relay forward for %s via relay %s", peer.NodeID, peer.NetworkInfo.ConnectedRelay), "metadata-broadcaster")
 		if err = mb.sendViaRelay(ctx, peer, task.Message); err == nil {
 			strategy = "relay"
 			mb.logger.Debug(fmt.Sprintf("Delivered to %s via relay", peer.NodeID), "metadata-broadcaster")
 			mb.markDelivered(task, strategy)
 			return
+		} else {
+			mb.logger.Warn(fmt.Sprintf("Relay forward failed for %s: %v", peer.NodeID, err), "metadata-broadcaster")
 		}
+	} else if peer.NetworkInfo.UsingRelay {
+		mb.logger.Debug(fmt.Sprintf("Peer %s is using relay but ConnectedRelay is empty, skipping relay forward", peer.NodeID), "metadata-broadcaster")
 	}
 
 	// 5. Try hole punch (if enabled and we have hole puncher)
@@ -263,14 +306,23 @@ func (mb *MetadataBroadcaster) sendToDirectConnection(ctx context.Context, peerI
 
 	// Try to find connection by matching peer metadata
 	metadata, err := mb.dbManager.PeerMetadata.GetPeerMetadata(peerID, "")
-	if err != nil {
+	if err != nil || metadata == nil {
 		return fmt.Errorf("no metadata for peer: %v", err)
 	}
 
+	// Validate that NetworkInfo is populated
+	if metadata.NetworkInfo.PublicIP == "" && metadata.NetworkInfo.PrivateIP == "" {
+		return fmt.Errorf("peer metadata has no network information")
+	}
+
 	quicPort := mb.config.GetConfigInt("quic_port", 30906, 1024, 65535)
-	possibleAddrs := []string{
-		fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, quicPort),
-		fmt.Sprintf("%s:%d", metadata.NetworkInfo.PrivateIP, quicPort),
+	possibleAddrs := []string{}
+
+	if metadata.NetworkInfo.PublicIP != "" {
+		possibleAddrs = append(possibleAddrs, fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, quicPort))
+	}
+	if metadata.NetworkInfo.PrivateIP != "" {
+		possibleAddrs = append(possibleAddrs, fmt.Sprintf("%s:%d", metadata.NetworkInfo.PrivateIP, quicPort))
 	}
 
 	for _, conn := range connections {
@@ -301,20 +353,42 @@ func (mb *MetadataBroadcaster) sendToPublicPeer(ctx context.Context, peer *datab
 
 // sendViaRelay attempts to send via relay forwarding
 func (mb *MetadataBroadcaster) sendViaRelay(ctx context.Context, peer *database.PeerMetadata, msg *QUICMessage) error {
+	mb.logger.Debug(fmt.Sprintf("sendViaRelay: Looking up relay %s for peer %s (session: %s)",
+		peer.NetworkInfo.ConnectedRelay, peer.NodeID, peer.NetworkInfo.RelaySessionID), "metadata-broadcaster")
+
 	// Get relay metadata
-	relayMetadata, err := mb.dbManager.PeerMetadata.GetPeerMetadata(peer.NetworkInfo.ConnectedRelay, "")
+	relayMetadata, err := mb.dbManager.PeerMetadata.GetPeerMetadata(peer.NetworkInfo.ConnectedRelay, peer.Topic)
 	if err != nil {
+		mb.logger.Warn(fmt.Sprintf("sendViaRelay: Relay %s not found in database: %v", peer.NetworkInfo.ConnectedRelay, err), "metadata-broadcaster")
 		return fmt.Errorf("relay not found: %v", err)
 	}
 
-	// Connect to relay
-	quicPort := mb.config.GetConfigInt("quic_port", 30906, 1024, 65535)
-	relayAddr := fmt.Sprintf("%s:%d", relayMetadata.NetworkInfo.PublicIP, quicPort)
+	// Validate relay metadata exists
+	if relayMetadata == nil {
+		return fmt.Errorf("relay metadata is nil")
+	}
 
+	// Validate relay metadata has network info
+	if relayMetadata.NetworkInfo.PublicIP == "" && relayMetadata.NetworkInfo.PrivateIP == "" {
+		return fmt.Errorf("relay metadata has no network information")
+	}
+
+	// Connect to relay (prefer public IP, fallback to private)
+	quicPort := mb.config.GetConfigInt("quic_port", 30906, 1024, 65535)
+	relayAddr := ""
+	if relayMetadata.NetworkInfo.PublicIP != "" {
+		relayAddr = fmt.Sprintf("%s:%d", relayMetadata.NetworkInfo.PublicIP, quicPort)
+	} else {
+		relayAddr = fmt.Sprintf("%s:%d", relayMetadata.NetworkInfo.PrivateIP, quicPort)
+	}
+
+	mb.logger.Debug(fmt.Sprintf("sendViaRelay: Connecting to relay at %s", relayAddr), "metadata-broadcaster")
 	conn, err := mb.quicPeer.ConnectToPeer(relayAddr)
 	if err != nil {
+		mb.logger.Warn(fmt.Sprintf("sendViaRelay: Failed to connect to relay %s: %v", relayAddr, err), "metadata-broadcaster")
 		return fmt.Errorf("failed to connect to relay: %v", err)
 	}
+	mb.logger.Debug(fmt.Sprintf("sendViaRelay: Connected to relay %s", relayAddr), "metadata-broadcaster")
 
 	// Open stream
 	stream, err := conn.OpenStreamSync(ctx)
@@ -340,11 +414,21 @@ func (mb *MetadataBroadcaster) sendViaRelay(ctx context.Context, peer *database.
 
 	msgBytes, err := forwardMsg.Marshal()
 	if err != nil {
+		mb.logger.Warn(fmt.Sprintf("sendViaRelay: Failed to marshal relay forward: %v", err), "metadata-broadcaster")
 		return fmt.Errorf("failed to marshal forward: %v", err)
 	}
 
-	_, err = stream.Write(msgBytes)
-	return err
+	mb.logger.Debug(fmt.Sprintf("sendViaRelay: Sending relay_forward to %s for peer %s (session: %s, size: %d bytes)",
+		relayAddr, peer.NodeID, peer.NetworkInfo.RelaySessionID, len(msgBytes)), "metadata-broadcaster")
+
+	n, err := stream.Write(msgBytes)
+	if err != nil {
+		mb.logger.Warn(fmt.Sprintf("sendViaRelay: Failed to write to relay: %v", err), "metadata-broadcaster")
+		return err
+	}
+
+	mb.logger.Debug(fmt.Sprintf("sendViaRelay: Successfully sent %d bytes to relay for peer %s", n, peer.NodeID), "metadata-broadcaster")
+	return nil
 }
 
 // sendViaHolePunch attempts to send via hole punching
@@ -380,8 +464,42 @@ func (mb *MetadataBroadcaster) sendMessage(ctx context.Context, addr string, msg
 		return err
 	}
 
+	// Write the message
 	_, err = stream.Write(msgBytes)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Read the acknowledgment response
+	buffer := make([]byte, mb.config.GetConfigInt("buffer_size", 65536, 1024, 1048576))
+	n, err := stream.Read(buffer)
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("failed to read ack: %v", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("no ack received")
+	}
+
+	// Parse and validate acknowledgment
+	ackMsg, err := UnmarshalQUICMessage(buffer[:n])
+	if err != nil {
+		return fmt.Errorf("failed to parse ack: %v", err)
+	}
+
+	if ackMsg.Type != MessageTypePeerMetadataUpdateAck {
+		return fmt.Errorf("unexpected response type: %s", ackMsg.Type)
+	}
+
+	var ackData PeerMetadataUpdateAckData
+	if err := ackMsg.GetDataAs(&ackData); err != nil {
+		return fmt.Errorf("failed to parse ack data: %v", err)
+	}
+
+	if ackData.Status != "applied" {
+		return fmt.Errorf("metadata update failed: %s", ackData.Error)
+	}
+
+	return nil
 }
 
 // isLANPeer checks if peer is on same LAN (uses same logic as hole puncher)

@@ -86,6 +86,7 @@ relay_max_circuit_age = 3600s
 # Relay Selection (for NAT peers)
 relay_max_latency = 500ms
 relay_min_reputation = 0.3
+relay_initial_reputation = 0.5
 relay_max_pricing = 0.01
 relay_switch_threshold = 0.2
 relay_evaluation_interval = 5m
@@ -126,3 +127,31 @@ metadata_broadcast_dedupe_window = 5m
 # Hole punching for broadcasts
 metadata_broadcast_hole_punch_enabled = true
 metadata_broadcast_hole_punch_timeout = 10s
+
+[peer_exchange]
+# Peer Exchange Protocol Configuration
+# Enables sharing of known peer lists during metadata exchanges
+
+# Peer selection thresholds
+# Minimum peers to exchange (send all if below this)
+peer_exchange_min = 20
+# Maximum peers to exchange (use smart selection if above)
+peer_exchange_max = 20
+# Maximum age of peers to share in seconds (2 hours default)
+peer_exchange_max_age_seconds = 7200
+
+# Smart selection is used when peer count > peer_exchange_min
+# Selection strategy:
+# - Relays: 25% (critical infrastructure, high priority)
+# - NAT with relay: 40% (reachable peers, helps NAT-NAT discovery)
+# - Public peers: 20% (directly reachable)
+# - Others: 15% (variety and network diversity)
+#
+# Scoring factors:
+# - Relay nodes: 5x multiplier
+# - NAT peers with relay: 3x multiplier
+# - Public non-relay peers: 2x multiplier
+# - Fresh peers (<5min): 2x multiplier
+# - Different relay cluster: 1.5x multiplier
+# - Different subnet: 1.3x multiplier
+# - Same LAN: 0.5x penalty

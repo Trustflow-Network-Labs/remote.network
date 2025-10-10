@@ -37,7 +37,7 @@ func NewNodeTypeManager() *NodeTypeManager {
 }
 
 // getLocalIP returns the local IP address of the machine
-// Prioritizes physical network adapters (WiFi, Ethernet) over virtual adapters (Hyper-V, Docker)
+// Prioritizes public IPs first, then physical network adapters (WiFi, Ethernet) over virtual adapters (Hyper-V, Docker)
 func (nt *NodeTypeManager) getLocalIP() (string, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -47,6 +47,7 @@ func (nt *NodeTypeManager) getLocalIP() (string, error) {
 	type ipCandidate struct {
 		ip       string
 		priority int
+		isPublic bool
 	}
 
 	var candidates []ipCandidate
@@ -85,38 +86,42 @@ func (nt *NodeTypeManager) getLocalIP() (string, error) {
 			}
 
 			ipStr := ip.String()
+			isPublicIP := !nt.isPrivateIP(ipStr)
 
 			// Calculate priority based on IP range and adapter type
 			priority := 0
 
-			// Highest priority: 192.168.x.x on physical adapters (common home/office LANs)
-			if strings.HasPrefix(ipStr, "192.168.") {
-				priority = 100
-			} else if strings.HasPrefix(ipStr, "10.") {
-				// Second priority: 10.x.x.x (also common in enterprise LANs)
-				priority = 90
-			} else if strings.HasPrefix(ipStr, "172.") {
-				// 172.16-31.x.x range - could be LAN or virtual adapter
-				// Parse second octet to check if it's in 16-31 range
-				parts := strings.Split(ipStr, ".")
-				if len(parts) >= 2 {
-					var secondOctet int
-					fmt.Sscanf(parts[1], "%d", &secondOctet)
-					if secondOctet >= 16 && secondOctet <= 31 {
-						// In private range, but often used by virtual adapters
-						priority = 50
+			if isPublicIP {
+				// Highest priority: Public IPs (for servers with direct public IP binding)
+				priority = 1000
+			} else {
+				// For private IPs, prioritize common LAN ranges
+				if strings.HasPrefix(ipStr, "192.168.") {
+					priority = 100
+				} else if strings.HasPrefix(ipStr, "10.") {
+					// 10.x.x.x - common in enterprise LANs and VPNs
+					priority = 90
+				} else if strings.HasPrefix(ipStr, "172.") {
+					// 172.16-31.x.x range - could be LAN or virtual adapter
+					parts := strings.Split(ipStr, ".")
+					if len(parts) >= 2 {
+						var secondOctet int
+						fmt.Sscanf(parts[1], "%d", &secondOctet)
+						if secondOctet >= 16 && secondOctet <= 31 {
+							priority = 50
+						}
 					}
 				}
-			}
 
-			// Reduce priority for virtual adapters
-			if isVirtual {
-				priority -= 40
+				// Reduce priority for virtual adapters
+				if isVirtual {
+					priority -= 40
+				}
 			}
 
 			// Skip if priority is too low (likely virtual adapter)
 			if priority > 0 {
-				candidates = append(candidates, ipCandidate{ip: ipStr, priority: priority})
+				candidates = append(candidates, ipCandidate{ip: ipStr, priority: priority, isPublic: isPublicIP})
 			}
 		}
 	}
@@ -225,21 +230,9 @@ func (nt *NodeTypeManager) detectNodeType() (NodeType, error) {
 		return Private, nil
 	}
 
-	// Method 3: Compare with external IP
-	externalIP, err := nt.getExternalIP()
-	if err != nil {
-		// Could not fetch external IP
-		// Defaulting to private due to error
-		return Private, nil
-	}
-
-	if localIP == externalIP {
-		// Local IP matches external IP, node type: public
-		return Public, nil
-	} else {
-		// Local IP differs from external IP, node type: private
-		return Private, nil
-	}
+	// If local IP is not private, it's a public IP - this node is public
+	// No need to fetch external IP, we already have a public IP bound locally
+	return Public, nil
 }
 
 // determineNodeType checks for manual override first, then auto-detects

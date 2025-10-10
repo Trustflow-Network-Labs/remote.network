@@ -320,20 +320,15 @@ func (rm *RelayManager) DisconnectRelay() {
 				metadata.Version++
 				metadata.Timestamp = time.Now()
 				metadata.LastSeen = time.Now()
+				metadata.Source = "relay_client" // Indicate this metadata is from relay disconnection
 
 				// Store updated metadata
 				if err := rm.dbManager.PeerMetadata.StorePeerMetadata(metadata); err != nil {
 					rm.logger.Warn(fmt.Sprintf("Failed to store metadata after relay disconnect: %v", err), "relay-manager")
 				}
 
-				// Broadcast the change
-				relayUpdate := &RelayUpdateInfo{
-					UsingRelay:     false,
-					ConnectedRelay: "",
-					SessionID:      "",
-					RelayAddress:   "",
-				}
-				if err := rm.broadcaster.BroadcastMetadataChange("relay", metadata, relayUpdate, nil); err != nil {
+				// Broadcast the change using "full" metadata
+				if err := rm.broadcaster.BroadcastMetadataChange("full", metadata, nil, nil); err != nil {
 					rm.logger.Warn(fmt.Sprintf("Failed to broadcast relay disconnect: %v", err), "relay-manager")
 				} else {
 					rm.logger.Info("Broadcast relay disconnection to peers", "relay-manager")
@@ -584,7 +579,7 @@ func (rm *RelayManager) updateOurMetadataWithRelay(relay *RelayCandidate, sessio
 	// Get or create our metadata
 	ourNodeID := rm.dhtPeer.NodeID()
 	metadata, err := rm.dbManager.PeerMetadata.GetPeerMetadata(ourNodeID, topic)
-	if err != nil {
+	if err != nil || metadata == nil {
 		// Create new metadata if doesn't exist
 		nodeTypeManager := utils.NewNodeTypeManager()
 		publicIP, _ := nodeTypeManager.GetExternalIP()
@@ -602,10 +597,40 @@ func (rm *RelayManager) updateOurMetadataWithRelay(relay *RelayCandidate, sessio
 				PrivateIP:   privateIP,
 				PrivatePort: quicPort,
 				NodeType:    "private",
+				Protocols: []database.Protocol{
+					{Name: "quic", Port: quicPort},
+				},
 			},
 			Capabilities: []string{"metadata_exchange", "relay_client"},
 			Services:     make(map[string]database.Service),
 			Extensions:   make(map[string]interface{}),
+		}
+	} else {
+		// Ensure NetworkInfo fields are initialized if empty
+		quicPort := rm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
+
+		if metadata.NetworkInfo.PublicIP == "" || metadata.NetworkInfo.PrivateIP == "" {
+			nodeTypeManager := utils.NewNodeTypeManager()
+			if metadata.NetworkInfo.PublicIP == "" {
+				metadata.NetworkInfo.PublicIP, _ = nodeTypeManager.GetExternalIP()
+			}
+			if metadata.NetworkInfo.PrivateIP == "" {
+				metadata.NetworkInfo.PrivateIP, _ = nodeTypeManager.GetLocalIP()
+			}
+		}
+		if metadata.NetworkInfo.PublicPort == 0 {
+			metadata.NetworkInfo.PublicPort = quicPort
+		}
+		if metadata.NetworkInfo.PrivatePort == 0 {
+			metadata.NetworkInfo.PrivatePort = quicPort
+		}
+		if metadata.NetworkInfo.NodeType == "" {
+			metadata.NetworkInfo.NodeType = "private"
+		}
+		if len(metadata.NetworkInfo.Protocols) == 0 {
+			metadata.NetworkInfo.Protocols = []database.Protocol{
+				{Name: "quic", Port: quicPort},
+			}
 		}
 	}
 
@@ -617,6 +642,11 @@ func (rm *RelayManager) updateOurMetadataWithRelay(relay *RelayCandidate, sessio
 	metadata.Version++
 	metadata.Timestamp = time.Now()
 	metadata.LastSeen = time.Now()
+	metadata.Source = "relay_client" // Indicate this metadata is from relay connection
+
+	// Debug: verify metadata has relay info before storing and broadcasting
+	rm.logger.Debug(fmt.Sprintf("Metadata before broadcast: version=%d, using_relay=%v, connected_relay=%s, session_id=%s",
+		metadata.Version, metadata.NetworkInfo.UsingRelay, metadata.NetworkInfo.ConnectedRelay, metadata.NetworkInfo.RelaySessionID), "relay-manager")
 
 	// Store in database
 	if err := rm.dbManager.PeerMetadata.StorePeerMetadata(metadata); err != nil {
@@ -624,15 +654,9 @@ func (rm *RelayManager) updateOurMetadataWithRelay(relay *RelayCandidate, sessio
 	}
 
 	// Broadcast the change if broadcaster is available
+	// Use "full" metadata update to ensure peers receive complete info even if they don't have this peer yet
 	if rm.broadcaster != nil {
-		relayUpdate := &RelayUpdateInfo{
-			UsingRelay:     true,
-			ConnectedRelay: relay.NodeID,
-			SessionID:      sessionID,
-			RelayAddress:   relay.Endpoint,
-		}
-
-		if err := rm.broadcaster.BroadcastMetadataChange("relay", metadata, relayUpdate, nil); err != nil {
+		if err := rm.broadcaster.BroadcastMetadataChange("full", metadata, nil, nil); err != nil {
 			rm.logger.Warn(fmt.Sprintf("Failed to broadcast relay change: %v", err), "relay-manager")
 			// Don't fail the whole operation if broadcast fails
 		} else {
