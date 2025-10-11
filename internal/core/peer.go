@@ -24,24 +24,28 @@ type TopicState struct {
 }
 
 type PeerManager struct {
-	config              *utils.ConfigManager
-	logger              *utils.LogsManager
-	dht                 *p2p.DHTPeer
-	quic                *p2p.QUICPeer
-	relayPeer           *p2p.RelayPeer
-	relayManager        *p2p.RelayManager
-	trafficMonitor      *p2p.RelayTrafficMonitor
-	natDetector         *p2p.NATDetector
-	topologyMgr         *p2p.NATTopologyManager
-	holePuncher         *p2p.HolePuncher
-	metadataBroadcaster *p2p.MetadataBroadcaster
-	dbManager           *database.SQLiteManager
-	topics              map[string]*TopicState
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	mutex               sync.RWMutex
-	running             bool
-	maintenanceTicker   *time.Ticker
+	config                *utils.ConfigManager
+	logger                *utils.LogsManager
+	dht                   *p2p.DHTPeer
+	quic                  *p2p.QUICPeer
+	relayPeer             *p2p.RelayPeer
+	relayManager          *p2p.RelayManager
+	trafficMonitor        *p2p.RelayTrafficMonitor
+	natDetector           *p2p.NATDetector
+	topologyMgr           *p2p.NATTopologyManager
+	holePuncher           *p2p.HolePuncher
+	metadataBroadcaster   *p2p.MetadataBroadcaster
+	// Phase 4: DHT-based metadata services
+	metadataQuery         *p2p.MetadataQueryService
+	connectabilityFilter  *p2p.ConnectabilityFilter
+	peerDiscovery         *p2p.PeerDiscoveryService
+	dbManager             *database.SQLiteManager
+	topics                map[string]*TopicState
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	mutex                 sync.RWMutex
+	running               bool
+	maintenanceTicker     *time.Ticker
 }
 
 func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*PeerManager, error) {
@@ -98,21 +102,38 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 		logger.Info("Relay manager initialized for NAT peer", "core")
 	}
 
+	// Phase 4: Initialize DHT-based metadata services
+	// These services work alongside the existing broadcaster/PEX for gradual transition
+	bep44Manager := p2p.NewBEP44Manager(dht, logger, config)
+	logger.Info("BEP_44 manager initialized for DHT mutable data", "core")
+
+	metadataQuery := p2p.NewMetadataQueryService(bep44Manager, dbManager, logger, config)
+	logger.Info("Metadata query service initialized (cache-first DHT queries)", "core")
+
+	connectabilityFilter := p2p.NewConnectabilityFilter(logger)
+	logger.Info("Connectability filter initialized (peer reachability detection)", "core")
+
+	peerDiscovery := p2p.NewPeerDiscoveryService(metadataQuery, connectabilityFilter, dbManager, logger, config)
+	logger.Info("Peer discovery service initialized (on-demand peer filtering)", "core")
+
 	pm := &PeerManager{
-		config:         config,
-		logger:         logger,
-		dht:            dht,
-		quic:           quic,
-		relayPeer:      relayPeer,
-		relayManager:   relayManager,
-		trafficMonitor: trafficMonitor,
-		natDetector:    natDetector,
-		topologyMgr:    topologyMgr,
-		holePuncher:    holePuncher,
-		dbManager:      dbManager,
-		topics:         make(map[string]*TopicState),
-		ctx:            ctx,
-		cancel:         cancel,
+		config:                config,
+		logger:                logger,
+		dht:                   dht,
+		quic:                  quic,
+		relayPeer:             relayPeer,
+		relayManager:          relayManager,
+		trafficMonitor:        trafficMonitor,
+		natDetector:           natDetector,
+		topologyMgr:           topologyMgr,
+		holePuncher:           holePuncher,
+		metadataQuery:         metadataQuery,
+		connectabilityFilter:  connectabilityFilter,
+		peerDiscovery:         peerDiscovery,
+		dbManager:             dbManager,
+		topics:                make(map[string]*TopicState),
+		ctx:                   ctx,
+		cancel:                cancel,
 	}
 
 	// Set dependencies on QUIC peer
