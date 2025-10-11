@@ -107,51 +107,31 @@ hole_punch_lan_subnet_mask = 24
 # Metrics
 hole_punch_metrics_enabled = true
 
+[dht]
+# DHT-Based Metadata Architecture (Phase 1-6)
+# Replaces old broadcast and peer exchange systems
+
+# Metadata republishing to DHT (BEP_44)
+metadata_republish_interval = 3600  # 1 hour - keep DHT data fresh
+
+[metadata_cache]
+# Metadata cache with TTL to reduce DHT query overhead
+ttl_seconds = 300  # 5 minutes - cache-first, then DHT
+cleanup_interval = 60  # 1 minute - remove expired entries
+
+[peer_discovery]
+# On-demand peer discovery using DHT queries
+discovery_interval = 30  # 30 seconds - how often to discover new peers
+max_known_peers_to_share = 50  # Limit known peers shared during identity exchange
+
+# DEPRECATED: The following sections are no longer used (removed in Phase 5)
+# Kept for backward compatibility during migration
 [metadata_broadcast]
-# Metadata Broadcast Configuration
-metadata_broadcast_enabled = true
-
-# Broadcast behavior
-metadata_broadcast_batch_interval = 5s
-metadata_broadcast_max_batch_size = 50
-metadata_broadcast_ttl = 3
-
-# Delivery
-metadata_broadcast_timeout = 10s
-metadata_broadcast_max_retries = 3
-metadata_broadcast_retry_interval = 30s
-
-# Deduplication
-metadata_broadcast_dedupe_window = 5m
-
-# Hole punching for broadcasts
-metadata_broadcast_hole_punch_enabled = true
-metadata_broadcast_hole_punch_timeout = 10s
+# ⚠️ DEPRECATED - Replaced by DHT BEP_44 mutable data (Phase 5)
+# Old broadcast system has been removed
+metadata_broadcast_enabled = false
 
 [peer_exchange]
-# Peer Exchange Protocol Configuration
-# Enables sharing of known peer lists during metadata exchanges
-
-# Peer selection thresholds
-# Minimum peers to exchange (send all if below this)
-peer_exchange_min = 20
-# Maximum peers to exchange (use smart selection if above)
-peer_exchange_max = 20
-# Maximum age of peers to share in seconds (2 hours default)
-peer_exchange_max_age_seconds = 7200
-
-# Smart selection is used when peer count > peer_exchange_min
-# Selection strategy:
-# - Relays: 25% (critical infrastructure, high priority)
-# - NAT with relay: 40% (reachable peers, helps NAT-NAT discovery)
-# - Public peers: 20% (directly reachable)
-# - Others: 15% (variety and network diversity)
-#
-# Scoring factors:
-# - Relay nodes: 5x multiplier
-# - NAT peers with relay: 3x multiplier
-# - Public non-relay peers: 2x multiplier
-# - Fresh peers (<5min): 2x multiplier
-# - Different relay cluster: 1.5x multiplier
-# - Different subnet: 1.3x multiplier
-# - Same LAN: 0.5x penalty
+# ⚠️ DEPRECATED - Replaced by identity exchange + DHT queries (Phase 3-4)
+# Old PEX protocol has been removed
+# Known peers now shared during QUIC handshake identity exchange

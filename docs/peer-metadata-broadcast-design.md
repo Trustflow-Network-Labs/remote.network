@@ -1,12 +1,22 @@
 # Peer Metadata Broadcast Design
 
+> **⚠️ DEPRECATED**: This broadcast system has been replaced by the DHT-based metadata architecture (see [dht-metadata-architecture.md](./dht-metadata-architecture.md)).
+>
+> **Removed in**: Phase 5 (January 2025)
+>
+> **Replacement**: BEP_44 mutable data storage in DHT with on-demand queries
+>
+> This document is kept for historical reference only.
+
+---
+
 ## Problem Statement
 
-When a peer's metadata changes (e.g., relay switch, NAT type change, new capabilities), other peers in the network need to be notified to update their local peer database. Currently:
+When a peer's metadata changes (e.g., relay switch, NAT type change, new capabilities), other peers in the network need to be notified to update their local peer database. Previously:
 
-❌ **Missing:** No mechanism to broadcast metadata changes to known peers
-❌ **Missing:** NAT-to-NAT peers cannot communicate metadata updates directly
-❌ **Result:** Stale metadata in peer databases, failed connections
+❌ **Old approach:** Broadcast metadata changes to all known peers
+❌ **Old approach:** NAT-to-NAT peers communicate metadata updates directly via hole punching
+❌ **Problem:** Broadcast storms, stale data, timing issues
 
 ## Design Goals
 

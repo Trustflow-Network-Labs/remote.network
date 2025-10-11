@@ -1,8 +1,18 @@
 # Peer Exchange Protocol (PEX)
 
+> **⚠️ DEPRECATED**: This protocol has been replaced by the DHT-based metadata architecture (see [dht-metadata-architecture.md](./dht-metadata-architecture.md)).
+>
+> **Removed in**: Phase 5 (January 2025)
+>
+> **Replacement**: Identity exchange during QUIC handshake (Phase 3) + On-demand DHT metadata queries (Phase 4)
+>
+> This document is kept for historical reference only.
+
+---
+
 ## Overview
 
-The Peer Exchange Protocol is an application-level protocol that enables nodes to share their known peer lists during metadata exchanges. This solves the fundamental DHT limitation where multiple NAT peers behind the same public IP cannot all be discovered via DHT alone.
+The Peer Exchange Protocol was an application-level protocol that enabled nodes to share their known peer lists during metadata exchanges. This solved the fundamental DHT limitation where multiple NAT peers behind the same public IP cannot all be discovered via DHT alone.
 
 ## Problem Statement
 

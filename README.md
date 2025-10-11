@@ -8,34 +8,51 @@
 
 ---
 
-**Remote Network Node** is a P2P networking implementation that combines BitTorrent DHT peer discovery with QUIC-based metadata exchange for NAT-friendly peer-to-peer communication.
+**Remote Network Node** is a P2P networking implementation that uses BitTorrent DHT with BEP_44 mutable data for decentralized metadata storage and QUIC-based connections for NAT-friendly peer-to-peer communication.
 
 ---
 
 ## Features
 
-- 🔍 **BitTorrent DHT Peer Discovery** - Uses proven DHT protocol for initial peer discovery
-- 🔐 **QUIC Metadata Exchange** - Secure, bidirectional metadata exchange over QUIC streams
-- 🗄️ **SQLite Peer Database** - Persistent storage of peer metadata with connection pooling
-- 🌐 **NAT-Friendly Architecture** - Designed for peers behind NATs with private IP discovery
-- 📊 **Memory Leak Monitoring** - Built-in pprof endpoints for performance monitoring
-- 🎯 **Node Type Detection** - Automatic detection of public vs private node configuration
+- 🔍 **DHT-Based Metadata Architecture** - BEP_44 mutable data for tamper-proof, signed peer metadata
+- 🔐 **Ed25519 Cryptography** - Secure peer identity with public key signatures
+- ⚡ **On-Demand Queries** - Cache-first metadata retrieval with 5-minute TTL
+- 🗄️ **Minimal Peer Storage** - Lightweight SQLite database (peer_id, public_key, topic only)
+- 🌐 **NAT-Friendly Architecture** - Relay-based connections for NAT peers, hole punching support
+- 📊 **Peer Discovery Service** - Smart filtering of connectable peers (public/relay/NAT)
+- 🔄 **Automatic Republishing** - Hourly DHT republishing keeps metadata fresh
 
 ---
 
 ## Architecture
 
-The node operates in three layers:
+The node uses a modern DHT-based metadata architecture:
 
-1. **DHT Layer** - BitTorrent DHT for peer discovery using `add_peer`/`get_peers` operations
-2. **QUIC Layer** - Encrypted metadata exchange with bidirectional stream support
-3. **Database Layer** - SQLite storage for peer metadata, network topology, and capabilities
+1. **Crypto Layer** - Ed25519 keys for peer identity and metadata signing
+2. **DHT Layer** - BEP_44 mutable data storage for metadata (DHT is source of truth)
+3. **Cache Layer** - 5-minute metadata cache to reduce DHT query overhead
+4. **QUIC Layer** - Encrypted connections with identity exchange during handshake
+5. **Discovery Layer** - On-demand peer discovery with connectability filtering
 
-### Peer Discovery Flow
+### Metadata Flow
 
 ```
-DHT Peer Discovery → QUIC Connection → Bidirectional Metadata Exchange → SQLite Storage
+Ed25519 Keys → Sign Metadata → Publish to DHT (BEP_44)
+                                      ↓
+                              Cache (5 min TTL)
+                                      ↓
+                     Query on-demand → QUIC Connection
 ```
+
+### Key Changes from Old System
+
+- ❌ **Removed:** Metadata broadcasts (replaced by DHT publishing)
+- ❌ **Removed:** Peer exchange protocol (replaced by identity exchange)
+- ✅ **Added:** BEP_44 signed mutable data
+- ✅ **Added:** Metadata caching with TTL
+- ✅ **Added:** Connectability filtering for smart peer selection
+
+For detailed architecture, see [docs/dht-metadata-architecture.md](docs/dht-metadata-architecture.md)
 
 ---
 
@@ -143,43 +160,49 @@ See the [LICENSE](LICENSE) file for details.
 
 ## Protocol Details
 
-### DHT Implementation
+### DHT BEP_44 Implementation
 
-- Uses standard BitTorrent DHT with `add_peer`/`get_peers` operations
-- Custom topic-based peer discovery for network segmentation
-- Automatic bootstrap node connectivity for network joining
+- Uses BEP_44 mutable data for tamper-proof metadata storage
+- Ed25519 signatures ensure metadata authenticity
+- Storage key: `SHA1(public_key)`
+- Sequence numbers prevent replay attacks
+- Hourly republishing keeps data fresh in DHT
 
-### QUIC Metadata Exchange
+### Identity Exchange
 
-- TLS-encrypted streams for secure peer communication
-- Bidirectional metadata exchange on single streams (NAT-friendly)
-- Structured message protocol with request/response correlation
-- Support for future service discovery and hole punching
+- Public keys exchanged during QUIC handshake
+- Known peers shared (minimal: peer_id + public_key)
+- Peer ID derived from public key: `peer_id = SHA1(public_key)`
+- Enables on-demand metadata queries from DHT
 
 ### Database Schema
 
-Peer metadata includes:
-- Node identification (ID, topic, endpoints)
-- Network information (public/private IPs, NAT detection)
-- Capabilities and service offerings
-- Connection quality metrics
+**Minimal Storage:**
+- `known_peers`: peer_id, public_key, topic, last_seen (no metadata!)
+- `metadata_cache`: cached metadata with 5-minute TTL
+
+**Full metadata queried on-demand from DHT:**
+- Node identification, network info, capabilities
+- Signed with Ed25519, versioned with sequence numbers
+- Always fresh (DHT is source of truth)
 
 ---
 
 ## Development Roadmap
 
-### Completed
-- ✅ DHT peer discovery integration
-- ✅ QUIC bidirectional metadata exchange
-- ✅ SQLite peer database with connection pooling
-- ✅ Node type detection (public/private)
-- ✅ Memory leak monitoring infrastructure
-
-### In Progress
-- 🔄 NAT detection and classification
+### Completed (January 2025)
+- ✅ **Phase 1-6:** DHT-based metadata architecture
+- ✅ BEP_44 mutable data with Ed25519 signatures
+- ✅ Metadata caching with TTL (5 minutes)
+- ✅ On-demand peer discovery with filtering
+- ✅ Identity exchange during QUIC handshake
+- ✅ Comprehensive test suite (59 tests, 3000+ lines)
+- ✅ Legacy system removal (broadcasts, peer exchange)
+- ✅ NAT detection and relay-based connections
+- ✅ Hole punching for NAT-to-NAT communication
 
 ### Planned
-- 📋 UDP hole punching for NAT-to-NAT communication
-- 📋 Service discovery protocol
+- 📋 Phase 7 deployment monitoring and optimization
+- 📋 Service discovery protocol enhancement
 - 📋 Connection quality metrics and peer scoring
-- 📋 Distributed service orchestration
+- 📋 DHT query optimization based on network patterns
