@@ -23,9 +23,6 @@ type RelayManager struct {
 	// Relay selection
 	selector *RelaySelector
 
-	// Metadata broadcaster
-	broadcaster *MetadataBroadcaster
-
 	// Current relay connection
 	currentRelay     *RelayCandidate
 	currentRelayConn *quic.Conn
@@ -45,7 +42,7 @@ type RelayManager struct {
 }
 
 // NewRelayManager creates a new relay manager for NAT peers
-func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, dhtPeer *DHTPeer, broadcaster *MetadataBroadcaster) *RelayManager {
+func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, dhtPeer *DHTPeer) *RelayManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	selector := NewRelaySelector(config, logger, dbManager, quicPeer)
@@ -57,7 +54,6 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 		quicPeer:       quicPeer,
 		dhtPeer:        dhtPeer,
 		selector:       selector,
-		broadcaster:    broadcaster,
 		ctx:            ctx,
 		cancel:         cancel,
 		keepaliveStop:  make(chan struct{}),
@@ -85,11 +81,6 @@ func (rm *RelayManager) Start() error {
 	}()
 
 	return nil
-}
-
-// SetBroadcaster sets the metadata broadcaster (called after initialization)
-func (rm *RelayManager) SetBroadcaster(broadcaster *MetadataBroadcaster) {
-	rm.broadcaster = broadcaster
 }
 
 // Stop stops the relay manager
@@ -304,36 +295,31 @@ func (rm *RelayManager) DisconnectRelay() {
 		rm.currentRelayConn.CloseWithError(0, "disconnecting")
 	}
 
-	// Broadcast relay disconnection if broadcaster is available
-	if rm.broadcaster != nil {
-		topics := rm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
-		if len(topics) > 0 {
-			topic := topics[0]
-			ourNodeID := rm.dhtPeer.NodeID()
-			metadata, err := rm.dbManager.PeerMetadata.GetPeerMetadata(ourNodeID, topic)
-			if err == nil {
-				// Update metadata to reflect no relay
-				metadata.NetworkInfo.UsingRelay = false
-				metadata.NetworkInfo.ConnectedRelay = ""
-				metadata.NetworkInfo.RelaySessionID = ""
-				metadata.NetworkInfo.RelayAddress = ""
-				metadata.Version++
-				metadata.Timestamp = time.Now()
-				metadata.LastSeen = time.Now()
-				metadata.Source = "relay_client" // Indicate this metadata is from relay disconnection
+	// Update metadata to reflect relay disconnection
+	topics := rm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	if len(topics) > 0 {
+		topic := topics[0]
+		ourNodeID := rm.dhtPeer.NodeID()
+		metadata, err := rm.dbManager.PeerMetadata.GetPeerMetadata(ourNodeID, topic)
+		if err == nil {
+			// Update metadata to reflect no relay
+			metadata.NetworkInfo.UsingRelay = false
+			metadata.NetworkInfo.ConnectedRelay = ""
+			metadata.NetworkInfo.RelaySessionID = ""
+			metadata.NetworkInfo.RelayAddress = ""
+			metadata.Version++
+			metadata.Timestamp = time.Now()
+			metadata.LastSeen = time.Now()
+			metadata.Source = "relay_client" // Indicate this metadata is from relay disconnection
 
-				// Store updated metadata
-				if err := rm.dbManager.PeerMetadata.StorePeerMetadata(metadata); err != nil {
-					rm.logger.Warn(fmt.Sprintf("Failed to store metadata after relay disconnect: %v", err), "relay-manager")
-				}
-
-				// Broadcast the change using "full" metadata
-				if err := rm.broadcaster.BroadcastMetadataChange("full", metadata, nil, nil); err != nil {
-					rm.logger.Warn(fmt.Sprintf("Failed to broadcast relay disconnect: %v", err), "relay-manager")
-				} else {
-					rm.logger.Info("Broadcast relay disconnection to peers", "relay-manager")
-				}
+			// Store updated metadata
+			if err := rm.dbManager.PeerMetadata.StorePeerMetadata(metadata); err != nil {
+				rm.logger.Warn(fmt.Sprintf("Failed to store metadata after relay disconnect: %v", err), "relay-manager")
 			}
+
+			// TODO: Publish updated metadata to DHT (Phase 4 integration)
+			// The metadata publisher will handle periodic republishing
+			rm.logger.Info("Relay disconnection recorded in metadata", "relay-manager")
 		}
 	}
 
@@ -653,17 +639,8 @@ func (rm *RelayManager) updateOurMetadataWithRelay(relay *RelayCandidate, sessio
 		return fmt.Errorf("failed to store metadata: %v", err)
 	}
 
-	// Broadcast the change if broadcaster is available
-	// Use "full" metadata update to ensure peers receive complete info even if they don't have this peer yet
-	if rm.broadcaster != nil {
-		if err := rm.broadcaster.BroadcastMetadataChange("full", metadata, nil, nil); err != nil {
-			rm.logger.Warn(fmt.Sprintf("Failed to broadcast relay change: %v", err), "relay-manager")
-			// Don't fail the whole operation if broadcast fails
-		} else {
-			rm.logger.Info(fmt.Sprintf("Broadcast relay connection to peers: relay=%s, session=%s", relay.NodeID, sessionID), "relay-manager")
-		}
-	}
-
+	// TODO: Publish updated metadata to DHT (Phase 4 integration)
+	// The metadata publisher will handle periodic republishing
 	rm.logger.Info(fmt.Sprintf("Updated metadata with relay info: relay=%s, session=%s", relay.NodeID, sessionID), "relay-manager")
 
 	return nil

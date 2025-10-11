@@ -39,8 +39,6 @@ type QUICPeer struct {
 	relayPeer   *RelayPeer
 	// Hole puncher for NAT traversal
 	holePuncher *HolePuncher
-	// Peer exchange handler
-	peerExchange *PeerExchange
 	// Callback for relay peer discovery
 	onRelayDiscovered func(*database.PeerMetadata)
 	// Callback for connection failures
@@ -75,11 +73,6 @@ func (q *QUICPeer) SetDependencies(dhtPeer *DHTPeer, dbManager *database.SQLiteM
 	q.dhtPeer = dhtPeer
 	q.dbManager = dbManager
 	q.relayPeer = relayPeer
-	// Initialize peer exchange
-	if dhtPeer != nil && dbManager != nil {
-		q.peerExchange = NewPeerExchange(dbManager, q.config, q.logger, dhtPeer.NodeID())
-		q.logger.Info("Peer exchange initialized", "quic")
-	}
 }
 
 // SetHolePuncher sets the hole puncher for NAT traversal
@@ -282,11 +275,6 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 			q.logger.Warn("Received hole punch message but hole puncher is not initialized", "quic")
 		}
 		return
-	case MessageTypePeerMetadataUpdate:
-		response = q.handleMetadataUpdate(msg, remoteAddr)
-	case MessageTypePeerMetadataUpdateAck:
-		q.handleMetadataUpdateAck(msg, remoteAddr)
-		// No response needed for acknowledgments
 	default:
 		q.logger.Warn(fmt.Sprintf("Unknown message type %s from %s", msg.Type, remoteAddr), "quic")
 		return
@@ -381,181 +369,7 @@ func (q *QUICPeer) generateOurMetadata(nodeID, topic string) (*database.PeerMeta
 	return metadata, nil
 }
 
-// storePeersFromExchange processes and stores peers received from peer exchange
-func (q *QUICPeer) storePeersFromExchange(peers []*PeerInfo, topic string) {
-	if q.dbManager == nil || q.dhtPeer == nil {
-		return
-	}
-
-	ourNodeID := q.dhtPeer.NodeID()
-	stored := 0
-	updated := 0
-
-	for _, peerInfo := range peers {
-		// Skip ourselves
-		if peerInfo.NodeID == ourNodeID {
-			continue
-		}
-
-		// Skip NAT peers without complete relay information
-		// Only store NAT peers that have established relay connections
-		if peerInfo.UsingRelay {
-			// NAT peer must have relay connection details to be useful
-			if peerInfo.RelayNodeID == "" || peerInfo.RelaySessionID == "" {
-				continue
-			}
-		}
-
-		// Check if peer already exists
-		existingMetadata, err := q.dbManager.PeerMetadata.GetPeerMetadata(peerInfo.NodeID, topic)
-
-		if err == nil && existingMetadata != nil {
-			// Peer exists - only update LastSeen (peer exchange is stale by nature)
-			// Substantive metadata updates ONLY come from broadcasts, which are authoritative
-			// Peer exchange is for discovery (keeping peers alive), not for metadata synchronization
-			exchangedTime := time.Unix(peerInfo.LastSeen, 0)
-			if exchangedTime.After(existingMetadata.LastSeen) {
-				existingMetadata.LastSeen = exchangedTime
-				if err := q.dbManager.PeerMetadata.StorePeerMetadata(existingMetadata); err == nil {
-					updated++
-					q.logger.Debug(fmt.Sprintf("Updated peer %s LastSeen from exchange (preserved metadata from broadcasts)",
-						peerInfo.NodeID), "quic")
-				}
-			}
-		} else {
-			// New peer from exchange - create metadata with all available info
-			networkInfo := database.NetworkInfo{
-				PublicIP:        peerInfo.PublicIP,
-				PrivateIP:       peerInfo.PrivateIP,
-				PublicPort:      peerInfo.PublicPort,
-				PrivatePort:     peerInfo.PrivatePort,
-				NodeType:        peerInfo.NodeType,
-				IsRelay:         peerInfo.IsRelay,
-				UsingRelay:      peerInfo.UsingRelay,
-				ConnectedRelay:  peerInfo.RelayNodeID,
-				RelaySessionID:  peerInfo.RelaySessionID,
-				RelayAddress:    peerInfo.RelayAddress,
-				Protocols:       peerInfo.Protocols,
-			}
-
-			quicPort := q.config.GetConfigInt("quic_port", 30906, 1024, 65535)
-
-			// If relay, add required relay fields (only if not already provided)
-			if peerInfo.IsRelay && peerInfo.PublicIP != "" {
-				networkInfo.RelayEndpoint = fmt.Sprintf("%s:%d", peerInfo.PublicIP, quicPort)
-
-				// Only set ports if not provided in peerInfo
-				if networkInfo.PublicPort == 0 {
-					networkInfo.PublicPort = quicPort
-				}
-				if networkInfo.PrivatePort == 0 {
-					networkInfo.PrivatePort = quicPort
-				}
-
-				// Only set protocols if not provided in peerInfo
-				if len(networkInfo.Protocols) == 0 {
-					networkInfo.Protocols = []database.Protocol{
-						{Name: "quic", Port: quicPort},
-					}
-				}
-
-				// Set default relay attributes for peer_exchange discovered relays
-				defaultPricing := q.config.GetConfigFloat64("relay_pricing_per_gb", 0.001, 0.0, 1.0)
-				networkInfo.RelayPricing = defaultPricing
-
-				// Initial reputation for newly discovered relays (must be >= relay_min_reputation)
-				initialReputation := q.config.GetConfigFloat64("relay_initial_reputation", 0.5, 0.0, 1.0)
-				networkInfo.ReputationScore = initialReputation
-
-				// Default capacity from config
-				networkInfo.RelayCapacity = q.config.GetConfigInt("relay_max_connections", 100, 10, 1000)
-			}
-
-			// If NAT peer using relay, populate relay connection details (only if not already provided)
-			if peerInfo.UsingRelay && peerInfo.RelayNodeID != "" {
-				// Only set node type if not provided
-				if networkInfo.NodeType == "" {
-					networkInfo.NodeType = "private"
-				}
-
-				// Only set ports if not provided in peerInfo
-				if networkInfo.PublicPort == 0 {
-					networkInfo.PublicPort = quicPort
-				}
-				if networkInfo.PrivatePort == 0 {
-					networkInfo.PrivatePort = quicPort
-				}
-
-				// Only set protocols if not provided in peerInfo
-				if len(networkInfo.Protocols) == 0 {
-					networkInfo.Protocols = []database.Protocol{
-						{Name: "quic", Port: quicPort},
-					}
-				}
-
-				// Only set relay address if not provided (try to get from relay metadata)
-				if networkInfo.RelayAddress == "" {
-					if relayMetadata, err := q.dbManager.PeerMetadata.GetPeerMetadata(peerInfo.RelayNodeID, topic); err == nil && relayMetadata != nil {
-						networkInfo.RelayAddress = relayMetadata.NetworkInfo.RelayEndpoint
-					}
-				}
-			}
-
-			metadata := &database.PeerMetadata{
-				NodeID:       peerInfo.NodeID,
-				Topic:        topic,
-				Version:      1,
-				Timestamp:    time.Unix(peerInfo.LastSeen, 0),
-				NetworkInfo:  networkInfo,
-				Capabilities: []string{},
-				Services:     make(map[string]database.Service),
-				Extensions:   make(map[string]interface{}),
-				LastSeen:     time.Unix(peerInfo.LastSeen, 0),
-				Source:       "peer_exchange",
-			}
-
-			if err := q.dbManager.PeerMetadata.StorePeerMetadata(metadata); err == nil {
-				stored++
-				q.logger.Debug(fmt.Sprintf("Stored new peer from exchange: %s (relay=%v, endpoint=%s)",
-					peerInfo.NodeID, peerInfo.IsRelay, networkInfo.RelayEndpoint), "quic")
-
-				// Notify relay discovery callback if this is a relay peer
-				if peerInfo.IsRelay && q.onRelayDiscovered != nil {
-					q.logger.Debug(fmt.Sprintf("Discovered relay peer via exchange: %s (%s)", peerInfo.NodeID, networkInfo.RelayEndpoint), "quic")
-					q.onRelayDiscovered(metadata)
-				}
-
-				// Trigger metadata request to get complete/fresh info from the peer
-				// This ensures we have up-to-date information beyond what peer exchange provides
-				// Construct address from peer info
-				addr := ""
-				if peerInfo.PublicIP != "" {
-					quicPort := q.config.GetConfigInt("quic_port", 30906, 1024, 65535)
-					addr = fmt.Sprintf("%s:%d", peerInfo.PublicIP, quicPort)
-				} else if peerInfo.PrivateIP != "" {
-					quicPort := q.config.GetConfigInt("quic_port", 30906, 1024, 65535)
-					addr = fmt.Sprintf("%s:%d", peerInfo.PrivateIP, quicPort)
-				}
-
-				if addr != "" {
-					go func(address, peerTopic string) {
-						// Small delay to avoid overwhelming the network with immediate requests
-						time.Sleep(1 * time.Second)
-						q.logger.Debug(fmt.Sprintf("Requesting fresh metadata from newly discovered peer at %s", address), "quic")
-						err := q.RequestPeerMetadata(address, peerTopic)
-						if err != nil {
-							q.logger.Debug(fmt.Sprintf("Failed to request metadata from %s: %v", address, err), "quic")
-						}
-					}(addr, topic)
-				}
-			}
-		}
-	}
-
-	if stored > 0 || updated > 0 {
-		q.logger.Info(fmt.Sprintf("Peer exchange: stored %d new, updated %d existing peers", stored, updated), "quic")
-	}
-}
+// Note: storePeersFromExchange removed in Phase 5 - peer exchange now handled by identity_exchange.go
 
 func (q *QUICPeer) handleMetadataRequest(msg *QUICMessage, remoteAddr string) *QUICMessage {
 	var requestData MetadataRequestData
@@ -615,11 +429,7 @@ func (q *QUICPeer) handleMetadataRequest(msg *QUICMessage, remoteAddr string) *Q
 		}
 	}
 
-	// Process peer exchange: store peers shared by requester
-	if len(requestData.KnownPeers) > 0 {
-		q.logger.Debug(fmt.Sprintf("Received %d known peers from %s", len(requestData.KnownPeers), remoteAddr), "quic")
-		q.storePeersFromExchange(requestData.KnownPeers, requestData.Topic)
-	}
+	// Note: Peer exchange is now handled by identity_exchange.go (Phase 3)
 
 	// Generate our own metadata for the response
 	nodeID := q.dhtPeer.NodeID()
@@ -629,19 +439,9 @@ func (q *QUICPeer) handleMetadataRequest(msg *QUICMessage, remoteAddr string) *Q
 		return CreateMetadataResponse(msg.RequestID, nil, fmt.Errorf("failed to generate metadata"))
 	}
 
-	// Peer exchange: select peers to share in response
-	var knownPeers []*PeerInfo
-	if q.peerExchange != nil {
-		knownPeers = q.peerExchange.SelectPeersToShare(requestData.MyMetadata, requestData.Topic)
-		q.logger.Debug(fmt.Sprintf("Sharing %d known peers with %s", len(knownPeers), remoteAddr), "quic")
-	}
-
+	// Note: Peer exchange is now handled by identity_exchange.go (Phase 3)
+	// Old peer exchange system removed in Phase 5
 	response := CreateMetadataResponse(msg.RequestID, metadata, nil)
-	// Add known peers to response
-	if respData, ok := response.Data.(*MetadataResponseData); ok {
-		respData.KnownPeers = knownPeers
-	}
-
 	return response
 }
 
@@ -733,14 +533,8 @@ func (q *QUICPeer) RequestPeerMetadata(peerAddr string, topic string) error {
 	request := CreateBidirectionalMetadataRequest(nodeID, topic, []string{"network", "capabilities"}, myMetadata)
 	request.RequestID = requestID
 
-	// Peer exchange: select peers to share in the request
-	if q.peerExchange != nil {
-		knownPeers := q.peerExchange.SelectPeersToShare(nil, topic) // nil = no requester context
-		if reqData, ok := request.Data.(*MetadataRequestData); ok {
-			reqData.KnownPeers = knownPeers
-			q.logger.Debug(fmt.Sprintf("Sending %d known peers in request to %s", len(knownPeers), peerAddr), "quic")
-		}
-	}
+	// Note: Peer exchange is now handled by identity_exchange.go (Phase 3)
+	// Old peer exchange system removed in Phase 5
 
 	// Marshal request
 	requestData, err := request.Marshal()
@@ -813,11 +607,7 @@ func (q *QUICPeer) RequestPeerMetadata(peerAddr string, topic string) error {
 		return fmt.Errorf("peer error: %s", responseData.Error)
 	}
 
-	// Process peer exchange: store peers shared in response
-	if len(responseData.KnownPeers) > 0 {
-		q.logger.Debug(fmt.Sprintf("Received %d known peers from %s", len(responseData.KnownPeers), peerAddr), "quic")
-		q.storePeersFromExchange(responseData.KnownPeers, topic)
-	}
+	// Note: Peer exchange is now handled by identity_exchange.go (Phase 3)
 
 	// Store peer metadata if received
 	if responseData.Metadata != nil {
@@ -1174,128 +964,4 @@ func (q *QUICPeer) Stop() error {
 	}
 
 	return nil
-}
-
-// handleMetadataUpdate processes incoming peer metadata updates
-func (q *QUICPeer) handleMetadataUpdate(msg *QUICMessage, remoteAddr string) *QUICMessage {
-	var updateData PeerMetadataUpdateData
-	if err := msg.GetDataAs(&updateData); err != nil {
-		q.logger.Error(fmt.Sprintf("Failed to parse metadata update from %s: %v", remoteAddr, err), "quic")
-		return CreatePeerMetadataUpdateAck(q.dhtPeer.NodeID(), updateData.Sequence, "error", "invalid update data")
-	}
-
-	q.logger.Info(fmt.Sprintf("Received metadata update from %s (type: %s, seq: %d)",
-		updateData.NodeID, updateData.ChangeType, updateData.Sequence), "quic")
-
-	// Process peer exchange: store peers shared in the update
-	if len(updateData.KnownPeers) > 0 {
-		q.logger.Debug(fmt.Sprintf("Received %d known peers from %s in metadata update", len(updateData.KnownPeers), updateData.NodeID), "quic")
-		q.storePeersFromExchange(updateData.KnownPeers, updateData.Topic)
-	}
-
-	// Check if we have a metadata broadcaster to validate deduplication
-	// If not, we still process the update (backward compatibility)
-
-	// Process the update based on change type
-	var metadata *database.PeerMetadata
-
-	switch updateData.ChangeType {
-	case "full":
-		// Full metadata update
-		if updateData.Metadata != nil {
-			metadata = updateData.Metadata
-			// Debug: verify received metadata content
-			q.logger.Debug(fmt.Sprintf("Received full metadata: version=%d, using_relay=%v, connected_relay=%s, session_id=%s",
-				metadata.Version, metadata.NetworkInfo.UsingRelay, metadata.NetworkInfo.ConnectedRelay, metadata.NetworkInfo.RelaySessionID), "quic")
-		}
-	case "relay":
-		// Relay change - fetch existing metadata and update relay info
-		existingMetadata, err := q.dbManager.PeerMetadata.GetPeerMetadata(updateData.NodeID, updateData.Topic)
-		if err != nil {
-			// Peer not in database, can't apply partial update
-			q.logger.Warn(fmt.Sprintf("Cannot apply relay update for unknown peer %s", updateData.NodeID), "quic")
-			return CreatePeerMetadataUpdateAck(q.dhtPeer.NodeID(), updateData.Sequence, "error", "peer not found")
-		}
-
-		// Update relay information
-		if updateData.RelayUpdate != nil {
-			existingMetadata.NetworkInfo.UsingRelay = updateData.RelayUpdate.UsingRelay
-			existingMetadata.NetworkInfo.ConnectedRelay = updateData.RelayUpdate.ConnectedRelay
-			existingMetadata.NetworkInfo.RelaySessionID = updateData.RelayUpdate.SessionID
-			existingMetadata.NetworkInfo.RelayAddress = updateData.RelayUpdate.RelayAddress
-		}
-		metadata = existingMetadata
-
-	case "network":
-		// Network change - fetch existing metadata and update network info
-		existingMetadata, err := q.dbManager.PeerMetadata.GetPeerMetadata(updateData.NodeID, updateData.Topic)
-		if err != nil {
-			q.logger.Warn(fmt.Sprintf("Cannot apply network update for unknown peer %s", updateData.NodeID), "quic")
-			return CreatePeerMetadataUpdateAck(q.dhtPeer.NodeID(), updateData.Sequence, "error", "peer not found")
-		}
-
-		// Update network information
-		if updateData.NetworkUpdate != nil {
-			if updateData.NetworkUpdate.PublicIP != "" {
-				existingMetadata.NetworkInfo.PublicIP = updateData.NetworkUpdate.PublicIP
-			}
-			if updateData.NetworkUpdate.PublicPort > 0 {
-				existingMetadata.NetworkInfo.PublicPort = updateData.NetworkUpdate.PublicPort
-			}
-			if updateData.NetworkUpdate.PrivateIP != "" {
-				existingMetadata.NetworkInfo.PrivateIP = updateData.NetworkUpdate.PrivateIP
-			}
-			if updateData.NetworkUpdate.PrivatePort > 0 {
-				existingMetadata.NetworkInfo.PrivatePort = updateData.NetworkUpdate.PrivatePort
-			}
-			if updateData.NetworkUpdate.NATType != "" {
-				existingMetadata.NetworkInfo.NATType = updateData.NetworkUpdate.NATType
-			}
-		}
-		metadata = existingMetadata
-
-	case "capability":
-		// Capability change - would need full metadata
-		if updateData.Metadata != nil {
-			metadata = updateData.Metadata
-		}
-	}
-
-	// Store updated metadata
-	if metadata != nil {
-		metadata.LastSeen = time.Now()
-		metadata.Source = "metadata_update"
-		metadata.Version = updateData.Version
-
-		if err := q.dbManager.PeerMetadata.StorePeerMetadata(metadata); err != nil {
-			q.logger.Error(fmt.Sprintf("Failed to store updated metadata for %s: %v", updateData.NodeID, err), "quic")
-			return CreatePeerMetadataUpdateAck(q.dhtPeer.NodeID(), updateData.Sequence, "error", "storage failed")
-		}
-
-		q.logger.Info(fmt.Sprintf("Successfully applied metadata update for %s", updateData.NodeID), "quic")
-	} else {
-		q.logger.Warn(fmt.Sprintf("No metadata to update for %s", updateData.NodeID), "quic")
-		return CreatePeerMetadataUpdateAck(q.dhtPeer.NodeID(), updateData.Sequence, "error", "no metadata provided")
-	}
-
-	// Return acknowledgment
-	return CreatePeerMetadataUpdateAck(q.dhtPeer.NodeID(), updateData.Sequence, "applied", "")
-}
-
-// handleMetadataUpdateAck processes metadata update acknowledgments
-func (q *QUICPeer) handleMetadataUpdateAck(msg *QUICMessage, remoteAddr string) {
-	var ackData PeerMetadataUpdateAckData
-	if err := msg.GetDataAs(&ackData); err != nil {
-		q.logger.Error(fmt.Sprintf("Failed to parse metadata update ack from %s: %v", remoteAddr, err), "quic")
-		return
-	}
-
-	q.logger.Debug(fmt.Sprintf("Received metadata update ack from %s (seq: %d, status: %s)",
-		ackData.NodeID, ackData.Sequence, ackData.Status), "quic")
-
-	// The broadcaster will handle tracking delivery status if needed
-	// For now, just log the acknowledgment
-	if ackData.Status == "error" {
-		q.logger.Warn(fmt.Sprintf("Peer %s reported error for metadata update: %s", ackData.NodeID, ackData.Error), "quic")
-	}
 }
