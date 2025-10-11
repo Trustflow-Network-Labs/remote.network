@@ -21,8 +21,11 @@ type SQLiteManager struct {
 	db  *sql.DB
 
 	// Specialized managers
-	PeerMetadata *PeerMetadataDB
-	Relay        *RelayDB
+	PeerMetadata  *PeerMetadataDB
+	Relay         *RelayDB
+	KnownPeers    *KnownPeersManager  // Phase 2: Minimal peer storage
+	MetadataCache *MetadataCache       // Phase 2: Metadata caching
+	Migration     *MigrationManager    // Phase 2: Schema migrations
 }
 
 // NewSQLiteManager creates a new enhanced SQLite manager with peer metadata support
@@ -131,7 +134,28 @@ func (sqlm *SQLiteManager) initializeManagers() error {
 		return fmt.Errorf("failed to initialize relay database manager: %v", err)
 	}
 
-	logsManager.Info("Database managers initialized successfully", "database")
+	// Phase 2: Initialize migration manager
+	sqlm.Migration = NewMigrationManager(sqlm.db, logsManager)
+
+	// Phase 2: Run migration if needed
+	if err := sqlm.Migration.MigrateToDHTMetadataStorage(); err != nil {
+		logsManager.Warn(fmt.Sprintf("Migration to DHT metadata storage failed: %v", err), "database")
+		// Don't fail initialization, allow fallback to old schema
+	}
+
+	// Phase 2: Initialize known peers manager
+	sqlm.KnownPeers, err = NewKnownPeersManager(sqlm.db, logsManager)
+	if err != nil {
+		return fmt.Errorf("failed to initialize known peers manager: %v", err)
+	}
+
+	// Phase 2: Initialize metadata cache
+	sqlm.MetadataCache, err = NewMetadataCache(sqlm.db, logsManager)
+	if err != nil {
+		return fmt.Errorf("failed to initialize metadata cache: %v", err)
+	}
+
+	logsManager.Info("Database managers initialized successfully (including Phase 2 components)", "database")
 	return nil
 }
 

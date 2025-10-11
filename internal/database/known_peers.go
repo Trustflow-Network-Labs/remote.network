@@ -1,0 +1,393 @@
+package database
+
+import (
+	"context"
+	"database/sql"
+	"encoding/hex"
+	"fmt"
+	"time"
+
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
+)
+
+// KnownPeer represents a minimal peer entry (peer_id, public_key)
+// This is the new lightweight storage model for Phase 2
+type KnownPeer struct {
+	PeerID     string    // SHA1(public_key) - 40 hex chars
+	PublicKey  []byte    // Ed25519 public key - 32 bytes
+	LastSeen   time.Time // Last time we saw this peer
+	Topic      string    // Topic this peer is associated with
+	FirstSeen  time.Time // When we first discovered this peer
+	Source     string    // "bootstrap", "peer_exchange", "dht", etc.
+}
+
+// KnownPeersManager manages the minimal known_peers storage
+type KnownPeersManager struct {
+	db     *sql.DB
+	logger *utils.LogsManager
+
+	// Prepared statements for performance
+	insertStmt       *sql.Stmt
+	updateStmt       *sql.Stmt
+	getStmt          *sql.Stmt
+	getAllStmt       *sql.Stmt
+	getByTopicStmt   *sql.Stmt
+	deleteStmt       *sql.Stmt
+	cleanupStaleStmt *sql.Stmt
+}
+
+// NewKnownPeersManager creates a new known peers manager
+func NewKnownPeersManager(db *sql.DB, logger *utils.LogsManager) (*KnownPeersManager, error) {
+	kpm := &KnownPeersManager{
+		db:     db,
+		logger: logger,
+	}
+
+	// Create tables
+	if err := kpm.createTables(); err != nil {
+		return nil, err
+	}
+
+	// Prepare statements
+	if err := kpm.prepareStatements(); err != nil {
+		return nil, err
+	}
+
+	return kpm, nil
+}
+
+// createTables creates the known_peers table
+func (kpm *KnownPeersManager) createTables() error {
+	createTableSQL := `
+-- Minimal peer storage: only (peer_id, public_key, last_seen, topic)
+-- Full metadata is queried from DHT on-demand and cached separately
+CREATE TABLE IF NOT EXISTS known_peers (
+	"peer_id" TEXT NOT NULL,
+	"public_key" BLOB NOT NULL,
+	"last_seen" INTEGER NOT NULL,  -- Unix timestamp
+	"topic" TEXT NOT NULL,
+	"first_seen" INTEGER NOT NULL, -- Unix timestamp
+	"source" TEXT NOT NULL DEFAULT 'peer_exchange',
+
+	PRIMARY KEY(peer_id, topic)
+);
+
+-- Indexes for efficient queries
+CREATE INDEX IF NOT EXISTS idx_known_peers_last_seen ON known_peers(last_seen);
+CREATE INDEX IF NOT EXISTS idx_known_peers_topic ON known_peers(topic);
+CREATE INDEX IF NOT EXISTS idx_known_peers_source ON known_peers(source);
+CREATE INDEX IF NOT EXISTS idx_known_peers_peer_id ON known_peers(peer_id);
+`
+
+	_, err := kpm.db.ExecContext(context.Background(), createTableSQL)
+	if err != nil {
+		return fmt.Errorf("failed to create known_peers table: %v", err)
+	}
+
+	kpm.logger.Debug("Created known_peers table successfully", "database")
+	return nil
+}
+
+// prepareStatements prepares frequently used SQL statements
+func (kpm *KnownPeersManager) prepareStatements() error {
+	var err error
+
+	// Insert or update known peer
+	kpm.insertStmt, err = kpm.db.Prepare(`
+		INSERT INTO known_peers (peer_id, public_key, last_seen, topic, first_seen, source)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(peer_id, topic) DO UPDATE SET
+			public_key = excluded.public_key,
+			last_seen = excluded.last_seen,
+			source = excluded.source
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare insert statement: %v", err)
+	}
+
+	// Update last_seen only
+	kpm.updateStmt, err = kpm.db.Prepare(`
+		UPDATE known_peers
+		SET last_seen = ?
+		WHERE peer_id = ? AND topic = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare update statement: %v", err)
+	}
+
+	// Get single peer
+	kpm.getStmt, err = kpm.db.Prepare(`
+		SELECT peer_id, public_key, last_seen, topic, first_seen, source
+		FROM known_peers
+		WHERE peer_id = ? AND topic = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare get statement: %v", err)
+	}
+
+	// Get all peers
+	kpm.getAllStmt, err = kpm.db.Prepare(`
+		SELECT peer_id, public_key, last_seen, topic, first_seen, source
+		FROM known_peers
+		ORDER BY last_seen DESC
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare getAll statement: %v", err)
+	}
+
+	// Get peers by topic
+	kpm.getByTopicStmt, err = kpm.db.Prepare(`
+		SELECT peer_id, public_key, last_seen, topic, first_seen, source
+		FROM known_peers
+		WHERE topic = ?
+		ORDER BY last_seen DESC
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare getByTopic statement: %v", err)
+	}
+
+	// Delete peer
+	kpm.deleteStmt, err = kpm.db.Prepare(`
+		DELETE FROM known_peers
+		WHERE peer_id = ? AND topic = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare delete statement: %v", err)
+	}
+
+	// Cleanup stale peers
+	kpm.cleanupStaleStmt, err = kpm.db.Prepare(`
+		DELETE FROM known_peers
+		WHERE last_seen < ?
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare cleanup statement: %v", err)
+	}
+
+	kpm.logger.Debug("Prepared known_peers statements successfully", "database")
+	return nil
+}
+
+// StoreKnownPeer stores or updates a known peer
+func (kpm *KnownPeersManager) StoreKnownPeer(peer *KnownPeer) error {
+	now := time.Now()
+	if peer.LastSeen.IsZero() {
+		peer.LastSeen = now
+	}
+	if peer.FirstSeen.IsZero() {
+		peer.FirstSeen = now
+	}
+	if peer.Source == "" {
+		peer.Source = "peer_exchange"
+	}
+
+	_, err := kpm.insertStmt.Exec(
+		peer.PeerID,
+		peer.PublicKey,
+		peer.LastSeen.Unix(),
+		peer.Topic,
+		peer.FirstSeen.Unix(),
+		peer.Source,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to store known peer: %v", err)
+	}
+
+	kpm.logger.Debug(fmt.Sprintf("Stored known peer: %s (topic: %s, source: %s)",
+		peer.PeerID, peer.Topic, peer.Source), "database")
+
+	return nil
+}
+
+// UpdateLastSeen updates only the last_seen timestamp for a peer
+func (kpm *KnownPeersManager) UpdateLastSeen(peerID, topic string) error {
+	now := time.Now().Unix()
+
+	_, err := kpm.updateStmt.Exec(now, peerID, topic)
+	if err != nil {
+		return fmt.Errorf("failed to update last_seen: %v", err)
+	}
+
+	return nil
+}
+
+// GetKnownPeer retrieves a single known peer
+func (kpm *KnownPeersManager) GetKnownPeer(peerID, topic string) (*KnownPeer, error) {
+	var peer KnownPeer
+	var lastSeenUnix, firstSeenUnix int64
+
+	err := kpm.getStmt.QueryRow(peerID, topic).Scan(
+		&peer.PeerID,
+		&peer.PublicKey,
+		&lastSeenUnix,
+		&peer.Topic,
+		&firstSeenUnix,
+		&peer.Source,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil // Peer not found
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get known peer: %v", err)
+	}
+
+	peer.LastSeen = time.Unix(lastSeenUnix, 0)
+	peer.FirstSeen = time.Unix(firstSeenUnix, 0)
+
+	return &peer, nil
+}
+
+// GetAllKnownPeers retrieves all known peers (sorted by last_seen DESC)
+func (kpm *KnownPeersManager) GetAllKnownPeers() ([]*KnownPeer, error) {
+	rows, err := kpm.getAllStmt.Query()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query all known peers: %v", err)
+	}
+	defer rows.Close()
+
+	return kpm.scanKnownPeers(rows)
+}
+
+// GetKnownPeersByTopic retrieves all known peers for a specific topic
+func (kpm *KnownPeersManager) GetKnownPeersByTopic(topic string) ([]*KnownPeer, error) {
+	rows, err := kpm.getByTopicStmt.Query(topic)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query known peers by topic: %v", err)
+	}
+	defer rows.Close()
+
+	return kpm.scanKnownPeers(rows)
+}
+
+// GetRecentKnownPeers retrieves the N most recently seen peers
+func (kpm *KnownPeersManager) GetRecentKnownPeers(limit int, topic string) ([]*KnownPeer, error) {
+	query := `
+		SELECT peer_id, public_key, last_seen, topic, first_seen, source
+		FROM known_peers
+		WHERE topic = ?
+		ORDER BY last_seen DESC
+		LIMIT ?
+	`
+
+	rows, err := kpm.db.Query(query, topic, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query recent known peers: %v", err)
+	}
+	defer rows.Close()
+
+	return kpm.scanKnownPeers(rows)
+}
+
+// DeleteKnownPeer deletes a known peer
+func (kpm *KnownPeersManager) DeleteKnownPeer(peerID, topic string) error {
+	_, err := kpm.deleteStmt.Exec(peerID, topic)
+	if err != nil {
+		return fmt.Errorf("failed to delete known peer: %v", err)
+	}
+
+	kpm.logger.Debug(fmt.Sprintf("Deleted known peer: %s (topic: %s)", peerID, topic), "database")
+	return nil
+}
+
+// CleanupStalePeers removes peers that haven't been seen in the specified duration
+func (kpm *KnownPeersManager) CleanupStalePeers(maxAge time.Duration) (int, error) {
+	cutoffTime := time.Now().Add(-maxAge).Unix()
+
+	result, err := kpm.cleanupStaleStmt.Exec(cutoffTime)
+	if err != nil {
+		return 0, fmt.Errorf("failed to cleanup stale peers: %v", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+
+	if rowsAffected > 0 {
+		kpm.logger.Info(fmt.Sprintf("Cleaned up %d stale known peers (max_age: %v)",
+			rowsAffected, maxAge), "database")
+	}
+
+	return int(rowsAffected), nil
+}
+
+// GetKnownPeersCount returns the total number of known peers
+func (kpm *KnownPeersManager) GetKnownPeersCount() (int, error) {
+	var count int
+	err := kpm.db.QueryRow("SELECT COUNT(*) FROM known_peers").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get known peers count: %v", err)
+	}
+	return count, nil
+}
+
+// GetKnownPeersCountByTopic returns the count of known peers for a topic
+func (kpm *KnownPeersManager) GetKnownPeersCountByTopic(topic string) (int, error) {
+	var count int
+	err := kpm.db.QueryRow("SELECT COUNT(*) FROM known_peers WHERE topic = ?", topic).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get known peers count by topic: %v", err)
+	}
+	return count, nil
+}
+
+// scanKnownPeers is a helper to scan multiple rows into KnownPeer structs
+func (kpm *KnownPeersManager) scanKnownPeers(rows *sql.Rows) ([]*KnownPeer, error) {
+	var peers []*KnownPeer
+
+	for rows.Next() {
+		var peer KnownPeer
+		var lastSeenUnix, firstSeenUnix int64
+
+		err := rows.Scan(
+			&peer.PeerID,
+			&peer.PublicKey,
+			&lastSeenUnix,
+			&peer.Topic,
+			&firstSeenUnix,
+			&peer.Source,
+		)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan known peer row: %v", err)
+		}
+
+		peer.LastSeen = time.Unix(lastSeenUnix, 0)
+		peer.FirstSeen = time.Unix(firstSeenUnix, 0)
+
+		peers = append(peers, &peer)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating known peers rows: %v", err)
+	}
+
+	return peers, nil
+}
+
+// PublicKeyHex returns the public key as a hex string (for debugging)
+func (kp *KnownPeer) PublicKeyHex() string {
+	return hex.EncodeToString(kp.PublicKey)
+}
+
+// Close closes prepared statements
+func (kpm *KnownPeersManager) Close() error {
+	statements := []*sql.Stmt{
+		kpm.insertStmt,
+		kpm.updateStmt,
+		kpm.getStmt,
+		kpm.getAllStmt,
+		kpm.getByTopicStmt,
+		kpm.deleteStmt,
+		kpm.cleanupStaleStmt,
+	}
+
+	for _, stmt := range statements {
+		if stmt != nil {
+			stmt.Close()
+		}
+	}
+
+	kpm.logger.Debug("Closed known_peers prepared statements", "database")
+	return nil
+}
