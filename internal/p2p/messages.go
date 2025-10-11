@@ -46,6 +46,11 @@ const (
 	MessageTypePeerMetadataUpdate    MessageType = "peer_metadata_update"
 	MessageTypePeerMetadataUpdateAck MessageType = "peer_metadata_update_ack"
 
+	// Phase 3: DHT-based peer exchange
+	MessageTypeIdentityExchange  MessageType = "identity_exchange"
+	MessageTypeKnownPeersRequest MessageType = "known_peers_request"
+	MessageTypeKnownPeersResponse MessageType = "known_peers_response"
+
 	// Legacy support
 	MessageTypeEcho MessageType = "echo"
 )
@@ -651,5 +656,70 @@ func CreatePeerMetadataUpdateAck(nodeID string, sequence int64, status string, e
 		Sequence: sequence,
 		Status:   status,
 		Error:    errorMsg,
+	})
+}
+
+// ============================================================================
+// Phase 3: DHT-based Identity and Peer Exchange Messages
+// ============================================================================
+
+// IdentityExchangeData contains peer identity information for handshake
+// This is exchanged immediately after QUIC connection establishment
+type IdentityExchangeData struct {
+	PeerID    string `json:"peer_id"`     // SHA1(public_key) - 40 hex chars
+	PublicKey []byte `json:"public_key"`  // Ed25519 public key - 32 bytes
+	NodeType  string `json:"node_type"`   // "public" or "private"
+	Topic     string `json:"topic"`       // Topic this connection is for
+}
+
+// KnownPeersRequestData requests known peers from remote peer
+type KnownPeersRequestData struct {
+	Topic    string   `json:"topic"`
+	MaxPeers int      `json:"max_peers"` // Maximum peers to return (default: 50)
+	Exclude  []string `json:"exclude,omitempty"` // Peer IDs to exclude (e.g., ourselves)
+}
+
+// KnownPeersResponseData contains list of known peers
+type KnownPeersResponseData struct {
+	Topic string            `json:"topic"`
+	Peers []*KnownPeerEntry `json:"peers"`
+	Count int               `json:"count"` // Total number of known peers
+}
+
+// KnownPeerEntry represents a minimal peer entry for exchange
+// Only peer_id and public_key - full metadata queried from DHT later
+type KnownPeerEntry struct {
+	PeerID    string `json:"peer_id"`    // SHA1(public_key)
+	PublicKey []byte `json:"public_key"` // Ed25519 public key
+}
+
+// CreateIdentityExchange creates an identity exchange message
+func CreateIdentityExchange(peerID string, publicKey []byte, nodeType, topic string) *QUICMessage {
+	return NewQUICMessage(MessageTypeIdentityExchange, &IdentityExchangeData{
+		PeerID:    peerID,
+		PublicKey: publicKey,
+		NodeType:  nodeType,
+		Topic:     topic,
+	})
+}
+
+// CreateKnownPeersRequest creates a request for known peers
+func CreateKnownPeersRequest(topic string, maxPeers int, exclude []string) *QUICMessage {
+	if maxPeers <= 0 {
+		maxPeers = 50 // Default limit
+	}
+	return NewQUICMessage(MessageTypeKnownPeersRequest, &KnownPeersRequestData{
+		Topic:    topic,
+		MaxPeers: maxPeers,
+		Exclude:  exclude,
+	})
+}
+
+// CreateKnownPeersResponse creates a response with known peers
+func CreateKnownPeersResponse(topic string, peers []*KnownPeerEntry, totalCount int) *QUICMessage {
+	return NewQUICMessage(MessageTypeKnownPeersResponse, &KnownPeersResponseData{
+		Topic: topic,
+		Peers: peers,
+		Count: totalCount,
 	})
 }
