@@ -143,6 +143,11 @@ func (nt *NodeTypeManager) getLocalIP() (string, error) {
 
 // isPrivateIP checks if the given IP is in private address ranges
 func (nt *NodeTypeManager) isPrivateIP(ip string) bool {
+	return nt.IsPrivateIP(ip)
+}
+
+// IsPrivateIP checks if the given IP is in private address ranges (exported version)
+func (nt *NodeTypeManager) IsPrivateIP(ip string) bool {
 	privateRanges := []string{
 		`^10\.`,                      // 10.0.0.0/8
 		`^172\.(1[6-9]|2\d|3[01])\.`, // 172.16.0.0/12
@@ -320,4 +325,19 @@ func (nt *NodeTypeManager) IsPublicNode() (bool, error) {
 // GetLocalIP returns the local IP address of the machine (public method)
 func (nt *NodeTypeManager) GetLocalIP() (string, error) {
 	return nt.getLocalIP()
+}
+
+// IsOnSameSubnet checks if two IP addresses are on the same /24 subnet
+// This is used to identify LAN peers that can be directly connected to
+func (nt *NodeTypeManager) IsOnSameSubnet(ip1, ip2 string) bool {
+	// Parse IP addresses
+	parts1 := strings.Split(ip1, ".")
+	parts2 := strings.Split(ip2, ".")
+
+	if len(parts1) != 4 || len(parts2) != 4 {
+		return false
+	}
+
+	// Compare first 3 octets (/24 subnet)
+	return parts1[0] == parts2[0] && parts1[1] == parts2[1] && parts1[2] == parts2[2]
 }

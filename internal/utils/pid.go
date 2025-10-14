@@ -17,11 +17,9 @@ type PIDManager struct {
 }
 
 func NewPIDManager(cm *ConfigManager) (*PIDManager, error) {
-	// Get app data directory - default to current directory if not configured
-	dataDir := cm.GetConfigWithDefault("data_dir", ".")
-	if dataDir == "" {
-		dataDir = "."
-	}
+	// Use standard OS-specific data directory from GetAppPaths
+	paths := GetAppPaths("")
+	dataDir := paths.DataDir
 
 	return &PIDManager{
 		dir: dataDir,

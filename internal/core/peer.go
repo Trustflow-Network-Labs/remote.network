@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/anacrolix/dht/v2/krpc"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/p2p"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
@@ -35,9 +37,13 @@ type PeerManager struct {
 	topologyMgr           *p2p.NATTopologyManager
 	holePuncher           *p2p.HolePuncher
 	// Phase 4: DHT-based metadata services (replaces MetadataBroadcaster)
-	metadataQuery         *p2p.MetadataQueryService
-	connectabilityFilter  *p2p.ConnectabilityFilter
-	peerDiscovery         *p2p.PeerDiscoveryService
+	metadataPublisher       *p2p.MetadataPublisher
+	metadataFetcher         *p2p.MetadataFetcher
+	metadataQuery           *p2p.MetadataQueryService
+	peerValidator           *p2p.PeerValidator
+	periodicDiscoveryMgr    *p2p.PeriodicDiscovery
+	connectabilityFilter    *p2p.ConnectabilityFilter
+	peerDiscovery           *p2p.PeerDiscoveryService
 	dbManager             *database.SQLiteManager
 	topics                map[string]*TopicState
 	ctx                   context.Context
@@ -88,28 +94,63 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 	var relayPeer *p2p.RelayPeer
 	var relayManager *p2p.RelayManager
 
+	// Phase 4: Initialize DHT-based metadata services first
+	// These services work alongside the existing broadcaster/PEX for gradual transition
+	bep44Manager := p2p.NewBEP44Manager(dht, logger, config)
+	logger.Info("BEP_44 manager initialized for DHT mutable data", "core")
+
+	// Load or generate Ed25519 keypair for peer identity and metadata signing
+	// Keys are stored in OS-specific data directory for security and persistence
+	paths := utils.GetAppPaths("")
+	keysDir := filepath.Join(paths.DataDir, "keys")
+	keyPair, err := crypto.LoadOrGenerateKeys(keysDir)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to load/generate keypair: %v", err)
+	}
+	logger.Info(fmt.Sprintf("Loaded Ed25519 keypair (peer_id: %s, keys_dir: %s)", keyPair.PeerID(), keysDir), "core")
+
+	// Initialize metadata publisher for publishing our own metadata to DHT
+	metadataPublisher := p2p.NewMetadataPublisher(bep44Manager, keyPair, logger, config, dbManager)
+	logger.Info("Metadata publisher initialized for DHT updates", "core")
+
+	// Initialize identity exchanger for Phase 3 identity + known peers exchange
+	identityExchanger := p2p.NewIdentityExchanger(keyPair, dht.NodeID(), dbManager, logger, config)
+	logger.Info("Identity exchanger initialized for QUIC handshakes", "core")
+
+	// Set identity exchanger on QUIC peer
+	quic.SetIdentityExchanger(identityExchanger)
+
+	// Initialize relay peer/manager (needs metadata publisher)
 	if config.GetConfigBool("relay_mode", false) {
 		relayPeer = p2p.NewRelayPeer(config, logger, dbManager)
 		logger.Info("Relay mode enabled - node will act as relay", "core")
 	} else {
 		// For NAT peers, initialize relay manager for connecting to relays
-		relayManager = p2p.NewRelayManager(config, logger, dbManager, quic, dht)
+		relayManager = p2p.NewRelayManager(config, logger, dbManager, quic, dht, metadataPublisher)
 		logger.Info("Relay manager initialized for NAT peer", "core")
 	}
 
-	// Phase 4: Initialize DHT-based metadata services
-	// These services work alongside the existing broadcaster/PEX for gradual transition
-	bep44Manager := p2p.NewBEP44Manager(dht, logger, config)
-	logger.Info("BEP_44 manager initialized for DHT mutable data", "core")
-
 	metadataQuery := p2p.NewMetadataQueryService(bep44Manager, dbManager, logger, config)
 	logger.Info("Metadata query service initialized (cache-first DHT queries)", "core")
+
+	// Initialize metadata fetcher for DHT-only metadata retrieval with priority routing
+	metadataFetcher := p2p.NewMetadataFetcher(bep44Manager, logger)
+	logger.Info("Metadata fetcher initialized (DHT priority queries)", "core")
+
+	// Initialize peer validator for stale peer cleanup (validates 24h+ old peers via DHT)
+	peerValidator := p2p.NewPeerValidator(metadataFetcher, dbManager, logger, config)
+	logger.Info("Peer validator initialized (stale peer cleanup via DHT)", "core")
 
 	connectabilityFilter := p2p.NewConnectabilityFilter(logger)
 	logger.Info("Connectability filter initialized (peer reachability detection)", "core")
 
 	peerDiscovery := p2p.NewPeerDiscoveryService(metadataQuery, connectabilityFilter, dbManager, logger, config)
 	logger.Info("Peer discovery service initialized (on-demand peer filtering)", "core")
+
+	// Initialize periodic discovery for 3-hour DHT rediscovery
+	periodicDiscoveryMgr := p2p.NewPeriodicDiscovery(peerDiscovery, dbManager, logger, config)
+	logger.Info("Periodic discovery initialized (3-hour DHT rediscovery)", "core")
 
 	pm := &PeerManager{
 		config:                config,
@@ -122,7 +163,11 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 		natDetector:           natDetector,
 		topologyMgr:           topologyMgr,
 		holePuncher:           holePuncher,
+		metadataPublisher:     metadataPublisher,
+		metadataFetcher:       metadataFetcher,
 		metadataQuery:         metadataQuery,
+		peerValidator:         peerValidator,
+		periodicDiscoveryMgr:  periodicDiscoveryMgr,
 		connectabilityFilter:  connectabilityFilter,
 		peerDiscovery:         peerDiscovery,
 		dbManager:             dbManager,
@@ -136,7 +181,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 
 	// Initialize and set hole puncher if not in relay mode
 	if !config.GetConfigBool("relay_mode", false) && config.GetConfigBool("hole_punch_enabled", true) {
-		pm.holePuncher = p2p.NewHolePuncher(config, logger, quic, dht, dbManager, natDetector)
+		pm.holePuncher = p2p.NewHolePuncher(config, logger, quic, dht, dbManager, metadataFetcher, natDetector)
 		quic.SetHolePuncher(pm.holePuncher)
 		logger.Info("Hole puncher initialized for NAT traversal", "core")
 	}
@@ -152,17 +197,10 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 		})
 	}
 
-	// Set up connection failure callback for peer reachability verification
-	quic.SetConnectionFailureCallback(func(addr string) {
-		pm.HandleConnectionFailure(addr)
-	})
-
-	// Set up peer discovery callback for QUIC metadata exchange
-	dht.SetPeerDiscoveredCallback(func(peerAddr string, topic string) {
-		if err := quic.RequestPeerMetadata(peerAddr, topic); err != nil {
-			logger.Error(fmt.Sprintf("Failed to request metadata from %s for topic %s: %v", peerAddr, topic, err), "core")
-		}
-	})
+	// Note: Connection failure callback removed - peer cleanup handled by PeerValidator
+	// Note: QUIC metadata exchange removed - metadata comes from DHT only
+	// Peer discovery stores peer IDs in known_peers during identity exchange
+	// Metadata is fetched from DHT on-demand when needed
 
 	return pm, nil
 }
@@ -227,6 +265,13 @@ func (pm *PeerManager) Start() error {
 		}
 	}
 
+	// Publish initial metadata to DHT (Phase 4: DHT metadata architecture)
+	pm.logger.Info("Publishing initial metadata to DHT...", "core")
+	if err := pm.publishInitialMetadata(); err != nil {
+		pm.logger.Warn(fmt.Sprintf("Failed to publish initial metadata: %v", err), "core")
+		// Don't fail startup if DHT publishing fails
+	}
+
 	// Subscribe to configured topics
 	topics := pm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 
@@ -246,7 +291,6 @@ func (pm *PeerManager) Start() error {
 	go pm.periodicAnnounce()
 	go pm.periodicDiscovery()
 	go pm.periodicMaintenance()
-	go pm.periodicPeerReachabilityCheck()
 
 	pm.running = true
 	pm.logger.Info("Peer Manager started successfully", "core")
@@ -502,13 +546,43 @@ func (pm *PeerManager) discoverTopicPeers(topic string) {
 			pm.logger.Debug(fmt.Sprintf("Added new peer %s for topic '%s'", peerKey, topic), "core")
 
 			// Trigger metadata exchange for newly discovered peer
+			// Note: Only request metadata via direct QUIC if we can reasonably connect
+			// For NAT peers, metadata will come via DHT queries instead
 			quicPort := pm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
 			quicAddr := fmt.Sprintf("%s:%d", peer.IP.String(), quicPort)
-			go func(addr, topicName string) {
-				if err := pm.quic.RequestPeerMetadata(addr, topicName); err != nil {
-					pm.logger.Error(fmt.Sprintf("Failed to request metadata from discovered peer %s for topic %s: %v", addr, topicName, err), "core")
+			go func(addr, topicName string, peerIP net.IP) {
+				nodeTypeManager := utils.NewNodeTypeManager()
+
+				// Allow direct connections to:
+				// 1. Public IPs (always reachable)
+				// 2. LAN peers on the same subnet (directly reachable)
+				// Skip connections to private IPs outside our LAN (need relay)
+				if nodeTypeManager.IsPrivateIP(peerIP.String()) {
+					// Check if this is a LAN peer (same subnet)
+					ourIP, err := nodeTypeManager.GetLocalIP()
+					if err == nil && nodeTypeManager.IsOnSameSubnet(ourIP, peerIP.String()) {
+						pm.logger.Debug(fmt.Sprintf("Attempting direct connection to LAN peer %s", addr), "core")
+						// Continue with connection attempt
+					} else {
+						pm.logger.Debug(fmt.Sprintf("Skipping direct metadata request to remote private IP %s (will use DHT metadata)", addr), "core")
+						return
+					}
 				}
-			}(quicAddr, topic)
+
+				// Note: QUIC metadata exchange removed - metadata comes from DHT only
+				// Identity exchange during QUIC handshake stores peer_id + public_key in known_peers
+				// Metadata can be fetched from DHT on-demand using metadataFetcher when needed
+				pm.logger.Debug(fmt.Sprintf("Peer discovered at %s - attempting QUIC connection for identity exchange", addr), "core")
+
+				// Attempt QUIC connection to perform identity exchange
+				// The identity exchange happens automatically during QUIC handshake
+				_, err := pm.quic.ConnectToPeer(addr)
+				if err != nil {
+					pm.logger.Debug(fmt.Sprintf("Failed to connect to discovered peer %s: %v", addr, err), "core")
+				} else {
+					pm.logger.Info(fmt.Sprintf("Successfully connected to discovered peer %s (identity exchange in progress)", addr), "core")
+				}
+			}(quicAddr, topic, peer.IP)
 		}
 	}
 	topicState.LastRefresh = time.Now()
@@ -616,6 +690,12 @@ func (pm *PeerManager) Stop() error {
 		}
 	}
 
+	// Stop metadata publisher
+	if pm.metadataPublisher != nil {
+		pm.metadataPublisher.StopPeriodicRepublish()
+		pm.logger.Info("Metadata publisher stopped", "core")
+	}
+
 	// Stop QUIC peer
 	if err := pm.quic.Stop(); err != nil {
 		pm.logger.Error(fmt.Sprintf("Error stopping QUIC peer: %v", err), "core")
@@ -632,244 +712,112 @@ func (pm *PeerManager) Stop() error {
 	return nil
 }
 
-// periodicPeerReachabilityCheck periodically verifies peer reachability and removes unreachable peers
-func (pm *PeerManager) periodicPeerReachabilityCheck() {
-	// Check frequently (default 5 minutes) to find stale peers (older than 24h)
-	checkInterval := pm.config.GetConfigDuration("peer_reachability_check_interval", 5*time.Minute)
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
+// publishInitialMetadata creates and publishes our initial metadata to the DHT
+func (pm *PeerManager) publishInitialMetadata() error {
+	// Get our node information
+	nodeTypeManager := utils.NewNodeTypeManager()
+	publicIP, _ := nodeTypeManager.GetExternalIP()
+	privateIP, _ := nodeTypeManager.GetLocalIP()
+	quicPort := pm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
 
-	for {
-		select {
-		case <-ticker.C:
-			pm.logger.Info("Starting periodic peer reachability check...", "core")
-			pm.verifyAllPeerReachability()
-
-		case <-pm.ctx.Done():
-			pm.logger.Debug("Stopping peer reachability check", "core")
-			return
-		}
+	// Get the first subscribed topic (or default)
+	topics := pm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	if len(topics) == 0 {
+		return fmt.Errorf("no topics configured")
 	}
-}
+	topic := topics[0]
 
-// verifyAllPeerReachability checks peers that haven't been seen recently and removes unreachable ones
-func (pm *PeerManager) verifyAllPeerReachability() {
-	pm.logger.Info("Verifying peer reachability for stale peers...", "core")
-
-	// Get all topics to iterate through peer metadata
-	pm.mutex.RLock()
-	topics := make([]string, 0, len(pm.topics))
-	for topic := range pm.topics {
-		topics = append(topics, topic)
-	}
-	pm.mutex.RUnlock()
-
-	// Get the age threshold - peers older than this need verification
-	maxAge := pm.config.GetConfigDuration("peer_metadata_max_age", 24*time.Hour)
-	cutoff := time.Now().Add(-maxAge)
-
-	reachableCount := 0
-	unreachableCount := 0
-	checkedPeers := 0
-	skippedPeers := 0
-
-	for _, topic := range topics {
-		// Get all peer metadata for this topic
-		allMetadata, err := pm.dbManager.PeerMetadata.GetPeersByTopic(topic)
-		if err != nil {
-			pm.logger.Error(fmt.Sprintf("Failed to get peer metadata for topic %s: %v", topic, err), "core")
-			continue
-		}
-
-		for _, metadata := range allMetadata {
-			// Only verify peers that are older than the cutoff (1 day by default)
-			if metadata.LastSeen.After(cutoff) {
-				// Peer is fresh, skip verification
-				skippedPeers++
-				continue
-			}
-
-			checkedPeers++
-			pm.logger.Debug(fmt.Sprintf("Peer %s is stale (last seen: %v ago), verifying reachability",
-				metadata.NodeID, time.Since(metadata.LastSeen)), "core")
-
-			reachable := pm.verifyPeerReachability(metadata)
-			if reachable {
-				reachableCount++
-				// Update LastSeen to prevent re-checking for another day
-				if err := pm.dbManager.PeerMetadata.UpdateLastSeen(metadata.NodeID, topic, "reachability-check"); err != nil {
-					pm.logger.Error(fmt.Sprintf("Failed to update LastSeen for peer %s: %v", metadata.NodeID, err), "core")
-				} else {
-					pm.logger.Debug(fmt.Sprintf("Peer %s is reachable, updated LastSeen", metadata.NodeID), "core")
-				}
-			} else {
-				unreachableCount++
-				// Remove unreachable peer
-				if err := pm.dbManager.PeerMetadata.DeletePeerMetadata(metadata.NodeID, topic); err != nil {
-					pm.logger.Error(fmt.Sprintf("Failed to delete unreachable peer %s: %v", metadata.NodeID, err), "core")
-				} else {
-					endpoint := fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, metadata.NetworkInfo.PublicPort)
-					pm.logger.Info(fmt.Sprintf("Removed unreachable peer: %s (endpoint: %s, last seen: %v ago)",
-						metadata.NodeID, endpoint, time.Since(metadata.LastSeen)), "core")
-				}
-			}
-		}
-	}
-
-	pm.logger.Info(fmt.Sprintf("Peer reachability check complete: %d peers checked, %d still reachable (LastSeen updated), %d removed, %d skipped (fresh)",
-		checkedPeers, reachableCount, unreachableCount, skippedPeers), "core")
-}
-
-// verifyPeerReachability checks if a specific peer is reachable
-func (pm *PeerManager) verifyPeerReachability(metadata *database.PeerMetadata) bool {
-	// Case 1: Regular peer or relay peer (not using relay) - direct ping
-	if !metadata.NetworkInfo.UsingRelay {
-		endpoint := fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, metadata.NetworkInfo.PublicPort)
-		if metadata.NetworkInfo.PublicIP == "" || metadata.NetworkInfo.PublicPort == 0 {
-			pm.logger.Debug(fmt.Sprintf("Peer %s has no public endpoint, marking unreachable", metadata.NodeID), "core")
-			return false
-		}
-
-		err := pm.quic.Ping(endpoint)
-		if err != nil {
-			pm.logger.Debug(fmt.Sprintf("Direct ping to peer %s (%s) failed: %v", metadata.NodeID, endpoint, err), "core")
-			return false
-		}
-
-		pm.logger.Debug(fmt.Sprintf("Peer %s is reachable via direct ping", metadata.NodeID), "core")
-		return true
-	}
-
-	// Case 2: NAT peer using relay - verify through its relay
-	relayNodeID := metadata.NetworkInfo.ConnectedRelay
-	if relayNodeID == "" {
-		pm.logger.Debug(fmt.Sprintf("NAT peer %s has no relay info, marking unreachable", metadata.NodeID), "core")
-		return false
-	}
-
-	// Get relay peer metadata - try to find it in any topic
-	var relayMetadata *database.PeerMetadata
-	pm.mutex.RLock()
-	topics := make([]string, 0, len(pm.topics))
-	for topic := range pm.topics {
-		topics = append(topics, topic)
-	}
-	pm.mutex.RUnlock()
-
-	for _, topic := range topics {
-		rm, err := pm.dbManager.PeerMetadata.GetPeerMetadata(relayNodeID, topic)
-		if err == nil {
-			relayMetadata = rm
-			break
-		}
-	}
-
-	if relayMetadata == nil {
-		pm.logger.Debug(fmt.Sprintf("NAT peer %s relay %s not found in database, marking unreachable", metadata.NodeID, relayNodeID), "core")
-		return false
-	}
-
-	// First verify relay is reachable
-	relayEndpoint := relayMetadata.NetworkInfo.RelayEndpoint
-	if relayEndpoint == "" {
-		relayEndpoint = fmt.Sprintf("%s:%d", relayMetadata.NetworkInfo.PublicIP, relayMetadata.NetworkInfo.PublicPort)
-	}
-	if relayEndpoint == "" {
-		pm.logger.Debug(fmt.Sprintf("Relay %s has no endpoint, NAT peer %s marked unreachable", relayNodeID, metadata.NodeID), "core")
-		return false
-	}
-
-	err := pm.quic.Ping(relayEndpoint)
-	if err != nil {
-		pm.logger.Debug(fmt.Sprintf("Relay %s unreachable, NAT peer %s marked unreachable", relayNodeID, metadata.NodeID), "core")
-		// Also remove the unreachable relay from all topics
-		for _, topic := range topics {
-			if err := pm.dbManager.PeerMetadata.DeletePeerMetadata(relayNodeID, topic); err != nil {
-				pm.logger.Debug(fmt.Sprintf("Failed to delete unreachable relay %s from topic %s: %v", relayNodeID, topic, err), "core")
-			}
-		}
-		pm.logger.Info(fmt.Sprintf("Removed unreachable relay: %s", relayNodeID), "core")
-		return false
-	}
-
-	// Query relay to verify NAT peer has active session
-	hasActiveSession, err := pm.quic.QueryRelayForSession(relayEndpoint, metadata.NodeID, pm.dht.NodeID())
-	if err != nil {
-		pm.logger.Debug(fmt.Sprintf("Failed to query relay %s for NAT peer %s session: %v", relayNodeID, metadata.NodeID, err), "core")
-		// If query fails but relay is reachable, consider it a communication error, not peer unreachability
-		// Don't remove the peer - it will be checked again next cycle
-		return true
-	}
-
-	if !hasActiveSession {
-		pm.logger.Debug(fmt.Sprintf("NAT peer %s has no active session on relay %s", metadata.NodeID, relayNodeID), "core")
-		return false
-	}
-
-	pm.logger.Debug(fmt.Sprintf("NAT peer %s has active session on relay %s", metadata.NodeID, relayNodeID), "core")
-	return true
-}
-
-// HandleConnectionFailure handles a connection failure to an address by looking up the peer and verifying reachability
-func (pm *PeerManager) HandleConnectionFailure(addr string) {
-	// Parse address to get IP and port
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		pm.logger.Debug(fmt.Sprintf("Failed to parse address %s: %v", addr, err), "core")
-		return
-	}
-
-	port := 0
-	fmt.Sscanf(portStr, "%d", &port)
-
-	// Find which peer has this address
-	pm.mutex.RLock()
-	topics := make([]string, 0, len(pm.topics))
-	for topic := range pm.topics {
-		topics = append(topics, topic)
-	}
-	pm.mutex.RUnlock()
-
-	for _, topic := range topics {
-		allMetadata, err := pm.dbManager.PeerMetadata.GetPeersByTopic(topic)
-		if err != nil {
-			continue
-		}
-
-		for _, metadata := range allMetadata {
-			// Check if this peer matches the failed address
-			if metadata.NetworkInfo.PublicIP == host && metadata.NetworkInfo.PublicPort == port {
-				pm.logger.Debug(fmt.Sprintf("Connection failure to %s matched peer %s in topic %s", addr, metadata.NodeID, topic), "core")
-				pm.VerifyPeerReachabilityOnFailure(metadata.NodeID, topic)
-				return
-			}
-		}
-	}
-
-	pm.logger.Debug(fmt.Sprintf("Connection failure to %s but no matching peer found in database", addr), "core")
-}
-
-// VerifyPeerReachabilityOnFailure verifies and cleans up peer on connection failure
-// This is called when a connection attempt to a peer fails
-func (pm *PeerManager) VerifyPeerReachabilityOnFailure(nodeID string, topic string) {
-	metadata, err := pm.dbManager.PeerMetadata.GetPeerMetadata(nodeID, topic)
-	if err != nil || metadata == nil {
-		pm.logger.Debug(fmt.Sprintf("Peer %s not in database for topic %s, skipping reachability check", nodeID, topic), "core")
-		return
-	}
-
-	pm.logger.Debug(fmt.Sprintf("Connection to peer %s failed, verifying reachability", nodeID), "core")
-
-	reachable := pm.verifyPeerReachability(metadata)
-	if reachable {
-		pm.logger.Debug(fmt.Sprintf("Peer %s is still reachable despite connection failure, keeping it", nodeID), "core")
-		return
-	}
-
-	// Peer is unreachable, remove it
-	if err := pm.dbManager.PeerMetadata.DeletePeerMetadata(nodeID, topic); err != nil {
-		pm.logger.Error(fmt.Sprintf("Failed to delete unreachable peer %s: %v", nodeID, err), "core")
+	// Determine node type
+	nodeType := "public"
+	isRelayNode := false
+	if pm.relayManager != nil {
+		nodeType = "private" // NAT peer
 	} else {
-		pm.logger.Info(fmt.Sprintf("Removed unreachable peer after connection failure: %s (topic: %s)", nodeID, topic), "core")
+		// Check if relay mode is enabled for public nodes
+		isRelayNode = pm.config.GetConfigBool("relay_mode", false)
 	}
+
+	// Create initial metadata
+	networkInfo := database.NetworkInfo{
+		PublicIP:    publicIP,
+		PrivateIP:   privateIP,
+		PublicPort:  quicPort,
+		PrivatePort: quicPort,
+		NodeType:    nodeType,
+		Protocols: []database.Protocol{
+			{Name: "quic", Port: quicPort},
+		},
+		UsingRelay:     false, // Will be updated when relay connects
+		ConnectedRelay: "",
+		RelaySessionID: "",
+		RelayAddress:   "",
+	}
+
+	// If this is a relay node, add relay service information
+	if isRelayNode {
+		networkInfo.IsRelay = true
+		networkInfo.RelayEndpoint = fmt.Sprintf("%s:%d", publicIP, quicPort)
+
+		// Get relay pricing from config (default: 0.001 per GB = 1000 micro-units)
+		relayPricing := pm.config.GetConfigFloat64("relay_pricing_per_gb", 0.001, 0.0, 1.0)
+		networkInfo.RelayPricing = int(relayPricing * 1000000.0) // Convert to micro-units
+
+		// Get relay capacity from config (default: 100 concurrent sessions)
+		networkInfo.RelayCapacity = pm.config.GetConfigInt("relay_capacity", 100, 1, 10000)
+
+		// Initial reputation score (0.5 = 5000 basis points)
+		networkInfo.ReputationScore = 5000
+
+		pm.logger.Info(fmt.Sprintf("Relay service enabled: endpoint=%s, pricing=%.4f, capacity=%d",
+			networkInfo.RelayEndpoint, relayPricing, networkInfo.RelayCapacity), "core")
+	}
+
+	metadata := &database.PeerMetadata{
+		NodeID:       pm.dht.NodeID(),
+		Topic:        topic,
+		Version:      1,
+		NetworkInfo:  networkInfo,
+		Capabilities: []string{"metadata_exchange"},
+		Services:     make(map[string]database.Service),
+		Extensions:   make(map[string]interface{}),
+		Timestamp:    time.Now(),
+		LastSeen:     time.Now(),
+		Source:       "self_publish",
+	}
+
+	// Conditional metadata publishing based on node type
+	// - Public nodes: Publish immediately (they are directly reachable)
+	// - Relay nodes: Publish immediately (they provide relay service)
+	// - NAT nodes: Defer publishing until relay connection is established
+	if nodeType == "public" || isRelayNode {
+		// Publish to DHT immediately for public/relay nodes
+		if err := pm.metadataPublisher.PublishMetadata(metadata); err != nil {
+			return fmt.Errorf("failed to publish initial metadata: %v", err)
+		}
+
+		// Start periodic republishing to keep metadata alive in DHT
+		pm.metadataPublisher.StartPeriodicRepublish()
+
+		pm.logger.Info(fmt.Sprintf("Published initial metadata to DHT (node_id: %s, type: %s)", metadata.NodeID, nodeType), "core")
+	} else {
+		// NAT node - defer publishing until relay connection is established
+		pm.logger.Info(fmt.Sprintf("NAT node detected - deferring metadata publishing until relay connection (node_id: %s)", metadata.NodeID), "core")
+
+		// Store the metadata for later publishing when relay connects
+		// The relay manager will call metadataPublisher.PublishMetadata() when relay connects
+		// Note: Metadata will be updated with relay info before publishing
+	}
+
+	// Note: Local metadata storage removed - metadata is DHT-only now
+
+	// Start peer validator for stale peer cleanup (validates 24h+ old peers every 6 hours)
+	pm.peerValidator.StartPeriodicValidation(topic)
+	pm.logger.Info("Started peer validator for stale peer cleanup", "core")
+
+	// Start periodic discovery for DHT rediscovery (discovers new peers every 3 hours)
+	pm.periodicDiscoveryMgr.StartPeriodicDiscovery(topic)
+	pm.logger.Info("Started periodic discovery for DHT rediscovery", "core")
+	return nil
 }
+
+// periodicPeerReachabilityCheck periodically verifies peer reachability and removes unreachable peers

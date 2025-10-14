@@ -24,8 +24,10 @@ type MetadataPublisher struct {
 	metadataMutex   sync.RWMutex
 
 	// Republish control
-	republishTicker *time.Ticker
-	stopChan        chan struct{}
+	republishTicker   *time.Ticker
+	stopChan          chan struct{}
+	republishRunning  bool
+	republishMutex    sync.Mutex
 }
 
 // NewMetadataPublisher creates a new metadata publisher
@@ -120,14 +122,24 @@ func (mp *MetadataPublisher) Republish() error {
 // StartPeriodicRepublish starts the periodic republishing goroutine
 // Republishes every N minutes to keep metadata alive in DHT
 func (mp *MetadataPublisher) StartPeriodicRepublish() {
-	// Get republish interval from config (default: 60 minutes)
-	intervalMinutes := mp.config.GetConfigInt("metadata_republish_interval_minutes", 60, 10, 120)
+	mp.republishMutex.Lock()
+	defer mp.republishMutex.Unlock()
+
+	// Check if already running
+	if mp.republishRunning {
+		mp.logger.Debug("Periodic republishing already running", "metadata-publisher")
+		return
+	}
+
+	// Get republish interval from config (default: 30 minutes)
+	intervalMinutes := mp.config.GetConfigInt("metadata_republish_interval_minutes", 30, 10, 120)
 	interval := time.Duration(intervalMinutes) * time.Minute
 
 	mp.logger.Info(fmt.Sprintf("Starting periodic metadata republishing (interval: %v)", interval), "metadata-publisher")
 
 	// Create ticker
 	mp.republishTicker = time.NewTicker(interval)
+	mp.republishRunning = true
 
 	// Start background goroutine
 	go func() {
@@ -145,6 +157,9 @@ func (mp *MetadataPublisher) StartPeriodicRepublish() {
 
 			case <-mp.stopChan:
 				mp.logger.Info("Stopping periodic metadata republishing", "metadata-publisher")
+				mp.republishMutex.Lock()
+				mp.republishRunning = false
+				mp.republishMutex.Unlock()
 				return
 			}
 		}
@@ -211,6 +226,13 @@ func (mp *MetadataPublisher) NotifyRelayConnected(relayNodeID, relaySessionID, r
 	}
 
 	mp.logger.Info(fmt.Sprintf("Successfully updated metadata with relay info (seq: %d)", mp.currentSequence), "metadata-publisher")
+
+	// Metadata is now stored only in DHT - no local database storage
+
+	// Start periodic republishing if not already running
+	// This handles NAT nodes that deferred initial publishing until relay connection
+	go mp.StartPeriodicRepublish()
+
 	return nil
 }
 
@@ -241,6 +263,8 @@ func (mp *MetadataPublisher) NotifyRelayDisconnected() error {
 	}
 
 	mp.logger.Info(fmt.Sprintf("Successfully updated metadata after relay disconnect (seq: %d)", mp.currentSequence), "metadata-publisher")
+
+	// Metadata is now stored only in DHT - no local database storage
 	return nil
 }
 
@@ -274,5 +298,7 @@ func (mp *MetadataPublisher) NotifyIPChange(newPublicIP, newPrivateIP string) er
 	}
 
 	mp.logger.Info(fmt.Sprintf("Successfully updated metadata with new IPs (seq: %d)", mp.currentSequence), "metadata-publisher")
+
+	// Metadata is now stored only in DHT - no local database storage
 	return nil
 }

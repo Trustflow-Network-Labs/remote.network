@@ -1,82 +1,40 @@
-# System Architecture Diagrams
+# System Diagrams
 
-This directory contains UML diagrams documenting the peer management and NAT traversal system.
+This directory contains PlantUML diagrams documenting the hole punching NAT traversal system.
 
-## Diagrams
+## Current Diagrams
 
-### 1. Peer Aging Sequence Diagram
-**File:** `1-peer-aging-sequence.puml`
+### Hole Punching Protocol
 
-Shows the complete flow of the 1-day peer aging mechanism with reachability verification:
-- Periodic check every 5 minutes
-- 24-hour staleness criteria
-- Direct ping for public peers
-- Relay + session verification for NAT peers
-- LastSeen timestamp updates
-- Peer removal logic
+All diagrams relate to the NAT traversal hole punching protocol:
 
-### 2. NAT Peer Session Verification
-**File:** `2-nat-session-verification.puml`
+**hp-1-successful-flow.puml** - Standard successful hole punch sequence
+- Shows the complete flow of a successful hole punch between two NAT peers
+- Includes relay coordination and simultaneous connection attempts
 
-Details the NAT peer verification process through relay:
-- Relay reachability ping
-- Session query message flow
-- Database + memory session lookup
-- Keepalive validation
-- Active session determination
+**hp-2-lan-detection.puml** - LAN peer detection and direct connection
+- Demonstrates how peers detect they're on the same local network
+- Shows direct connection optimization for LAN peers
 
-### 3. Connection Failure Cleanup
-**File:** `3-connection-failure-cleanup.puml`
+**hp-3-direct-dial.puml** - Direct dial to public peer
+- Shows connection flow when target peer is publicly accessible
+- Demonstrates that hole punching is not needed for public peers
 
-Shows event-driven cleanup on connection failures:
-- Connection attempt failure
-- Callback trigger mechanism
-- Address-to-peer lookup
-- Reachability verification
-- Automatic peer removal
+**hp-4-failure-fallback.puml** - Hole punch failure and relay fallback
+- Shows what happens when hole punching fails
+- Demonstrates automatic fallback to relay forwarding
 
-### 4. System Architecture
-**File:** `4-system-architecture.puml`
+**hp-5-architecture.puml** - System architecture for hole punching
+- Component diagram showing hole punching system components
+- Shows integration with QUIC, relay manager, and DHT
 
-Component diagram showing:
-- System layers (Core, P2P, Database, Utils)
-- Component relationships
-- Callback mechanisms
-- Data flow between components
+**hp-6-decision-tree.puml** - Connection decision logic
+- Flow chart for determining connection strategy
+- Shows how system chooses between LAN, direct, hole punch, or relay
 
-### 5. DHT/QUIC Communication Data Flow
-**File:** `5-dht-quic-dataflow.puml`
-
-Comprehensive data flow diagram showing:
-- DHT peer discovery
-- QUIC metadata exchange
-- Bidirectional metadata sync
-- Relay peer detection
-- Periodic reachability checks
-- NAT peer session verification
-- Connection failure handling
-
-### 6. Class Diagram
-**File:** `6-class-diagram.puml`
-
-Object-oriented view of the system:
-- Key classes and their relationships
-- Data structures (PeerMetadata, NetworkInfo, RelaySession)
-- Message types and data transfer objects
-- Database interfaces
-- Component dependencies
-
-### 7. Peer Lifecycle State Machine
-**File:** `7-peer-lifecycle-state.puml`
-
-State diagram showing peer lifecycle:
-- Discovery through DHT
-- Fresh vs Stale states (24h threshold)
-- Verification states
-- Public peer vs NAT peer verification paths
-- Connection failure handling
-- Relay peer special handling
-- State transitions and triggers
+**hp-7-rtt-timing.puml** - RTT measurement and synchronization
+- Details RTT measurement during hole punch coordination
+- Shows timing synchronization for simultaneous connection attempts
 
 ## Viewing the Diagrams
 
@@ -107,7 +65,7 @@ brew install plantuml
 apt-get install plantuml
 
 # Render to PNG
-plantuml docs/diagrams/1-peer-aging-sequence.puml
+plantuml docs/diagrams/hp-1-successful-flow.puml
 
 # Render all diagrams
 plantuml docs/diagrams/*.puml
@@ -123,52 +81,49 @@ plantuml -tsvg docs/diagrams/*.puml
 
 ## Key Concepts
 
-### Peer Aging
-- **Check Interval**: 5 minutes (`peer_reachability_check_interval`)
-- **Max Age**: 24 hours (`peer_metadata_max_age`)
-- **Action**: Peers older than 24h are verified via ping
-- **Result**: If unreachable → removed, if reachable → LastSeen updated
+### Hole Punching Overview
 
-### NAT Peer Verification
-1. Ping the relay peer
-2. If relay reachable → query for NAT peer's session
-3. Relay checks database AND memory for active session
-4. Session is "active" only if keepalive is recent
-5. NAT peer removed if relay unreachable OR no active session
+The hole punching protocol enables direct NAT-to-NAT connections by:
 
-### Connection Failure Cleanup
-1. Any connection attempt failure triggers callback
-2. Failed address is looked up in peer database
-3. Same reachability verification as periodic aging
-4. Peer removed if unreachable
+1. **Relay Coordination** - Relay peer coordinates the connection attempt
+2. **RTT Measurement** - Both peers measure round-trip time
+3. **Synchronized Dial** - Both peers dial simultaneously after RTT/2 delay
+4. **NAT Mapping Creation** - Simultaneous packets create NAT mappings
+5. **Direct Connection** - Packets traverse the newly-created NAT mappings
 
-### Message Types Added
-- `MessageTypeRelaySessionQuery` - Query relay for session status
-- `MessageTypeRelaySessionStatus` - Response with session details
+### Connection Strategies (in priority order)
 
-## Database Schema
+1. **Existing Connection** - Reuse if already connected
+2. **LAN Direct** - Direct connection if same local network
+3. **Public Direct** - Direct dial if target is public
+4. **Hole Punch** - NAT-to-NAT via coordinated simultaneous dial
+5. **Relay Forward** - Fallback if hole punch fails
 
-### Peer Metadata
-- `node_id` - Unique peer identifier
-- `topic` - DHT topic
-- `last_seen` - Timestamp of last contact (updated on reachability check)
-- `network_info` - JSON with endpoints, NAT type, relay info
+### Message Types
 
-### Relay Sessions
-- `session_id` - Unique session identifier
-- `client_node_id` - NAT peer using relay
-- `relay_node_id` - Relay peer providing service
-- `status` - active/inactive/terminated
-- `last_keepalive` - Last keepalive timestamp
+- `MessageTypeHolePunchConnect` - Exchange addressing info and measure RTT
+- `MessageTypeHolePunchSync` - Signal to start simultaneous dial
 
 ## Configuration
 
 ```toml
-# Peer metadata aging
-peer_metadata_max_age = 24h
-peer_reachability_check_interval = 5m
-
-# Relay configuration
-relay_mode = false
-relay_keepalive_interval = 5s
+[hole_punch]
+hole_punch_enabled = true
+hole_punch_timeout = 10s           # Max time for entire process
+hole_punch_max_attempts = 3        # Retry attempts
+hole_punch_stream_timeout = 60s    # Stream deadline
+hole_punch_direct_dial_timeout = 5s # Direct dial timeout
 ```
+
+## Related Documentation
+
+See [docs/hole-punching-protocol.md](../hole-punching-protocol.md) for detailed protocol specification.
+
+See [docs/ARCHITECTURE.md](../ARCHITECTURE.md) for overall system architecture including DHT and identity exchange.
+
+---
+
+**Note**: Previous diagrams (peer aging, metadata exchange flows, etc.) have been removed as they referenced the old broadcast-based architecture. The current DHT-only architecture uses:
+- BEP_44 mutable data for metadata storage (no peer aging mechanism)
+- Identity exchange during QUIC handshake (no separate metadata request/response)
+- On-demand DHT queries (no periodic reachability checks)

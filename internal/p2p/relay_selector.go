@@ -66,8 +66,8 @@ func (rs *RelaySelector) AddCandidate(metadata *database.PeerMetadata) error {
 	candidate := &RelayCandidate{
 		NodeID:          metadata.NodeID,
 		Endpoint:        metadata.NetworkInfo.RelayEndpoint,
-		ReputationScore: metadata.NetworkInfo.ReputationScore,
-		PricingPerGB:    metadata.NetworkInfo.RelayPricing,
+		ReputationScore: float64(metadata.NetworkInfo.ReputationScore) / 10000.0, // Convert from basis points to 0.0-1.0
+		PricingPerGB:    float64(metadata.NetworkInfo.RelayPricing) / 1000000.0,  // Convert from micro-units
 		Capacity:        metadata.NetworkInfo.RelayCapacity,
 		LastSeen:        metadata.LastSeen,
 		Metadata:        metadata,

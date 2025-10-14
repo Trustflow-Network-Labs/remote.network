@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anacrolix/torrent/bencode"
+
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -44,23 +46,12 @@ func NewMetadataQueryService(
 	}
 }
 
-// QueryMetadata queries metadata for a peer (cache-first, then DHT)
+// QueryMetadata queries metadata for a peer from DHT
 // This is the main entry point for getting peer metadata on-demand
 func (mqs *MetadataQueryService) QueryMetadata(peerID string, publicKey []byte) (*database.PeerMetadata, error) {
-	// Step 1: Check cache first
-	cached, exists, err := mqs.dbManager.MetadataCache.GetCachedMetadata(peerID)
-	if err != nil {
-		mqs.logger.Warn(fmt.Sprintf("Cache lookup failed for %s: %v", peerID[:8], err), "metadata-query")
-	}
+	mqs.logger.Debug(fmt.Sprintf("Querying DHT for peer %s", peerID[:8]), "metadata-query")
 
-	if exists && cached != nil {
-		mqs.logger.Debug(fmt.Sprintf("Cache HIT for peer %s", peerID[:8]), "metadata-query")
-		return cached, nil
-	}
-
-	mqs.logger.Debug(fmt.Sprintf("Cache MISS for peer %s, querying DHT", peerID[:8]), "metadata-query")
-
-	// Step 2: Check if there's already an in-flight query for this peer
+	// Check if there's already an in-flight query for this peer
 	result := mqs.getOrCreateInflightQuery(peerID)
 
 	if result == nil {
@@ -133,13 +124,6 @@ func (mqs *MetadataQueryService) executeQuery(peerID string, publicKey []byte) (
 		return nil, result.err
 	}
 
-	// Cache the metadata (5-minute TTL)
-	cacheTTL := 5 * time.Minute
-	if err := mqs.dbManager.MetadataCache.CacheMetadata(peerID, metadata, cacheTTL); err != nil {
-		mqs.logger.Warn(fmt.Sprintf("Failed to cache metadata for %s: %v", peerID[:8], err), "metadata-query")
-		// Don't fail the query if caching fails
-	}
-
 	queryDuration := time.Since(startTime)
 	mqs.logger.Info(fmt.Sprintf("Successfully queried metadata for %s from DHT (took %v)",
 		peerID[:8], queryDuration), "metadata-query")
@@ -150,15 +134,15 @@ func (mqs *MetadataQueryService) executeQuery(peerID string, publicKey []byte) (
 
 // parseMetadata parses bencoded metadata from DHT into PeerMetadata struct
 func (mqs *MetadataQueryService) parseMetadata(data []byte) (*database.PeerMetadata, error) {
-	// For now, we'll use JSON parsing since our metadata publisher uses bencode.Marshal
-	// which in our implementation wraps the PeerMetadata struct
-	// In a production system, you'd properly bencode/decode the struct
+	// The metadata publisher uses bencode.Marshal to encode the PeerMetadata struct
+	// We use bencode.Unmarshal to decode it back
 
 	var metadata database.PeerMetadata
-	// TODO: Implement proper bencode parsing
-	// For now, this is a placeholder that will be implemented when integrating with the publisher
+	if err := bencode.Unmarshal(data, &metadata); err != nil {
+		return nil, fmt.Errorf("failed to decode bencoded metadata: %v", err)
+	}
 
-	return &metadata, fmt.Errorf("metadata parsing not yet implemented - requires bencode deserialization")
+	return &metadata, nil
 }
 
 // BatchQueryMetadata queries metadata for multiple peers in parallel
@@ -197,13 +181,5 @@ func (mqs *MetadataQueryService) BatchQueryMetadata(peers []*database.KnownPeer)
 	return results
 }
 
-// InvalidateCache invalidates cached metadata for a specific peer
-// Used when we know the peer's metadata has changed (e.g., relay disconnect)
-func (mqs *MetadataQueryService) InvalidateCache(peerID string) error {
-	return mqs.dbManager.MetadataCache.DeleteCachedMetadata(peerID)
-}
-
-// GetCacheStats returns cache statistics
-func (mqs *MetadataQueryService) GetCacheStats() (map[string]interface{}, error) {
-	return mqs.dbManager.MetadataCache.GetCacheStats()
-}
+// Note: Cache invalidation and stats removed with database-level caching.
+// Metadata is now always queried fresh from DHT with in-flight query deduplication.

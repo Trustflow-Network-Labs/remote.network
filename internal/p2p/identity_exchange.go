@@ -14,15 +14,18 @@ import (
 // IdentityExchanger handles Phase 3 identity and known peers exchange
 type IdentityExchanger struct {
 	keyPair       *crypto.KeyPair
+	dhtNodeID     string // DHT routing node ID
 	dbManager     *database.SQLiteManager
 	logger        *utils.LogsManager
 	config        *utils.ConfigManager
 	ourNodeType   string // "public" or "private"
+	isRelay       bool   // Are we offering relay services?
 }
 
 // NewIdentityExchanger creates a new identity exchanger
 func NewIdentityExchanger(
 	keyPair *crypto.KeyPair,
+	dhtNodeID string,
 	dbManager *database.SQLiteManager,
 	logger *utils.LogsManager,
 	config *utils.ConfigManager,
@@ -36,20 +39,24 @@ func NewIdentityExchanger(
 		nodeType = "public"
 	}
 
+	// Check if we're offering relay services
+	isRelay := config.GetConfigBool("relay_mode", false)
+
 	return &IdentityExchanger{
 		keyPair:     keyPair,
+		dhtNodeID:   dhtNodeID,
 		dbManager:   dbManager,
 		logger:      logger,
 		config:      config,
 		ourNodeType: nodeType,
+		isRelay:     isRelay,
 	}
 }
 
 // PerformHandshake performs the complete identity + known peers exchange
 // This is called immediately after QUIC connection is established
 //
-//nolint:copylocks // quic.Stream is an interface, safe to pass by value
-func (ie *IdentityExchanger) PerformHandshake(stream quic.Stream, topic string) (*database.KnownPeer, error) {
+func (ie *IdentityExchanger) PerformHandshake(stream *quic.Stream, topic string) (*database.KnownPeer, error) {
 	ie.logger.Debug("Starting Phase 3 handshake (identity + peers exchange)", "identity-exchange")
 
 	// Step 1: Exchange identities
@@ -70,13 +77,14 @@ func (ie *IdentityExchanger) PerformHandshake(stream quic.Stream, topic string) 
 	return remotePeer, nil
 }
 
-//nolint:copylocks // quic.Stream is an interface, safe to pass by value
-func (ie *IdentityExchanger) exchangeIdentities(stream quic.Stream, topic string) (*database.KnownPeer, error) {
+func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic string) (*database.KnownPeer, error) {
 	// Send our identity
 	ourIdentity := CreateIdentityExchange(
 		ie.keyPair.PeerID(),
+		ie.dhtNodeID,
 		ie.keyPair.PublicKeyBytes(),
 		ie.ourNodeType,
+		ie.isRelay,
 		topic,
 	)
 
@@ -84,8 +92,8 @@ func (ie *IdentityExchanger) exchangeIdentities(stream quic.Stream, topic string
 		return nil, fmt.Errorf("failed to send our identity: %v", err)
 	}
 
-	ie.logger.Debug(fmt.Sprintf("Sent our identity (peer_id: %s, type: %s)",
-		ie.keyPair.PeerID()[:8], ie.ourNodeType), "identity-exchange")
+	ie.logger.Debug(fmt.Sprintf("Sent our identity (peer_id: %s, type: %s, relay: %v)",
+		ie.keyPair.PeerID()[:8], ie.ourNodeType, ie.isRelay), "identity-exchange")
 
 	// Receive remote identity
 	remoteMsg, err := ie.receiveMessage(stream, 5*time.Second) //nolint:copylocks
@@ -113,13 +121,15 @@ func (ie *IdentityExchanger) exchangeIdentities(stream quic.Stream, topic string
 		return nil, fmt.Errorf("identity validation failed: %v", err)
 	}
 
-	ie.logger.Debug(fmt.Sprintf("Received valid identity from peer %s (type: %s)",
-		remoteIdentity.PeerID[:8], remoteIdentity.NodeType), "identity-exchange")
+	ie.logger.Debug(fmt.Sprintf("Received valid identity from peer %s (type: %s, relay: %v)",
+		remoteIdentity.PeerID[:8], remoteIdentity.NodeType, remoteIdentity.IsRelay), "identity-exchange")
 
 	// Store in known_peers database
 	knownPeer := &database.KnownPeer{
 		PeerID:    remoteIdentity.PeerID,
+		DHTNodeID: remoteIdentity.DHTNodeID,
 		PublicKey: remoteIdentity.PublicKey,
+		IsRelay:   remoteIdentity.IsRelay,
 		Topic:     topic,
 		Source:    "identity_exchange",
 	}
@@ -128,13 +138,13 @@ func (ie *IdentityExchanger) exchangeIdentities(stream quic.Stream, topic string
 		return nil, fmt.Errorf("failed to store known peer: %v", err)
 	}
 
-	ie.logger.Info(fmt.Sprintf("Stored peer %s in known_peers database", remoteIdentity.PeerID[:8]), "identity-exchange")
+	ie.logger.Info(fmt.Sprintf("Stored peer %s in known_peers database (relay: %v)", remoteIdentity.PeerID[:8], remoteIdentity.IsRelay), "identity-exchange")
 
 	return knownPeer, nil
 }
 
 //nolint:copylocks // quic.Stream is an interface, safe to pass by value
-func (ie *IdentityExchanger) exchangeKnownPeers(stream quic.Stream, topic, remotePeerID string) error {
+func (ie *IdentityExchanger) exchangeKnownPeers(stream *quic.Stream, topic, remotePeerID string) error {
 	// Get our known peers to share (excluding the peer we're talking to)
 	exclude := []string{remotePeerID, ie.keyPair.PeerID()} // Exclude them and ourselves
 
@@ -213,7 +223,9 @@ func (ie *IdentityExchanger) selectPeersToShare(topic string, limit int, exclude
 
 		entries = append(entries, &KnownPeerEntry{
 			PeerID:    peer.PeerID,
+			DHTNodeID: peer.DHTNodeID,
 			PublicKey: peer.PublicKey,
+			IsRelay:   peer.IsRelay,
 		})
 
 		if len(entries) >= limit {
@@ -251,7 +263,9 @@ func (ie *IdentityExchanger) storeReceivedPeers(peers []*KnownPeerEntry, topic s
 		// Store in database
 		knownPeer := &database.KnownPeer{
 			PeerID:    entry.PeerID,
+			DHTNodeID: entry.DHTNodeID,
 			PublicKey: entry.PublicKey,
+			IsRelay:   entry.IsRelay,
 			Topic:     topic,
 			Source:    "peer_exchange",
 		}
@@ -295,7 +309,7 @@ func (ie *IdentityExchanger) validateIdentity(identity *IdentityExchangeData) er
 }
 
 //nolint:copylocks // quic.Stream is an interface, safe to pass by value
-func (ie *IdentityExchanger) sendMessage(stream quic.Stream, msg *QUICMessage) error {
+func (ie *IdentityExchanger) sendMessage(stream *quic.Stream, msg *QUICMessage) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %v", err)
@@ -322,7 +336,7 @@ func (ie *IdentityExchanger) sendMessage(stream quic.Stream, msg *QUICMessage) e
 }
 
 //nolint:copylocks // quic.Stream is an interface, safe to pass by value
-func (ie *IdentityExchanger) receiveMessage(stream quic.Stream, timeout time.Duration) (*QUICMessage, error) {
+func (ie *IdentityExchanger) receiveMessage(stream *quic.Stream, timeout time.Duration) (*QUICMessage, error) {
 	// Set read deadline
 	stream.SetReadDeadline(time.Now().Add(timeout))
 	defer stream.SetReadDeadline(time.Time{}) // Clear deadline

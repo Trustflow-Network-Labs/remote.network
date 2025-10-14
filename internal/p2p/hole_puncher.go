@@ -31,11 +31,12 @@ const (
 
 // HolePuncher manages hole punching for direct peer-to-peer connections
 type HolePuncher struct {
-	config    *utils.ConfigManager
-	logger    *utils.LogsManager
-	quicPeer  *QUICPeer
-	dhtPeer   *DHTPeer
-	dbManager *database.SQLiteManager
+	config          *utils.ConfigManager
+	logger          *utils.LogsManager
+	quicPeer        *QUICPeer
+	dhtPeer         *DHTPeer
+	dbManager       *database.SQLiteManager
+	metadataFetcher *MetadataFetcher
 
 	// NAT detection info
 	natDetector *NATDetector
@@ -68,20 +69,22 @@ func NewHolePuncher(
 	quicPeer *QUICPeer,
 	dhtPeer *DHTPeer,
 	dbManager *database.SQLiteManager,
+	metadataFetcher *MetadataFetcher,
 	natDetector *NATDetector,
 ) *HolePuncher {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	hp := &HolePuncher{
-		config:           config,
-		logger:           logger,
-		quicPeer:         quicPeer,
-		dhtPeer:          dhtPeer,
-		dbManager:        dbManager,
-		natDetector:      natDetector,
-		active:           make(map[string]struct{}),
-		ctx:              ctx,
-		cancel:           cancel,
+		config:          config,
+		logger:          logger,
+		quicPeer:        quicPeer,
+		dhtPeer:         dhtPeer,
+		dbManager:       dbManager,
+		metadataFetcher: metadataFetcher,
+		natDetector:     natDetector,
+		active:          make(map[string]struct{}),
+		ctx:             ctx,
+		cancel:          cancel,
 		successByNATType: make(map[string]int64),
 	}
 
@@ -271,7 +274,7 @@ func (hp *HolePuncher) DirectConnect(peerID string) error {
 	return fmt.Errorf("direct connection not possible, relay fallback active")
 }
 
-// getPeerMetadata retrieves peer metadata from database
+// getPeerMetadata retrieves peer metadata from DHT
 func (hp *HolePuncher) getPeerMetadata(peerID string) (*database.PeerMetadata, error) {
 	// Get topic from config (assume we're on the same topic)
 	topics := hp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
@@ -281,9 +284,20 @@ func (hp *HolePuncher) getPeerMetadata(peerID string) (*database.PeerMetadata, e
 
 	topic := topics[0] // Use first topic for now
 
-	metadata, err := hp.dbManager.PeerMetadata.GetPeerMetadata(peerID, topic)
+	// Get peer's public key from known_peers database
+	knownPeer, err := hp.dbManager.KnownPeers.GetKnownPeer(peerID, topic)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get metadata from database: %v", err)
+		return nil, fmt.Errorf("failed to get peer from known_peers: %v", err)
+	}
+
+	if len(knownPeer.PublicKey) == 0 {
+		return nil, fmt.Errorf("peer %s has no public key in known_peers", peerID[:8])
+	}
+
+	// Fetch metadata from DHT using MetadataFetcher
+	metadata, err := hp.metadataFetcher.GetPeerMetadata(knownPeer.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get metadata from DHT: %v", err)
 	}
 
 	return metadata, nil
@@ -470,9 +484,20 @@ func (hp *HolePuncher) initiateHolePunch(peerID string, metadata *database.PeerM
 	}
 	topic := topics[0]
 
-	relayMetadata, err := hp.dbManager.PeerMetadata.GetPeerMetadata(relayNodeID, topic)
+	// Get relay peer's public key from known_peers
+	relayKnownPeer, err := hp.dbManager.KnownPeers.GetKnownPeer(relayNodeID, topic)
 	if err != nil {
-		return fmt.Errorf("failed to get relay metadata: %v", err)
+		return fmt.Errorf("failed to get relay peer from known_peers: %v", err)
+	}
+
+	if len(relayKnownPeer.PublicKey) == 0 {
+		return fmt.Errorf("relay peer %s has no public key in known_peers", relayNodeID[:8])
+	}
+
+	// Fetch relay metadata from DHT
+	relayMetadata, err := hp.metadataFetcher.GetPeerMetadata(relayKnownPeer.PublicKey)
+	if err != nil {
+		return fmt.Errorf("failed to get relay metadata from DHT: %v", err)
 	}
 
 	// Connect to relay (ConnectToPeer will reuse existing connection if available)

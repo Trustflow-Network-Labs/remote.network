@@ -276,6 +276,110 @@ func (b *BEP44Manager) GetMutable(publicKey ed25519.PublicKey) (*MutableData, er
 	return latestData, nil
 }
 
+// GetMutableWithPriority queries the DHT for mutable data with prioritized node routing
+// Queries priority nodes first (bootstrap nodes, relay nodes), then falls back to general DHT
+// Returns the value with the highest sequence number found
+func (b *BEP44Manager) GetMutableWithPriority(publicKey ed25519.PublicKey, priorityNodes []string) (*MutableData, error) {
+	// Validate public key length
+	if len(publicKey) != 32 {
+		return nil, fmt.Errorf("invalid public key length: expected 32, got %d", len(publicKey))
+	}
+
+	// Storage key is SHA1(public_key)
+	storageKey := sha1.Sum(publicKey)
+
+	b.logger.Debug(fmt.Sprintf("Querying DHT for mutable data with priority routing (key: %x, priority_nodes: %d)",
+		storageKey, len(priorityNodes)), "bep44")
+
+	var latestData *MutableData
+	var latestSeq int64 = -1
+
+	// Phase 1: Query priority nodes first (bootstrap nodes, relay nodes)
+	if len(priorityNodes) > 0 {
+		b.logger.Debug(fmt.Sprintf("Phase 1: Querying %d priority nodes", len(priorityNodes)), "bep44")
+
+		for _, nodeAddr := range priorityNodes {
+			// Parse address (format: "IP:Port")
+			udpAddr, err := net.ResolveUDPAddr("udp", nodeAddr)
+			if err != nil {
+				b.logger.Debug(fmt.Sprintf("Invalid priority node address %s: %v", nodeAddr, err), "bep44")
+				continue
+			}
+
+			addr := dht.NewAddr(udpAddr)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			data, err := b.sendGetQuery(ctx, addr, storageKey, publicKey)
+			cancel()
+
+			if err != nil {
+				b.logger.Debug(fmt.Sprintf("Failed to get from priority node %s: %v", nodeAddr, err), "bep44")
+				continue
+			}
+
+			// Keep the data with the highest sequence number
+			if data.Sequence > latestSeq {
+				latestSeq = data.Sequence
+				latestData = data
+				b.logger.Debug(fmt.Sprintf("Found newer data from priority node %s (seq: %d)", nodeAddr, data.Sequence), "bep44")
+			}
+		}
+
+		// If we found data from priority nodes, return it immediately
+		if latestData != nil {
+			b.logger.Info(fmt.Sprintf("Found mutable data from priority nodes (seq: %d)", latestSeq), "bep44")
+
+			// Verify signature
+			if !b.VerifyMutableSignature(latestData.Value, latestData.Signature[:], latestData.Sequence, publicKey) {
+				return nil, fmt.Errorf("invalid signature for mutable data from priority nodes")
+			}
+
+			return latestData, nil
+		}
+	}
+
+	// Phase 2: Fall back to general DHT bootstrap nodes
+	b.logger.Debug("Phase 2: No data from priority nodes, querying general DHT bootstrap nodes", "bep44")
+
+	bootstrapAddrs, err := getBootstrapAddrs(b.config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get bootstrap addresses: %v", err)
+	}
+
+	for _, addr := range bootstrapAddrs {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		data, err := b.sendGetQuery(ctx, addr, storageKey, publicKey)
+		cancel()
+
+		if err != nil {
+			b.logger.Debug(fmt.Sprintf("Failed to get from bootstrap node %s: %v", addr.String(), err), "bep44")
+			continue
+		}
+
+		// Keep the data with the highest sequence number
+		if data.Sequence > latestSeq {
+			latestSeq = data.Sequence
+			latestData = data
+		}
+
+		b.logger.Debug(fmt.Sprintf("Received mutable data from %s (seq: %d)", addr.String(), data.Sequence), "bep44")
+	}
+
+	if latestData == nil {
+		return nil, fmt.Errorf("no mutable data found for key %x", storageKey)
+	}
+
+	// Verify signature
+	if !b.VerifyMutableSignature(latestData.Value, latestData.Signature[:], latestData.Sequence, publicKey) {
+		return nil, fmt.Errorf("invalid signature for mutable data")
+	}
+
+	b.logger.Info(fmt.Sprintf("Successfully retrieved mutable data from general DHT (key: %x, seq: %d, size: %d bytes)",
+		storageKey, latestData.Sequence, len(latestData.Value)), "bep44")
+
+	return latestData, nil
+}
+
 // sendGetQuery sends a "get" query for mutable data to a specific DHT node
 func (b *BEP44Manager) sendGetQuery(ctx context.Context, addr dht.Addr, targetKey [20]byte, publicKey ed25519.PublicKey) (*MutableData, error) {
 	udpAddr := &net.UDPAddr{

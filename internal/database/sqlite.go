@@ -1,7 +1,6 @@
 package database
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -14,18 +13,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// SQLiteManager handles all database operations including peer metadata
+// SQLiteManager handles all database operations
 type SQLiteManager struct {
 	dir string
 	cm  *utils.ConfigManager
 	db  *sql.DB
 
 	// Specialized managers
-	PeerMetadata  *PeerMetadataDB
 	Relay         *RelayDB
-	KnownPeers    *KnownPeersManager  // Phase 2: Minimal peer storage
-	MetadataCache *MetadataCache       // Phase 2: Metadata caching
-	Migration     *MigrationManager    // Phase 2: Schema migrations
+	KnownPeers    *KnownPeersManager  // Minimal peer identity storage
 }
 
 // NewSQLiteManager creates a new enhanced SQLite manager with peer metadata support
@@ -121,92 +117,28 @@ func (sqlm *SQLiteManager) initializeManagers() error {
 	logsManager := utils.NewLogsManager(sqlm.cm)
 	defer logsManager.Close()
 
-	// Initialize peer metadata manager
-	var err error
-	sqlm.PeerMetadata, err = NewPeerMetadataDB(sqlm.db, logsManager)
-	if err != nil {
-		return fmt.Errorf("failed to initialize peer metadata manager: %v", err)
-	}
-
 	// Initialize relay database manager
+	var err error
 	sqlm.Relay, err = NewRelayDB(sqlm.db, logsManager)
 	if err != nil {
 		return fmt.Errorf("failed to initialize relay database manager: %v", err)
 	}
 
-	// Phase 2: Initialize migration manager
-	sqlm.Migration = NewMigrationManager(sqlm.db, logsManager)
-
-	// Phase 2: Run migration if needed
-	if err := sqlm.Migration.MigrateToDHTMetadataStorage(); err != nil {
-		logsManager.Warn(fmt.Sprintf("Migration to DHT metadata storage failed: %v", err), "database")
-		// Don't fail initialization, allow fallback to old schema
-	}
-
-	// Phase 2: Initialize known peers manager
+	// Initialize known peers manager (direct table creation, no migration)
 	sqlm.KnownPeers, err = NewKnownPeersManager(sqlm.db, logsManager)
 	if err != nil {
 		return fmt.Errorf("failed to initialize known peers manager: %v", err)
 	}
 
-	// Phase 2: Initialize metadata cache
-	sqlm.MetadataCache, err = NewMetadataCache(sqlm.db, logsManager)
-	if err != nil {
-		return fmt.Errorf("failed to initialize metadata cache: %v", err)
-	}
-
-	logsManager.Info("Database managers initialized successfully (including Phase 2 components)", "database")
+	logsManager.Info("Database managers initialized successfully", "database")
 	return nil
 }
 
 // createOriginalTables creates the original database tables (keeping existing functionality)
 func (sqlm *SQLiteManager) createOriginalTables(db *sql.DB, logsManager *utils.LogsManager) error {
-	// This contains all the original table creation SQL from the trustflow-node
-	// I'm keeping this minimal since we're focusing on the remote-network-node
-	// but maintaining compatibility for future features
-
-	createSettingsTableSql := `
-CREATE TABLE IF NOT EXISTS settings (
-	"key" TEXT PRIMARY KEY,
-	"description" TEXT DEFAULT NULL,
-	"setting_type" VARCHAR(10) CHECK( "setting_type" IN ('STRING', 'INTEGER', 'REAL', 'BOOLEAN', 'JSON') ) NOT NULL DEFAULT 'STRING',
-	"value_string" TEXT DEFAULT NULL,
-	"value_integer" INTEGER DEFAULT NULL,
-	"value_real" REAL DEFAULT NULL,
-	"value_boolean" INTEGER CHECK( "value_boolean" IN (0, 1) ) NOT NULL DEFAULT 0,
-	"value_json" TEXT DEFAULT NULL
-);
-CREATE INDEX IF NOT EXISTS settings_key_idx ON settings ("key");
-
-INSERT INTO settings ("key", "description", "setting_type", "value_string") VALUES ('node_identifier', 'Node Identifier', 'STRING', '') ON CONFLICT(key) DO UPDATE SET "description" = 'Node Identifier', "setting_type" = 'STRING', "value_string" = '';
-INSERT INTO settings ("key", "description", "setting_type", "value_boolean") VALUES ('enable_peer_metadata', 'Enable peer metadata exchange via QUIC', 'BOOLEAN', 1) ON CONFLICT(key) DO UPDATE SET "description" = 'Enable peer metadata exchange via QUIC', "setting_type" = 'BOOLEAN', "value_boolean" = 1;
-INSERT INTO settings ("key", "description", "setting_type", "value_integer") VALUES ('metadata_cleanup_hours', 'Hours after which peer metadata is considered stale', 'INTEGER', 24) ON CONFLICT(key) DO UPDATE SET "description" = 'Hours after which peer metadata is considered stale', "setting_type" = 'INTEGER', "value_integer" = 24;
-`
-
-	_, err := db.ExecContext(context.Background(), createSettingsTableSql)
-	if err != nil {
-		message := fmt.Sprintf("Can not create `settings` table. (%s)", err.Error())
-		logsManager.Log("error", message, "database")
-		return err
-	}
-
-	// Create blacklisted nodes table for peer management
-	createBlacklistedNodesTableSql := `
-CREATE TABLE IF NOT EXISTS blacklisted_nodes (
-	"node_id" TEXT PRIMARY KEY,
-	"reason" TEXT DEFAULT NULL,
-	"timestamp" TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS blacklisted_nodes_node_id_idx ON blacklisted_nodes ("node_id");
-`
-	_, err = db.ExecContext(context.Background(), createBlacklistedNodesTableSql)
-	if err != nil {
-		message := fmt.Sprintf("Can not create `blacklisted_nodes` table. (%s)", err.Error())
-		logsManager.Log("error", message, "database")
-		return err
-	}
-
-	logsManager.Info("Original database tables created successfully", "database")
+	// Note: settings and blacklisted_nodes tables removed - unused in DHT-only architecture
+	// All settings come from config file, no blacklist implementation exists
+	logsManager.Info("Database initialization complete (unused tables removed)", "database")
 	return nil
 }
 
@@ -217,12 +149,6 @@ func (sqlm *SQLiteManager) GetDB() *sql.DB {
 
 // Close closes all database connections and managers
 func (sqlm *SQLiteManager) Close() error {
-	if sqlm.PeerMetadata != nil {
-		if err := sqlm.PeerMetadata.Close(); err != nil {
-			return fmt.Errorf("failed to close peer metadata manager: %v", err)
-		}
-	}
-
 	if sqlm.Relay != nil {
 		if err := sqlm.Relay.Close(); err != nil {
 			return fmt.Errorf("failed to close relay manager: %v", err)
@@ -249,11 +175,6 @@ func (sqlm *SQLiteManager) GetStats() map[string]interface{} {
 		"idle":                dbStats.Idle,
 	}
 
-	// Peer metadata stats
-	if sqlm.PeerMetadata != nil {
-		stats["peer_metadata"] = sqlm.PeerMetadata.GetStats()
-	}
-
 	// Relay stats
 	if sqlm.Relay != nil {
 		stats["relay"] = sqlm.Relay.GetStats()
@@ -266,22 +187,6 @@ func (sqlm *SQLiteManager) GetStats() map[string]interface{} {
 func (sqlm *SQLiteManager) PerformMaintenance() error {
 	logsManager := utils.NewLogsManager(sqlm.cm)
 	defer logsManager.Close()
-
-	// Cleanup old peer metadata
-	if sqlm.PeerMetadata != nil {
-		cleanupHours := sqlm.cm.GetConfigInt("metadata_cleanup_hours", 24, 1, 168) // 1 hour to 1 week
-		maxAge := time.Duration(cleanupHours) * time.Hour
-
-		cleaned, err := sqlm.PeerMetadata.CleanupOldMetadata(maxAge)
-		if err != nil {
-			logsManager.Log("error", fmt.Sprintf("Failed to cleanup old metadata: %v", err), "database")
-			return err
-		}
-
-		if cleaned > 0 {
-			logsManager.Info(fmt.Sprintf("Maintenance: cleaned up %d old peer metadata records", cleaned), "database")
-		}
-	}
 
 	// Cleanup old relay sessions
 	if sqlm.Relay != nil {

@@ -664,8 +664,10 @@ func CreatePeerMetadataUpdateAck(nodeID string, sequence int64, status string, e
 // This is exchanged immediately after QUIC connection establishment
 type IdentityExchangeData struct {
 	PeerID    string `json:"peer_id"`     // SHA1(public_key) - 40 hex chars
+	DHTNodeID string `json:"dht_node_id"` // DHT routing node_id (20 bytes hex)
 	PublicKey []byte `json:"public_key"`  // Ed25519 public key - 32 bytes
 	NodeType  string `json:"node_type"`   // "public" or "private"
+	IsRelay   bool   `json:"is_relay"`    // Is this peer offering relay services?
 	Topic     string `json:"topic"`       // Topic this connection is for
 }
 
@@ -684,18 +686,22 @@ type KnownPeersResponseData struct {
 }
 
 // KnownPeerEntry represents a minimal peer entry for exchange
-// Only peer_id and public_key - full metadata queried from DHT later
+// Includes essential identity info - full metadata can be queried from DHT later
 type KnownPeerEntry struct {
-	PeerID    string `json:"peer_id"`    // SHA1(public_key)
-	PublicKey []byte `json:"public_key"` // Ed25519 public key
+	PeerID    string `json:"peer_id"`     // SHA1(public_key)
+	DHTNodeID string `json:"dht_node_id"` // DHT routing node_id
+	PublicKey []byte `json:"public_key"`  // Ed25519 public key
+	IsRelay   bool   `json:"is_relay"`    // Is this peer a relay?
 }
 
 // CreateIdentityExchange creates an identity exchange message
-func CreateIdentityExchange(peerID string, publicKey []byte, nodeType, topic string) *QUICMessage {
+func CreateIdentityExchange(peerID string, dhtNodeID string, publicKey []byte, nodeType string, isRelay bool, topic string) *QUICMessage {
 	return NewQUICMessage(MessageTypeIdentityExchange, &IdentityExchangeData{
 		PeerID:    peerID,
+		DHTNodeID: dhtNodeID,
 		PublicKey: publicKey,
 		NodeType:  nodeType,
+		IsRelay:   isRelay,
 		Topic:     topic,
 	})
 }

@@ -15,11 +15,13 @@ quic_max_connections = 100
 # Peer Discovery
 peer_discovery_interval = 30s
 peer_maintenance_interval = 5m
+maintenance_interval = 1h
 max_peers_per_topic = 50
 
 # Peer Metadata Aging and Reachability
 peer_metadata_max_age = 24h
 peer_reachability_check_interval = 5m
+metadata_refresh_interval = 5m
 
 [topics]
 # Topics to subscribe to (comma-separated)
@@ -51,10 +53,16 @@ log_enable_rotation = true
 # Miscellaneous settings
 node_name = remote-network-node
 pid_path = ./remote-network.pid
+# Port for pprof profiling (0 = disabled)
+pprof_port = 6060
 
 [database]
 # Database configuration
 database_file = remote-network.db
+# Clean up old peer metadata after 24 hours
+metadata_cleanup_hours = 24
+# Clean up old relay sessions after 24 hours
+relay_session_cleanup_hours = 24
 
 [nat]
 # NAT Detection and Classification
@@ -111,27 +119,19 @@ hole_punch_metrics_enabled = true
 # DHT-Based Metadata Architecture (Phase 1-6)
 # Replaces old broadcast and peer exchange systems
 
-# Metadata republishing to DHT (BEP_44)
-metadata_republish_interval = 3600  # 1 hour - keep DHT data fresh
+# Metadata republishing to DHT (BEP_44) - 60 minutes (1 hour) to keep DHT data fresh
+metadata_republish_interval_minutes = 60
 
 [metadata_cache]
 # Metadata cache with TTL to reduce DHT query overhead
-ttl_seconds = 300  # 5 minutes - cache-first, then DHT
-cleanup_interval = 60  # 1 minute - remove expired entries
+# Cache TTL: 5 minutes (cache-first, then DHT)
+ttl_seconds = 300
+# Cleanup interval: 1 minute (remove expired entries)
+cleanup_interval = 60
 
 [peer_discovery]
 # On-demand peer discovery using DHT queries
-discovery_interval = 30  # 30 seconds - how often to discover new peers
-max_known_peers_to_share = 50  # Limit known peers shared during identity exchange
-
-# DEPRECATED: The following sections are no longer used (removed in Phase 5)
-# Kept for backward compatibility during migration
-[metadata_broadcast]
-# ⚠️ DEPRECATED - Replaced by DHT BEP_44 mutable data (Phase 5)
-# Old broadcast system has been removed
-metadata_broadcast_enabled = false
-
-[peer_exchange]
-# ⚠️ DEPRECATED - Replaced by identity exchange + DHT queries (Phase 3-4)
-# Old PEX protocol has been removed
-# Known peers now shared during QUIC handshake identity exchange
+# Discovery interval: 30 seconds (how often to discover new peers)
+discovery_interval = 30
+# Limit known peers shared during identity exchange
+max_known_peers_to_share = 50

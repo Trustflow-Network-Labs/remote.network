@@ -14,11 +14,12 @@ import (
 
 // RelayManager manages persistent relay connections for NAT peers
 type RelayManager struct {
-	config    *utils.ConfigManager
-	logger    *utils.LogsManager
-	dbManager *database.SQLiteManager
-	quicPeer  *QUICPeer
-	dhtPeer   *DHTPeer
+	config            *utils.ConfigManager
+	logger            *utils.LogsManager
+	dbManager         *database.SQLiteManager
+	quicPeer          *QUICPeer
+	dhtPeer           *DHTPeer
+	metadataPublisher *MetadataPublisher
 
 	// Relay selection
 	selector *RelaySelector
@@ -42,22 +43,23 @@ type RelayManager struct {
 }
 
 // NewRelayManager creates a new relay manager for NAT peers
-func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, dhtPeer *DHTPeer) *RelayManager {
+func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher) *RelayManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	selector := NewRelaySelector(config, logger, dbManager, quicPeer)
 
 	return &RelayManager{
-		config:         config,
-		logger:         logger,
-		dbManager:      dbManager,
-		quicPeer:       quicPeer,
-		dhtPeer:        dhtPeer,
-		selector:       selector,
-		ctx:            ctx,
-		cancel:         cancel,
-		keepaliveStop:  make(chan struct{}),
-		evaluationStop: make(chan struct{}),
+		config:            config,
+		logger:            logger,
+		dbManager:         dbManager,
+		quicPeer:          quicPeer,
+		dhtPeer:           dhtPeer,
+		metadataPublisher: metadataPublisher,
+		selector:          selector,
+		ctx:               ctx,
+		cancel:            cancel,
+		keepaliveStop:     make(chan struct{}),
+		evaluationStop:    make(chan struct{}),
 	}
 }
 
@@ -295,31 +297,12 @@ func (rm *RelayManager) DisconnectRelay() {
 		rm.currentRelayConn.CloseWithError(0, "disconnecting")
 	}
 
-	// Update metadata to reflect relay disconnection
-	topics := rm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
-	if len(topics) > 0 {
-		topic := topics[0]
-		ourNodeID := rm.dhtPeer.NodeID()
-		metadata, err := rm.dbManager.PeerMetadata.GetPeerMetadata(ourNodeID, topic)
-		if err == nil {
-			// Update metadata to reflect no relay
-			metadata.NetworkInfo.UsingRelay = false
-			metadata.NetworkInfo.ConnectedRelay = ""
-			metadata.NetworkInfo.RelaySessionID = ""
-			metadata.NetworkInfo.RelayAddress = ""
-			metadata.Version++
-			metadata.Timestamp = time.Now()
-			metadata.LastSeen = time.Now()
-			metadata.Source = "relay_client" // Indicate this metadata is from relay disconnection
-
-			// Store updated metadata
-			if err := rm.dbManager.PeerMetadata.StorePeerMetadata(metadata); err != nil {
-				rm.logger.Warn(fmt.Sprintf("Failed to store metadata after relay disconnect: %v", err), "relay-manager")
-			}
-
-			// TODO: Publish updated metadata to DHT (Phase 4 integration)
-			// The metadata publisher will handle periodic republishing
-			rm.logger.Info("Relay disconnection recorded in metadata", "relay-manager")
+	// Update metadata to reflect relay disconnection - publish to DHT
+	if rm.metadataPublisher != nil {
+		if err := rm.metadataPublisher.NotifyRelayDisconnected(); err != nil {
+			rm.logger.Warn(fmt.Sprintf("Failed to publish relay disconnection to DHT: %v", err), "relay-manager")
+		} else {
+			rm.logger.Info("Published relay disconnection to DHT", "relay-manager")
 		}
 	}
 
@@ -494,27 +477,23 @@ func (rm *RelayManager) rediscoverRelayCandidates() int {
 
 	addedCount := 0
 	for _, topic := range topics {
-		peers, err := rm.dbManager.PeerMetadata.GetPeersByTopic(topic)
+		// Get relay peers from known_peers (which now has is_relay flag)
+		relayPeers, err := rm.dbManager.KnownPeers.GetRelayPeers(topic)
 		if err != nil {
-			rm.logger.Warn(fmt.Sprintf("Failed to get peers for topic %s: %v", topic, err), "relay-manager")
+			rm.logger.Warn(fmt.Sprintf("Failed to get relay peers for topic %s: %v", topic, err), "relay-manager")
 			continue
 		}
 
-		rm.logger.Debug(fmt.Sprintf("Checking %d peers from topic %s for relay capabilities", len(peers), topic), "relay-manager")
+		rm.logger.Debug(fmt.Sprintf("Found %d relay peers from known_peers for topic %s", len(relayPeers), topic), "relay-manager")
 
-		for _, peer := range peers {
-			// Only consider peers that are relays
-			if peer.NetworkInfo.IsRelay {
-				rm.logger.Debug(fmt.Sprintf("Found relay peer in database: %s (endpoint: %s)", peer.NodeID, peer.NetworkInfo.RelayEndpoint), "relay-manager")
-
-				// Add to relay candidate pool
-				if err := rm.selector.AddCandidate(peer); err != nil {
-					rm.logger.Debug(fmt.Sprintf("Failed to add relay candidate %s: %v", peer.NodeID, err), "relay-manager")
-				} else {
-					addedCount++
-				}
-			}
+		// Note: We can no longer directly add to relay selector here because AddCandidate expects *database.PeerMetadata
+		// The relay selector will need to be refactored to use MetadataFetcher to fetch metadata from DHT
+		// For now, just log that relay peers were found
+		for _, peer := range relayPeers {
+			rm.logger.Debug(fmt.Sprintf("Found relay peer: %s", peer.PeerID[:8]), "relay-manager")
+			addedCount++
 		}
+		// TODO: Refactor relay selector to fetch metadata from DHT instead of accepting PeerMetadata directly
 	}
 
 	if addedCount > 0 {
@@ -554,94 +533,19 @@ func (rm *RelayManager) periodicRelayEvaluation() {
 }
 
 // updateOurMetadataWithRelay updates our peer metadata to include relay connection info
+// In DHT-only architecture, this directly publishes to DHT without local database storage
 func (rm *RelayManager) updateOurMetadataWithRelay(relay *RelayCandidate, sessionID string) error {
-	// Get our current metadata
-	topics := rm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
-	if len(topics) == 0 {
-		return fmt.Errorf("no topics configured")
-	}
-	topic := topics[0]
+	rm.logger.Debug(fmt.Sprintf("Publishing relay connection to DHT: relay=%s, session=%s", relay.NodeID, sessionID), "relay-manager")
 
-	// Get or create our metadata
-	ourNodeID := rm.dhtPeer.NodeID()
-	metadata, err := rm.dbManager.PeerMetadata.GetPeerMetadata(ourNodeID, topic)
-	if err != nil || metadata == nil {
-		// Create new metadata if doesn't exist
-		nodeTypeManager := utils.NewNodeTypeManager()
-		publicIP, _ := nodeTypeManager.GetExternalIP()
-		privateIP, _ := nodeTypeManager.GetLocalIP()
-		quicPort := rm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
-
-		metadata = &database.PeerMetadata{
-			NodeID:    ourNodeID,
-			Topic:     topic,
-			Version:   1,
-			Timestamp: time.Now(),
-			NetworkInfo: database.NetworkInfo{
-				PublicIP:    publicIP,
-				PublicPort:  quicPort,
-				PrivateIP:   privateIP,
-				PrivatePort: quicPort,
-				NodeType:    "private",
-				Protocols: []database.Protocol{
-					{Name: "quic", Port: quicPort},
-				},
-			},
-			Capabilities: []string{"metadata_exchange", "relay_client"},
-			Services:     make(map[string]database.Service),
-			Extensions:   make(map[string]interface{}),
+	// Publish updated metadata to DHT with relay connection info
+	if rm.metadataPublisher != nil {
+		if err := rm.metadataPublisher.NotifyRelayConnected(relay.NodeID, sessionID, relay.Endpoint); err != nil {
+			return fmt.Errorf("failed to publish relay metadata to DHT: %v", err)
 		}
+		rm.logger.Info(fmt.Sprintf("Published relay metadata to DHT: relay=%s, session=%s", relay.NodeID, sessionID), "relay-manager")
 	} else {
-		// Ensure NetworkInfo fields are initialized if empty
-		quicPort := rm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
-
-		if metadata.NetworkInfo.PublicIP == "" || metadata.NetworkInfo.PrivateIP == "" {
-			nodeTypeManager := utils.NewNodeTypeManager()
-			if metadata.NetworkInfo.PublicIP == "" {
-				metadata.NetworkInfo.PublicIP, _ = nodeTypeManager.GetExternalIP()
-			}
-			if metadata.NetworkInfo.PrivateIP == "" {
-				metadata.NetworkInfo.PrivateIP, _ = nodeTypeManager.GetLocalIP()
-			}
-		}
-		if metadata.NetworkInfo.PublicPort == 0 {
-			metadata.NetworkInfo.PublicPort = quicPort
-		}
-		if metadata.NetworkInfo.PrivatePort == 0 {
-			metadata.NetworkInfo.PrivatePort = quicPort
-		}
-		if metadata.NetworkInfo.NodeType == "" {
-			metadata.NetworkInfo.NodeType = "private"
-		}
-		if len(metadata.NetworkInfo.Protocols) == 0 {
-			metadata.NetworkInfo.Protocols = []database.Protocol{
-				{Name: "quic", Port: quicPort},
-			}
-		}
+		return fmt.Errorf("metadata publisher not available")
 	}
-
-	// Update relay information
-	metadata.NetworkInfo.UsingRelay = true
-	metadata.NetworkInfo.ConnectedRelay = relay.NodeID
-	metadata.NetworkInfo.RelaySessionID = sessionID
-	metadata.NetworkInfo.RelayAddress = relay.Endpoint
-	metadata.Version++
-	metadata.Timestamp = time.Now()
-	metadata.LastSeen = time.Now()
-	metadata.Source = "relay_client" // Indicate this metadata is from relay connection
-
-	// Debug: verify metadata has relay info before storing and broadcasting
-	rm.logger.Debug(fmt.Sprintf("Metadata before broadcast: version=%d, using_relay=%v, connected_relay=%s, session_id=%s",
-		metadata.Version, metadata.NetworkInfo.UsingRelay, metadata.NetworkInfo.ConnectedRelay, metadata.NetworkInfo.RelaySessionID), "relay-manager")
-
-	// Store in database
-	if err := rm.dbManager.PeerMetadata.StorePeerMetadata(metadata); err != nil {
-		return fmt.Errorf("failed to store metadata: %v", err)
-	}
-
-	// TODO: Publish updated metadata to DHT (Phase 4 integration)
-	// The metadata publisher will handle periodic republishing
-	rm.logger.Info(fmt.Sprintf("Updated metadata with relay info: relay=%s, session=%s", relay.NodeID, sessionID), "relay-manager")
 
 	return nil
 }

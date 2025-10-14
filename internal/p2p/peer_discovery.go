@@ -179,24 +179,21 @@ func (pds *PeerDiscoveryService) queryPeerMetadata(
 				return
 			}
 
-			// Query metadata
+			// Query metadata from DHT
 			var metadata *database.PeerMetadata
 			var err error
 
 			if options.CacheOnly {
-				// Only check cache
-				metadata, _, err = pds.dbManager.MetadataCache.GetCachedMetadata(p.PeerID)
-				if err != nil || metadata == nil {
-					pds.logger.Debug(fmt.Sprintf("No cached metadata for %s", p.PeerID[:8]), "peer-discovery")
-					return
-				}
-			} else {
-				// Cache-first, then DHT
-				metadata, err = pds.metadataQuery.QueryMetadata(p.PeerID, p.PublicKey)
-				if err != nil {
-					pds.logger.Debug(fmt.Sprintf("Failed to query metadata for %s: %v", p.PeerID[:8], err), "peer-discovery")
-					return
-				}
+				// CacheOnly mode no longer supported (no database cache)
+				pds.logger.Debug(fmt.Sprintf("CacheOnly mode skipped for %s (cache removed)", p.PeerID[:8]), "peer-discovery")
+				return
+			}
+
+			// Query DHT for metadata
+			metadata, err = pds.metadataQuery.QueryMetadata(p.PeerID, p.PublicKey)
+			if err != nil {
+				pds.logger.Debug(fmt.Sprintf("Failed to query metadata for %s: %v", p.PeerID[:8], err), "peer-discovery")
+				return
 			}
 
 			// Validate metadata
@@ -278,12 +275,7 @@ func (pds *PeerDiscoveryService) GetConnectablePeersCount(topic string) (int, er
 func (pds *PeerDiscoveryService) RefreshPeerMetadata(peerID string, publicKey []byte) (*DiscoveredPeer, error) {
 	pds.logger.Debug(fmt.Sprintf("Refreshing metadata for peer %s", peerID[:8]), "peer-discovery")
 
-	// Invalidate cache
-	if err := pds.metadataQuery.InvalidateCache(peerID); err != nil {
-		pds.logger.Warn(fmt.Sprintf("Failed to invalidate cache for %s: %v", peerID[:8], err), "peer-discovery")
-	}
-
-	// Query fresh metadata from DHT
+	// Query fresh metadata from DHT (no cache to invalidate)
 	metadata, err := pds.metadataQuery.QueryMetadata(peerID, publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to refresh metadata: %v", err)
@@ -316,10 +308,9 @@ func (pds *PeerDiscoveryService) GetDiscoveryStats(topic string) (map[string]int
 		return nil, err
 	}
 
-	// Get cache stats
-	cacheStats, err := pds.metadataQuery.GetCacheStats()
-	if err != nil {
-		return nil, err
+	// Cache stats no longer available (database cache removed)
+	cacheStats := map[string]interface{}{
+		"note": "Database-level caching removed",
 	}
 
 	// Quick connectable peers count (cache only)

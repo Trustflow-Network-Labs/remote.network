@@ -531,9 +531,11 @@ func (d *DHTPeer) announceDirectlyToDiscoveredPeers(topic string, discoveredPeer
 		}
 
 		// Convert to UDP address for DHT communication
+		// IMPORTANT: Use DHT port (30609), not QUIC port (30906) from discovery
+		// The peer announcement uses QUIC port, but DHT queries must go to DHT port
 		udpAddr := &net.UDPAddr{
 			IP:   peerAddr.IP,
-			Port: peerAddr.Port,
+			Port: dhtPort, // Use DHT port, not peerAddr.Port (which is QUIC port)
 		}
 
 		// Create DHT address

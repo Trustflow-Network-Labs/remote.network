@@ -147,18 +147,7 @@ func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remo
 	rp.registeredClients[data.NodeID] = session
 	rp.clientsMutex.Unlock()
 
-	// Record in database
-	if rp.dbManager != nil && rp.dbManager.Relay != nil {
-		sessionType := "full_relay"
-		if !data.RequiresRelay {
-			sessionType = "coordination"
-		}
-
-		err := rp.dbManager.Relay.CreateSession(sessionID, data.NodeID, "", sessionType, keepaliveInterval)
-		if err != nil {
-			rp.logger.Error(fmt.Sprintf("Failed to create session in database: %v", err), "relay")
-		}
-	}
+	// Note: Session is now stored in-memory only (no database record)
 
 	rp.logger.Info(fmt.Sprintf("Relay session created: %s for client %s (type: %s)",
 		sessionID, data.NodeID, session.SessionType), "relay")
@@ -202,17 +191,14 @@ func (rp *RelayPeer) HandleRelayForward(msg *QUICMessage, remoteAddr string) err
 			data.SourceNodeID, data.TargetNodeID, data.PayloadSize), "relay")
 	}
 
-	// Update traffic counters
+	// Update traffic counters in-memory
 	session.mutex.Lock()
 	session.IngressBytes += data.PayloadSize
 	session.LastKeepalive = time.Now()
 	session.mutex.Unlock()
 
-	// Update database
+	// Record traffic for billing (database logging only)
 	if rp.dbManager != nil && rp.dbManager.Relay != nil {
-		rp.dbManager.Relay.UpdateSessionTraffic(data.SessionID, data.PayloadSize, 0)
-
-		// Record traffic
 		trafficType := "relay"
 		if isCoordination {
 			trafficType = "coordination"
@@ -255,17 +241,14 @@ func (rp *RelayPeer) HandleRelayData(msg *QUICMessage, remoteAddr string) error 
 	rp.logger.Debug(fmt.Sprintf("Relay data: %s -> %s (%d bytes, seq: %d)",
 		data.SourceNodeID, data.TargetNodeID, data.DataSize, data.SequenceNum), "relay")
 
-	// Update traffic counters (this is paid traffic)
+	// Update traffic counters in-memory (this is paid traffic)
 	session.mutex.Lock()
 	session.IngressBytes += data.DataSize
 	session.LastKeepalive = time.Now()
 	session.mutex.Unlock()
 
-	// Update database
+	// Record as billable relay traffic (database logging only)
 	if rp.dbManager != nil && rp.dbManager.Relay != nil {
-		rp.dbManager.Relay.UpdateSessionTraffic(data.SessionID, data.DataSize, 0)
-
-		// Record as billable relay traffic
 		rp.dbManager.Relay.RecordTraffic(
 			data.SessionID,
 			data.SourceNodeID,
@@ -360,11 +343,8 @@ func (rp *RelayPeer) HandleRelayDisconnect(msg *QUICMessage, remoteAddr string) 
 	delete(rp.registeredClients, data.NodeID)
 	rp.clientsMutex.Unlock()
 
-	// Close session in database
+	// Record final traffic for billing (database logging only)
 	if rp.dbManager != nil && rp.dbManager.Relay != nil && exists {
-		rp.dbManager.Relay.CloseSession(data.SessionID)
-
-		// Record final traffic
 		rp.dbManager.Relay.RecordTraffic(
 			data.SessionID,
 			data.NodeID,
@@ -391,33 +371,26 @@ func (rp *RelayPeer) HandleRelaySessionQuery(msg *QUICMessage, remoteAddr string
 
 	rp.logger.Debug(fmt.Sprintf("Session query for client %s from %s", data.ClientNodeID, data.QueryNodeID), "relay")
 
-	// Check if client has an active session
-	hasSession, sessionID, err := rp.dbManager.Relay.HasActiveSession(data.ClientNodeID)
-	if err != nil {
-		rp.logger.Error(fmt.Sprintf("Failed to query session for %s: %v", data.ClientNodeID, err), "relay")
-		return CreateRelaySessionStatus(data.ClientNodeID, false, "", false, 0)
-	}
+	// Check if client has an active session (in-memory only)
+	rp.sessionsMutex.RLock()
+	sessions := rp.clientSessions[data.ClientNodeID]
 
-	if !hasSession {
+	if len(sessions) == 0 {
+		rp.sessionsMutex.RUnlock()
 		rp.logger.Debug(fmt.Sprintf("Client %s has no active session", data.ClientNodeID), "relay")
 		return CreateRelaySessionStatus(data.ClientNodeID, false, "", false, 0)
 	}
 
-	// Check session in memory for real-time status
-	rp.sessionsMutex.RLock()
-	session, exists := rp.sessions[sessionID]
-	rp.sessionsMutex.RUnlock()
+	// Get the first active session (while still holding lock)
+	session := sessions[0]
+	sessionID := session.SessionID
 
-	if !exists {
-		// Session in DB but not in memory - might be stale
-		rp.logger.Debug(fmt.Sprintf("Client %s session %s found in DB but not in memory", data.ClientNodeID, sessionID), "relay")
-		return CreateRelaySessionStatus(data.ClientNodeID, true, sessionID, false, 0)
-	}
-
-	// Session exists and is active
+	// Read session fields while holding lock
 	session.mutex.RLock()
 	lastKeepalive := session.LastKeepalive.Unix()
 	session.mutex.RUnlock()
+
+	rp.sessionsMutex.RUnlock()
 
 	rp.logger.Debug(fmt.Sprintf("Client %s has active session %s", data.ClientNodeID, sessionID), "relay")
 	return CreateRelaySessionStatus(data.ClientNodeID, true, sessionID, true, lastKeepalive)
@@ -476,10 +449,7 @@ func (rp *RelayPeer) terminateSession(sessionID, reason string) {
 	delete(rp.registeredClients, session.ClientNodeID)
 	rp.clientsMutex.Unlock()
 
-	// Close in database
-	if rp.dbManager != nil && rp.dbManager.Relay != nil {
-		rp.dbManager.Relay.CloseSession(sessionID)
-	}
+	// Note: Session closed in-memory only (no database record to close)
 
 	rp.logger.Info(fmt.Sprintf("Terminated session %s: %s", sessionID, reason), "relay")
 }
@@ -560,8 +530,5 @@ func (rp *RelayPeer) UpdateSessionKeepalive(sessionID string) {
 
 	rp.logger.Debug(fmt.Sprintf("Updated keepalive for session %s (client: %s)", sessionID, session.ClientNodeID), "relay")
 
-	// Update database
-	if rp.dbManager != nil && rp.dbManager.Relay != nil {
-		rp.dbManager.Relay.UpdateSessionKeepalive(sessionID)
-	}
+	// Note: Keepalive updated in-memory only (no database record to update)
 }

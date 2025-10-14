@@ -52,7 +52,7 @@ Ed25519 Keys → Sign Metadata → Publish to DHT (BEP_44)
 - ✅ **Added:** Metadata caching with TTL
 - ✅ **Added:** Connectability filtering for smart peer selection
 
-For detailed architecture, see [docs/dht-metadata-architecture.md](docs/dht-metadata-architecture.md)
+For detailed architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ---
 
