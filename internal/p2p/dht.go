@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/dht/v2"
+	"github.com/anacrolix/dht/v2/bep44"
 	"github.com/anacrolix/dht/v2/krpc"
 	peer_store "github.com/anacrolix/dht/v2/peer-store"
 	"github.com/anacrolix/torrent/metainfo"
@@ -18,6 +19,7 @@ import (
 
 type DHTPeer struct {
 	server *dht.Server
+	store  bep44.Store // BEP_44 store for local caching (nil if disabled)
 	nodeID krpc.ID
 	config *utils.ConfigManager
 	logger *utils.LogsManager
@@ -77,7 +79,7 @@ func NewDHTPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*DHTPee
 		infohashToTopic: make(map[string]string),
 	}
 
-	// Configure DHT server with explicit PeerStore
+	// Configure DHT server with explicit PeerStore and optional BEP_44 Store
 	serverConfig := &dht.ServerConfig{
 		NodeId:    nodeID,
 		Conn:      conn,
@@ -119,6 +121,24 @@ func NewDHTPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*DHTPee
 		},
 	}
 
+	// Conditionally enable BEP_44 storage based on configuration
+	// Default is true (enabled) - can be disabled with -s=false flag
+	if config.GetConfigBool("enable_bep44_store", true) {
+		store := bep44.NewMemory()
+		serverConfig.Store = store
+
+		// BEP_44 item expiration - how long nodes keep stored items before deleting
+		// Must be at least 2x the republish interval to prevent data loss
+		expirationHours := config.GetConfigInt("bep44_item_expiration_hours", 2, 1, 24)
+		serverConfig.Exp = time.Duration(expirationHours) * time.Hour
+
+		dhtPeer.store = store // Keep a reference for direct access
+		logger.Info(fmt.Sprintf("BEP_44 DHT storage enabled - expiration: %dh", expirationHours), "dht")
+	} else {
+		dhtPeer.store = nil // No store in client-only mode
+		logger.Info("BEP_44 DHT storage disabled - node in client-only mode", "dht")
+	}
+
 	server, err := dht.NewServer(serverConfig)
 	if err != nil {
 		cancel()
@@ -135,6 +155,12 @@ func NewDHTPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*DHTPee
 // SetPeerDiscoveredCallback sets the callback function for when peers are discovered
 func (d *DHTPeer) SetPeerDiscoveredCallback(callback func(peerAddr string, topic string)) {
 	d.onPeerDiscovered = callback
+}
+
+// GetStore returns the BEP_44 store if enabled, or nil if disabled
+// This allows direct access to the local store for caching and retrieval
+func (d *DHTPeer) GetStore() bep44.Store {
+	return d.store
 }
 
 func getBootstrapAddrs(config *utils.ConfigManager) ([]dht.Addr, error) {
@@ -329,7 +355,7 @@ func (d *DHTPeer) addCustomBootstrapNodes() {
 				time.Sleep(100 * time.Millisecond) // Brief delay to ensure routing table is updated
 
 				// Get current subscribed topics and exchange peers for each
-				topics := []string{"remote-network-mesh"} // TODO: Get from actual subscribed topics
+				topics := d.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 				for _, topic := range topics {
 					peerCount := d.exchangeTopicPeersWithPeer(nodeAddr, topic)
 					if peerCount > 0 {

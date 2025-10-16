@@ -11,11 +11,12 @@ import (
 )
 
 var (
-	configPath  string
-	relayMode   bool
-	config      *utils.ConfigManager
-	logger      *utils.LogsManager
-	peerManager *core.PeerManager
+	configPath     string
+	relayMode      bool
+	enableDHTStore bool
+	config         *utils.ConfigManager
+	logger         *utils.LogsManager
+	peerManager    *core.PeerManager
 )
 
 var rootCmd = &cobra.Command{
@@ -32,6 +33,12 @@ exchange messages with other peers interested in the same topics.`,
 		// Override relay_mode from command line flag if provided
 		if relayMode {
 			config.SetConfig("relay_mode", true)
+		}
+
+		// Override enable_bep44_store from command line flag if provided
+		// Note: The flag defaults to true, but we only set config if explicitly provided
+		if cmd.Flags().Changed("store") {
+			config.SetConfig("enable_bep44_store", enableDHTStore)
 		}
 
 		// Initialize logging
@@ -84,4 +91,5 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "config file path")
 	rootCmd.PersistentFlags().BoolVarP(&relayMode, "relay", "r", false, "enable relay mode (requires public IP)")
+	rootCmd.PersistentFlags().BoolVarP(&enableDHTStore, "store", "s", true, "enable BEP_44 DHT storage for serving mutable data to other peers")
 }

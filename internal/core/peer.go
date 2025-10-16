@@ -40,6 +40,7 @@ type PeerManager struct {
 	metadataPublisher       *p2p.MetadataPublisher
 	metadataFetcher         *p2p.MetadataFetcher
 	metadataQuery           *p2p.MetadataQueryService
+	metadataRetryScheduler  *p2p.MetadataRetryScheduler
 	peerValidator           *p2p.PeerValidator
 	periodicDiscoveryMgr    *p2p.PeriodicDiscovery
 	connectabilityFilter    *p2p.ConnectabilityFilter
@@ -121,22 +122,26 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 	// Set identity exchanger on QUIC peer
 	quic.SetIdentityExchanger(identityExchanger)
 
-	// Initialize relay peer/manager (needs metadata publisher)
-	if config.GetConfigBool("relay_mode", false) {
-		relayPeer = p2p.NewRelayPeer(config, logger, dbManager)
-		logger.Info("Relay mode enabled - node will act as relay", "core")
-	} else {
-		// For NAT peers, initialize relay manager for connecting to relays
-		relayManager = p2p.NewRelayManager(config, logger, dbManager, quic, dht, metadataPublisher)
-		logger.Info("Relay manager initialized for NAT peer", "core")
-	}
-
 	metadataQuery := p2p.NewMetadataQueryService(bep44Manager, dbManager, logger, config)
 	logger.Info("Metadata query service initialized (cache-first DHT queries)", "core")
 
 	// Initialize metadata fetcher for DHT-only metadata retrieval with priority routing
 	metadataFetcher := p2p.NewMetadataFetcher(bep44Manager, logger)
 	logger.Info("Metadata fetcher initialized (DHT priority queries)", "core")
+
+	// Initialize metadata retry scheduler for failed metadata fetches
+	metadataRetryScheduler := p2p.NewMetadataRetryScheduler(config, logger, metadataFetcher, dbManager)
+	logger.Info("Metadata retry scheduler initialized", "core")
+
+	// Initialize relay peer/manager (needs metadata publisher and fetcher)
+	if config.GetConfigBool("relay_mode", false) {
+		relayPeer = p2p.NewRelayPeer(config, logger, dbManager)
+		logger.Info("Relay mode enabled - node will act as relay", "core")
+	} else {
+		// For NAT peers, initialize relay manager for connecting to relays
+		relayManager = p2p.NewRelayManager(config, logger, dbManager, quic, dht, metadataPublisher, metadataFetcher)
+		logger.Info("Relay manager initialized for NAT peer", "core")
+	}
 
 	// Initialize peer validator for stale peer cleanup (validates 24h+ old peers via DHT)
 	peerValidator := p2p.NewPeerValidator(metadataFetcher, dbManager, logger, config)
@@ -153,27 +158,28 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 	logger.Info("Periodic discovery initialized (3-hour DHT rediscovery)", "core")
 
 	pm := &PeerManager{
-		config:                config,
-		logger:                logger,
-		dht:                   dht,
-		quic:                  quic,
-		relayPeer:             relayPeer,
-		relayManager:          relayManager,
-		trafficMonitor:        trafficMonitor,
-		natDetector:           natDetector,
-		topologyMgr:           topologyMgr,
-		holePuncher:           holePuncher,
-		metadataPublisher:     metadataPublisher,
-		metadataFetcher:       metadataFetcher,
-		metadataQuery:         metadataQuery,
-		peerValidator:         peerValidator,
-		periodicDiscoveryMgr:  periodicDiscoveryMgr,
-		connectabilityFilter:  connectabilityFilter,
-		peerDiscovery:         peerDiscovery,
-		dbManager:             dbManager,
-		topics:                make(map[string]*TopicState),
-		ctx:                   ctx,
-		cancel:                cancel,
+		config:                  config,
+		logger:                  logger,
+		dht:                     dht,
+		quic:                    quic,
+		relayPeer:               relayPeer,
+		relayManager:            relayManager,
+		trafficMonitor:          trafficMonitor,
+		natDetector:             natDetector,
+		topologyMgr:             topologyMgr,
+		holePuncher:             holePuncher,
+		metadataPublisher:       metadataPublisher,
+		metadataFetcher:         metadataFetcher,
+		metadataQuery:           metadataQuery,
+		metadataRetryScheduler:  metadataRetryScheduler,
+		peerValidator:           peerValidator,
+		periodicDiscoveryMgr:    periodicDiscoveryMgr,
+		connectabilityFilter:    connectabilityFilter,
+		peerDiscovery:           peerDiscovery,
+		dbManager:               dbManager,
+		topics:                  make(map[string]*TopicState),
+		ctx:                     ctx,
+		cancel:                  cancel,
 	}
 
 	// Set dependencies on QUIC peer
@@ -265,6 +271,11 @@ func (pm *PeerManager) Start() error {
 		}
 	}
 
+	// Connect to bootstrap peers for identity exchange (Phase 1: Bootstrap)
+	// This must happen BEFORE metadata publishing to get known_peers
+	pm.logger.Info("Connecting to bootstrap peers for identity exchange...", "core")
+	pm.connectToBootstrapPeers()
+
 	// Publish initial metadata to DHT (Phase 4: DHT metadata architecture)
 	pm.logger.Info("Publishing initial metadata to DHT...", "core")
 	if err := pm.publishInitialMetadata(); err != nil {
@@ -288,12 +299,20 @@ func (pm *PeerManager) Start() error {
 	pm.mutex.Lock()
 
 	// Start background tasks
+	pm.logger.Debug("Starting periodic announce goroutine", "core")
 	go pm.periodicAnnounce()
+
+	pm.logger.Debug("Starting periodic discovery goroutine", "core")
 	go pm.periodicDiscovery()
+
+	pm.logger.Debug("Starting periodic maintenance goroutine", "core")
 	go pm.periodicMaintenance()
 
+	pm.logger.Debug("Starting periodic bootstrap re-query goroutine", "core")
+	go pm.periodicBootstrapRequeryLoop()
+
 	pm.running = true
-	pm.logger.Info("Peer Manager started successfully", "core")
+	pm.logger.Info("Peer Manager started successfully with 4 background goroutines", "core")
 
 	return nil
 }
@@ -325,6 +344,7 @@ func (pm *PeerManager) SubscribeToTopic(topic string) error {
 	topicState.LastAnnounce = time.Now()
 
 	// Discover existing peers
+	pm.logger.Debug(fmt.Sprintf("Spawning initial discovery goroutine for new topic subscription: %s", topic), "core")
 	go pm.discoverTopicPeers(topic)
 
 	return nil
@@ -459,9 +479,12 @@ func (pm *PeerManager) periodicDiscovery() {
 	ticker := time.NewTicker(discoveryInterval)
 	defer ticker.Stop()
 
+	pm.logger.Debug(fmt.Sprintf("Periodic discovery loop started (interval: %v)", discoveryInterval), "core")
+
 	for {
 		select {
 		case <-pm.ctx.Done():
+			pm.logger.Debug("Periodic discovery loop stopped", "core")
 			return
 		case <-ticker.C:
 			pm.mutex.RLock()
@@ -471,7 +494,10 @@ func (pm *PeerManager) periodicDiscovery() {
 			}
 			pm.mutex.RUnlock()
 
+			pm.logger.Info(fmt.Sprintf("Periodic discovery tick - spawning %d discovery goroutines", len(topics)), "core")
+
 			for _, topic := range topics {
+				pm.logger.Debug(fmt.Sprintf("Spawning discovery goroutine for topic: %s", topic), "core")
 				go pm.discoverTopicPeers(topic)
 			}
 		}
@@ -512,12 +538,52 @@ func (pm *PeerManager) runMaintenance() {
 	}
 }
 
+// periodicBootstrapRequeryLoop performs periodic bootstrap re-queries to discover new peers
+// Runs independently of DHT discovery with its own interval (default: 3 hours)
+func (pm *PeerManager) periodicBootstrapRequeryLoop() {
+	// Get bootstrap re-query interval from config (default: 3 hours)
+	intervalHours := pm.config.GetConfigInt("periodic_bootstrap_requery_interval_hours", 3, 1, 24)
+	interval := time.Duration(intervalHours) * time.Hour
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	pm.logger.Info(fmt.Sprintf("Starting periodic bootstrap re-query loop (interval: %v)", interval), "core")
+
+	// Wait for initial delay before first re-query (same as periodic discovery interval)
+	// This gives time for the network to stabilize after startup
+	time.Sleep(interval)
+
+	for {
+		select {
+		case <-pm.ctx.Done():
+			pm.logger.Info("Stopping periodic bootstrap re-query loop", "core")
+			return
+		case <-ticker.C:
+			pm.logger.Debug("Periodic bootstrap re-query triggered", "core")
+
+			// Get all subscribed topics and re-query for each
+			pm.mutex.RLock()
+			topics := make([]string, 0, len(pm.topics))
+			for topic := range pm.topics {
+				topics = append(topics, topic)
+			}
+			pm.mutex.RUnlock()
+
+			for _, topic := range topics {
+				pm.periodicBootstrapRequery(topic)
+			}
+		}
+	}
+}
+
 func (pm *PeerManager) discoverTopicPeers(topic string) {
-	pm.logger.Info(fmt.Sprintf("Discovering peers for topic: %s", topic), "core")
+	pm.logger.Debug(fmt.Sprintf("Discovery goroutine started for topic: %s", topic), "core")
 
 	peers, err := pm.dht.FindPeersForTopic(topic)
 	if err != nil {
 		pm.logger.Error(fmt.Sprintf("Failed to discover peers for topic '%s': %v", topic, err), "core")
+		pm.logger.Debug(fmt.Sprintf("Discovery goroutine ended (error) for topic: %s", topic), "core")
 		return
 	}
 
@@ -543,46 +609,13 @@ func (pm *PeerManager) discoverTopicPeers(topic string) {
 		if _, exists := topicState.Peers[peerKey]; !exists {
 			topicState.Peers[peerKey] = peer
 			newPeerCount++
-			pm.logger.Debug(fmt.Sprintf("Added new peer %s for topic '%s'", peerKey, topic), "core")
+			pm.logger.Debug(fmt.Sprintf("Discovered peer %s for topic '%s' (will connect after metadata is available)", peerKey, topic), "core")
 
-			// Trigger metadata exchange for newly discovered peer
-			// Note: Only request metadata via direct QUIC if we can reasonably connect
-			// For NAT peers, metadata will come via DHT queries instead
-			quicPort := pm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
-			quicAddr := fmt.Sprintf("%s:%d", peer.IP.String(), quicPort)
-			go func(addr, topicName string, peerIP net.IP) {
-				nodeTypeManager := utils.NewNodeTypeManager()
-
-				// Allow direct connections to:
-				// 1. Public IPs (always reachable)
-				// 2. LAN peers on the same subnet (directly reachable)
-				// Skip connections to private IPs outside our LAN (need relay)
-				if nodeTypeManager.IsPrivateIP(peerIP.String()) {
-					// Check if this is a LAN peer (same subnet)
-					ourIP, err := nodeTypeManager.GetLocalIP()
-					if err == nil && nodeTypeManager.IsOnSameSubnet(ourIP, peerIP.String()) {
-						pm.logger.Debug(fmt.Sprintf("Attempting direct connection to LAN peer %s", addr), "core")
-						// Continue with connection attempt
-					} else {
-						pm.logger.Debug(fmt.Sprintf("Skipping direct metadata request to remote private IP %s (will use DHT metadata)", addr), "core")
-						return
-					}
-				}
-
-				// Note: QUIC metadata exchange removed - metadata comes from DHT only
-				// Identity exchange during QUIC handshake stores peer_id + public_key in known_peers
-				// Metadata can be fetched from DHT on-demand using metadataFetcher when needed
-				pm.logger.Debug(fmt.Sprintf("Peer discovered at %s - attempting QUIC connection for identity exchange", addr), "core")
-
-				// Attempt QUIC connection to perform identity exchange
-				// The identity exchange happens automatically during QUIC handshake
-				_, err := pm.quic.ConnectToPeer(addr)
-				if err != nil {
-					pm.logger.Debug(fmt.Sprintf("Failed to connect to discovered peer %s: %v", addr, err), "core")
-				} else {
-					pm.logger.Info(fmt.Sprintf("Successfully connected to discovered peer %s (identity exchange in progress)", addr), "core")
-				}
-			}(quicAddr, topic, peer.IP)
+			// Note: Metadata-first strategy - we do NOT attempt immediate connections
+			// Instead, discovered peers will be connected to via:
+			// 1. Metadata queries (periodic discovery fetches metadata from DHT)
+			// 2. connectToKnownPeers() connects to peers with available metadata
+			// This ensures we always have metadata before attempting connections
 		}
 	}
 	topicState.LastRefresh = time.Now()
@@ -592,6 +625,9 @@ func (pm *PeerManager) discoverTopicPeers(topic string) {
 		pm.logger.Info(fmt.Sprintf("Discovered %d new peers for topic '%s' (total: %d)",
 			newPeerCount, topic, len(topicState.Peers)), "core")
 	}
+
+	pm.logger.Debug(fmt.Sprintf("Discovery goroutine ended for topic: %s (new: %d, total: %d)",
+		topic, newPeerCount, len(topicState.Peers)), "core")
 }
 
 func (pm *PeerManager) GetStats() map[string]interface{} {
@@ -799,13 +835,22 @@ func (pm *PeerManager) publishInitialMetadata() error {
 		pm.metadataPublisher.StartPeriodicRepublish()
 
 		pm.logger.Info(fmt.Sprintf("Published initial metadata to DHT (node_id: %s, type: %s)", metadata.NodeID, nodeType), "core")
+
+		// Connect to known peers after metadata publishing (metadata-first strategy)
+		go pm.connectToKnownPeers(topic)
 	} else {
 		// NAT node - defer publishing until relay connection is established
 		pm.logger.Info(fmt.Sprintf("NAT node detected - deferring metadata publishing until relay connection (node_id: %s)", metadata.NodeID), "core")
 
 		// Store the metadata for later publishing when relay connects
-		// The relay manager will call metadataPublisher.PublishMetadata() when relay connects
-		// Note: Metadata will be updated with relay info before publishing
+		// The relay manager will call metadataPublisher.NotifyRelayConnected() to publish with relay info
+		pm.metadataPublisher.SetInitialMetadata(metadata)
+
+		// Set callback to connect to known peers after NAT metadata is published
+		pm.metadataPublisher.SetNATMetadataPublishedCallback(func() {
+			pm.logger.Info("NAT metadata published to DHT, connecting to known peers...", "core")
+			pm.connectToKnownPeers(topic)
+		})
 	}
 
 	// Note: Local metadata storage removed - metadata is DHT-only now
@@ -817,7 +862,290 @@ func (pm *PeerManager) publishInitialMetadata() error {
 	// Start periodic discovery for DHT rediscovery (discovers new peers every 3 hours)
 	pm.periodicDiscoveryMgr.StartPeriodicDiscovery(topic)
 	pm.logger.Info("Started periodic discovery for DHT rediscovery", "core")
+
+	// Start metadata retry scheduler for failed metadata fetches
+	pm.metadataRetryScheduler.StartRetryLoop()
+	pm.logger.Info("Started metadata retry scheduler", "core")
+
 	return nil
 }
 
-// periodicPeerReachabilityCheck periodically verifies peer reachability and removes unreachable peers
+// connectToBootstrapPeers connects to bootstrap peers for initial identity exchange
+// This happens BEFORE metadata publishing to populate known_peers database
+func (pm *PeerManager) connectToBootstrapPeers() {
+	defaultBootstrap := []string{"159.65.253.245:30609", "167.86.116.185:30609"}
+	// Use custom_bootstrap_nodes (our network nodes with QUIC servers)
+	// NOT dht_bootstrap_nodes (which includes global BitTorrent DHT nodes without QUIC)
+	bootstrapNodes := pm.config.GetBootstrapNodes("custom_bootstrap_nodes", defaultBootstrap)
+	if len(bootstrapNodes) == 0 {
+		pm.logger.Warn("No custom bootstrap nodes configured", "core")
+		return
+	}
+
+	quicPort := pm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
+	pm.logger.Info(fmt.Sprintf("Bootstrap phase starting: connecting to %d custom bootstrap peers (QUIC port: %d)",
+		len(bootstrapNodes), quicPort), "core")
+
+	// Get our external IP to avoid self-connections
+	nodeTypeManager := utils.NewNodeTypeManager()
+	ourExternalIP, err := nodeTypeManager.GetExternalIP()
+	if err != nil {
+		pm.logger.Debug(fmt.Sprintf("Could not determine external IP: %v (self-connection detection disabled)", err), "core")
+	} else {
+		pm.logger.Debug(fmt.Sprintf("Our external IP: %s (will skip self-connections)", ourExternalIP), "core")
+	}
+
+	var successCount, failureCount, skippedCount int
+
+	for i, bootstrap := range bootstrapNodes {
+		// Parse bootstrap address (format: IP:DHT_PORT)
+		// We need to connect to QUIC port instead
+		host, _, err := net.SplitHostPort(bootstrap)
+		if err != nil {
+			failureCount++
+			pm.logger.Debug(fmt.Sprintf("Bootstrap attempt %d/%d FAILED: invalid address %s: %v",
+				i+1, len(bootstrapNodes), bootstrap, err), "core")
+			continue
+		}
+
+		// Skip self-connections
+		if ourExternalIP != "" && host == ourExternalIP {
+			skippedCount++
+			pm.logger.Debug(fmt.Sprintf("Bootstrap attempt %d/%d SKIPPED: self-connection to %s",
+				i+1, len(bootstrapNodes), bootstrap), "core")
+			continue
+		}
+
+		// Connect to bootstrap peer via QUIC port
+		quicAddr := fmt.Sprintf("%s:%d", host, quicPort)
+		pm.logger.Debug(fmt.Sprintf("Bootstrap attempt %d/%d: connecting to %s...",
+			i+1, len(bootstrapNodes), quicAddr), "core")
+
+		conn, err := pm.quic.ConnectToPeer(quicAddr)
+		if err != nil {
+			failureCount++
+			pm.logger.Warn(fmt.Sprintf("Bootstrap attempt %d/%d FAILED to %s: %v",
+				i+1, len(bootstrapNodes), quicAddr, err), "core")
+			continue
+		}
+
+		successCount++
+		pm.logger.Info(fmt.Sprintf("Bootstrap attempt %d/%d SUCCESS: connected to %s (identity exchange completed)",
+			i+1, len(bootstrapNodes), quicAddr), "core")
+
+		// Connection will be managed by QUIC layer, identity exchange happens automatically
+		_ = conn
+	}
+
+	pm.logger.Info(fmt.Sprintf("Bootstrap connection phase complete: %d successful, %d failed, %d skipped out of %d total",
+		successCount, failureCount, skippedCount, len(bootstrapNodes)), "core")
+
+	// Give time for identity exchanges to complete and peers to be stored
+	pm.logger.Debug("Waiting 2 seconds for identity exchanges to complete...", "core")
+	time.Sleep(2 * time.Second)
+
+	// Verify peers were stored in database
+	topics := pm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	if len(topics) > 0 {
+		topic := topics[0]
+		peerCount, err := pm.dbManager.KnownPeers.GetKnownPeersCountByTopic(topic)
+		if err != nil {
+			pm.logger.Error(fmt.Sprintf("Post-bootstrap verification failed: cannot query known_peers: %v", err), "core")
+		} else {
+			pm.logger.Info(fmt.Sprintf("Post-bootstrap verification: %d peers in known_peers database", peerCount), "core")
+
+			if peerCount == 0 && successCount > 0 {
+				pm.logger.Error("CRITICAL: No peers in known_peers after successful bootstrap connections! Identity exchange may have failed.", "core")
+			} else if peerCount > 0 {
+				pm.logger.Info(fmt.Sprintf("Bootstrap verification SUCCESS: %d peers successfully stored", peerCount), "core")
+			}
+		}
+	}
+}
+
+// periodicBootstrapRequery periodically re-connects to bootstrap peers to exchange updated known_peers lists
+// This allows peers to discover new peers that joined the network after their initial bootstrap
+// Should be called as part of periodic discovery (every 3 hours alongside DHT rediscovery)
+func (pm *PeerManager) periodicBootstrapRequery(topic string) {
+	pm.logger.Info("Performing periodic bootstrap re-query for updated peer lists...", "core")
+
+	defaultBootstrap := []string{"159.65.253.245:30609", "167.86.116.185:30609"}
+	bootstrapNodes := pm.config.GetBootstrapNodes("custom_bootstrap_nodes", defaultBootstrap)
+	if len(bootstrapNodes) == 0 {
+		pm.logger.Warn("No custom bootstrap nodes configured for re-query", "core")
+		return
+	}
+
+	// Get current peer count from database
+	initialPeers, err := pm.dbManager.KnownPeers.GetKnownPeersByTopic(topic)
+	if err != nil {
+		pm.logger.Error(fmt.Sprintf("Failed to get initial peer count: %v", err), "core")
+		return
+	}
+	initialCount := len(initialPeers)
+	pm.logger.Debug(fmt.Sprintf("Current known peers count: %d", initialCount), "core")
+
+	quicPort := pm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
+	pm.logger.Info(fmt.Sprintf("Re-querying %d bootstrap peers for updated peer lists...", len(bootstrapNodes)), "core")
+
+	successCount := 0
+	for _, bootstrap := range bootstrapNodes {
+		// Parse bootstrap address (format: IP:DHT_PORT)
+		host, _, err := net.SplitHostPort(bootstrap)
+		if err != nil {
+			pm.logger.Debug(fmt.Sprintf("Failed to parse bootstrap address %s: %v", bootstrap, err), "core")
+			continue
+		}
+
+		// Re-connect to bootstrap peer via QUIC port
+		quicAddr := fmt.Sprintf("%s:%d", host, quicPort)
+		pm.logger.Debug(fmt.Sprintf("Re-connecting to bootstrap peer at %s...", quicAddr), "core")
+
+		conn, err := pm.quic.ConnectToPeer(quicAddr)
+		if err != nil {
+			pm.logger.Debug(fmt.Sprintf("Failed to re-connect to bootstrap peer %s: %v", quicAddr, err), "core")
+			continue
+		}
+
+		pm.logger.Info(fmt.Sprintf("Successfully re-connected to bootstrap peer %s (identity/peer exchange in progress)", quicAddr), "core")
+		successCount++
+
+		// Connection will be managed by QUIC layer
+		// Identity exchange happens automatically, which includes known_peers exchange
+		_ = conn
+	}
+
+	pm.logger.Info(fmt.Sprintf("Bootstrap re-query complete: %d/%d successful", successCount, len(bootstrapNodes)), "core")
+
+	// Give time for identity/peer exchanges to complete
+	time.Sleep(2 * time.Second)
+
+	// Check if we discovered new peers
+	updatedPeers, err := pm.dbManager.KnownPeers.GetKnownPeersByTopic(topic)
+	if err != nil {
+		pm.logger.Error(fmt.Sprintf("Failed to get updated peer count: %v", err), "core")
+		return
+	}
+	updatedCount := len(updatedPeers)
+	newPeerCount := updatedCount - initialCount
+
+	if newPeerCount > 0 {
+		pm.logger.Info(fmt.Sprintf("Discovered %d new peers from bootstrap re-query (total: %d)", newPeerCount, updatedCount), "core")
+
+		// Connect to newly discovered peers via metadata-first strategy
+		pm.logger.Info("Connecting to newly discovered peers...", "core")
+		pm.connectToKnownPeers(topic)
+	} else {
+		pm.logger.Debug(fmt.Sprintf("No new peers discovered from bootstrap re-query (total: %d)", updatedCount), "core")
+	}
+}
+
+// connectToKnownPeers connects to peers from the known_peers database
+// This should be called after metadata publishing is complete
+// Implements metadata-first connection strategy - fetches metadata before attempting connection
+func (pm *PeerManager) connectToKnownPeers(topic string) {
+	pm.logger.Info("Connecting to known peers with metadata-first strategy...", "core")
+
+	// Get all known peers for the topic from database
+	knownPeers, err := pm.dbManager.KnownPeers.GetKnownPeersByTopic(topic)
+	if err != nil {
+		pm.logger.Error(fmt.Sprintf("Failed to get known peers from database: %v", err), "core")
+		return
+	}
+
+	pm.logger.Info(fmt.Sprintf("Found %d known peers to connect to", len(knownPeers)), "core")
+
+	// Count how many connection goroutines we'll spawn
+	goroutineCount := 0
+	for _, peer := range knownPeers {
+		// Skip bootstrap peers (already connected)
+		if peer.Source == "bootstrap" {
+			pm.logger.Debug(fmt.Sprintf("Skipping bootstrap peer %s (already connected)", peer.PeerID[:8]), "core")
+			continue
+		}
+		goroutineCount++
+	}
+
+	pm.logger.Info(fmt.Sprintf("Spawning %d goroutines for peer connections", goroutineCount), "core")
+
+	// Connect to each peer with metadata-first strategy
+	for _, peer := range knownPeers {
+		// Skip bootstrap peers (already connected)
+		if peer.Source == "bootstrap" {
+			continue
+		}
+
+		// Connect with metadata-first strategy
+		pm.logger.Debug(fmt.Sprintf("Spawning connection goroutine for peer %s", peer.PeerID[:8]), "core")
+		go pm.connectToPeerWithMetadata(peer.PeerID, peer.PublicKey)
+	}
+}
+
+// connectToPeerWithMetadata attempts to connect to a peer using metadata-first strategy
+// Fetches metadata from DHT first, schedules retry if unavailable
+func (pm *PeerManager) connectToPeerWithMetadata(peerID string, publicKey []byte) {
+	pm.logger.Debug(fmt.Sprintf("Attempting metadata-first connection to peer %s", peerID[:8]), "core")
+
+	// Try to fetch metadata from DHT
+	metadata, err := pm.metadataFetcher.GetPeerMetadata(publicKey)
+	if err != nil {
+		pm.logger.Debug(fmt.Sprintf("Metadata not available for peer %s, scheduling retry: %v", peerID[:8], err), "core")
+
+		// Schedule retry via MetadataRetryScheduler
+		pm.metadataRetryScheduler.ScheduleFetch(peerID, publicKey, func(metadata *database.PeerMetadata) {
+			// Callback when metadata becomes available
+			pm.logger.Info(fmt.Sprintf("Metadata now available for peer %s, attempting connection", peerID[:8]), "core")
+			pm.connectWithMetadata(metadata, peerID)
+		})
+		return
+	}
+
+	// Metadata available - proceed with connection
+	pm.connectWithMetadata(metadata, peerID)
+}
+
+// connectWithMetadata determines connection strategy based on metadata and connects
+// Uses LAN detection for same-subnet peers, direct connection for public peers
+func (pm *PeerManager) connectWithMetadata(metadata *database.PeerMetadata, peerID string) {
+	quicPort := pm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
+
+	var connectionAddr string
+	var connectionMethod string
+
+	// Determine connection strategy based on metadata
+	if pm.holePuncher != nil && pm.holePuncher.IsLANPeer(metadata) {
+		// LAN peer detected - use private IP for direct connection
+		connectionAddr = fmt.Sprintf("%s:%d", metadata.NetworkInfo.PrivateIP, quicPort)
+		connectionMethod = "LAN"
+		pm.logger.Info(fmt.Sprintf("Peer %s is on same LAN, connecting via private IP %s",
+			peerID[:8], metadata.NetworkInfo.PrivateIP), "core")
+	} else if metadata.NetworkInfo.NodeType == "public" || metadata.NetworkInfo.IsRelay {
+		// Public or relay peer - use public IP for direct connection
+		connectionAddr = fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, quicPort)
+		connectionMethod = "DIRECT"
+		pm.logger.Debug(fmt.Sprintf("Peer %s is public/relay, connecting via public IP %s",
+			peerID[:8], metadata.NetworkInfo.PublicIP), "core")
+	} else if metadata.NetworkInfo.UsingRelay {
+		// NAT peer using relay - cannot connect directly
+		pm.logger.Debug(fmt.Sprintf("Peer %s is NAT peer using relay, skipping direct connection", peerID[:8]), "core")
+		return
+	} else {
+		// NAT peer without relay - not ready for connection yet
+		pm.logger.Debug(fmt.Sprintf("Peer %s is NAT peer without relay, skipping connection", peerID[:8]), "core")
+		return
+	}
+
+	// Attempt QUIC connection
+	pm.logger.Debug(fmt.Sprintf("Connecting to peer %s via %s at %s", peerID[:8], connectionMethod, connectionAddr), "core")
+
+	conn, err := pm.quic.ConnectToPeer(connectionAddr)
+	if err != nil {
+		pm.logger.Debug(fmt.Sprintf("Failed to connect to peer %s (%s): %v", peerID[:8], connectionMethod, err), "core")
+		return
+	}
+
+	pm.logger.Info(fmt.Sprintf("Successfully connected to peer %s via %s (identity exchange in progress)", peerID[:8], connectionMethod), "core")
+
+	// Connection successful - identity exchange will happen automatically via QUIC handshake
+	_ = conn // Connection is managed by QUIC layer
+}

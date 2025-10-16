@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/anacrolix/torrent/bencode"
-
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -64,17 +62,20 @@ func (mf *MetadataFetcher) GetPeerMetadata(publicKey []byte) (*database.PeerMeta
 	}
 
 	// Parse metadata from BEP44 value
-	// BEP44 stores metadata as bencode - decode it into PeerMetadata struct
-	var metadata database.PeerMetadata
-	if err := bencode.Unmarshal(mutableData.Value, &metadata); err != nil {
+	// BEP44 stores metadata as bencode - must decode through BencodePeerMetadata first
+	// to properly handle bencode-safe format (Unix timestamps, etc.)
+	mf.logger.Info("🔧 FIXED METADATA DECODER - Using DecodeBencodedMetadata()", "metadata-fetcher")
+
+	metadata, err := database.DecodeBencodedMetadata(mutableData.Value)
+	if err != nil {
 		mf.logger.Warn(fmt.Sprintf("Failed to decode bencoded metadata: %v", err), "metadata-fetcher")
 		return nil, fmt.Errorf("failed to decode metadata: %v", err)
 	}
 
-	mf.logger.Debug(fmt.Sprintf("Successfully decoded metadata from DHT (node_id: %s, topic: %s, version: %d)",
-		metadata.NodeID, metadata.Topic, metadata.Version), "metadata-fetcher")
+	mf.logger.Info(fmt.Sprintf("✅ Successfully decoded metadata from DHT (node_id: %s, topic: %s, version: %d, is_relay: %v, relay_endpoint: %s)",
+		metadata.NodeID, metadata.Topic, metadata.Version, metadata.NetworkInfo.IsRelay, metadata.NetworkInfo.RelayEndpoint), "metadata-fetcher")
 
-	return &metadata, nil
+	return metadata, nil
 }
 
 // UpdateBootstrapNodes updates the list of connected bootstrap nodes for priority queries

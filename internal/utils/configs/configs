@@ -1,42 +1,34 @@
 [p2p]
 # DHT and P2P Configuration
 dht_port = 30609
+# Custom bootstrap nodes (our network) - used for both DHT and QUIC identity exchange
+custom_bootstrap_nodes = 159.65.253.245:30609, 167.86.116.185:30609
+# Global DHT bootstrap nodes (public BitTorrent DHT) - used only for DHT routing
 dht_bootstrap_nodes = 159.65.253.245:30609, 167.86.116.185:30609, router.utorrent.com:6881, router.bittorrent.com:6881, dht.transmissionbt.com:6881, dht.aelitis.com:6881, router.silotis.us:6881, dht.libtorrent.org:25401, dht.anacrolix.link:42069, router.bittorrent.cloud:42069
+# Enable BEP_44 DHT storage (default: true, can be disabled with -s=false flag)
+enable_bep44_store = true
 
 # QUIC Configuration
 quic_port = 30906
 quic_listen_addr = 0.0.0.0
 quic_connection_timeout = 5m
 quic_keepalive_period = 15s
-quic_stream_timeout = 10s
 quic_stream_open_timeout = 5s
-quic_max_connections = 100
 
 # Peer Discovery
 peer_discovery_interval = 30s
 peer_maintenance_interval = 5m
+peer_validation_interval_hours = 24
 maintenance_interval = 1h
-max_peers_per_topic = 50
-
-# Peer Metadata Aging and Reachability
-peer_metadata_max_age = 24h
-peer_reachability_check_interval = 5m
-metadata_refresh_interval = 5m
 
 [topics]
 # Topics to subscribe to (comma-separated)
 subscribe_topics = remote-network-mesh
 # Topic announcement interval
 topic_announce_interval = 60s
-# Topic refresh interval
-topic_refresh_interval = 5m
 
 [network]
-# Network timeouts and limits
-connection_timeout = 10s
-stream_read_timeout = 30s
-stream_write_timeout = 10s
-max_message_size = 1048576
+# Network buffer size
 buffer_size = 65536
 
 [log]
@@ -51,7 +43,6 @@ log_enable_rotation = true
 
 [misc]
 # Miscellaneous settings
-node_name = remote-network-node
 pid_path = ./remote-network.pid
 # Port for pprof profiling (0 = disabled)
 pprof_port = 6060
@@ -59,8 +50,6 @@ pprof_port = 6060
 [database]
 # Database configuration
 database_file = remote-network.db
-# Clean up old peer metadata after 24 hours
-metadata_cleanup_hours = 24
 # Clean up old relay sessions after 24 hours
 relay_session_cleanup_hours = 24
 
@@ -74,27 +63,23 @@ nat_default_filtering = address-port-dependent
 nat_port_prediction_samples = 3
 nat_port_prediction_max_diff = 10
 nat_hairpinning_timeout = 2s
-nat_detection_interval = 300s
 
 [relay]
 # Relay Service Configuration
 relay_mode = false
-relay_auto_select = true
 relay_max_connections = 100
 relay_connection_keepalive = 30s
 relay_keepalive_interval = 5s
-relay_discovery_interval = 60s
 relay_pricing_per_gb = 0.001
 relay_free_coordination = true
 relay_max_coordination_msg_size = 10240
 relay_batch_interval = 30s
 relay_traffic_batch_size = 100
-relay_max_circuit_age = 3600s
+relay_capacity = 1000
 
 # Relay Selection (for NAT peers)
 relay_max_latency = 500ms
 relay_min_reputation = 0.3
-relay_initial_reputation = 0.5
 relay_max_pricing = 0.01
 relay_switch_threshold = 0.2
 relay_evaluation_interval = 5m
@@ -102,18 +87,12 @@ relay_evaluation_interval = 5m
 [hole_punch]
 # Hole Punching / NAT Traversal Configuration
 hole_punch_enabled = true
-hole_punch_timeout = 10s
 hole_punch_stream_timeout = 60s
 hole_punch_direct_dial_timeout = 5s
-hole_punch_max_attempts = 3
-hole_punch_retry_interval = 200ms
 
 # LAN Detection
 hole_punch_lan_detection_enabled = true
 hole_punch_lan_subnet_mask = 24
-
-# Metrics
-hole_punch_metrics_enabled = true
 
 [dht]
 # DHT-Based Metadata Architecture (Phase 1-6)
@@ -121,17 +100,22 @@ hole_punch_metrics_enabled = true
 
 # Metadata republishing to DHT (BEP_44) - 60 minutes (1 hour) to keep DHT data fresh
 metadata_republish_interval_minutes = 60
+# BEP_44 item expiration in hours - how long DHT nodes keep stored items before deleting
+# Should be at least 2x the republish interval (default: 2 hours per BEP_44 spec)
+bep44_item_expiration_hours = 2
 
-[metadata_cache]
-# Metadata cache with TTL to reduce DHT query overhead
-# Cache TTL: 5 minutes (cache-first, then DHT)
-ttl_seconds = 300
-# Cleanup interval: 1 minute (remove expired entries)
-cleanup_interval = 60
+[metadata_retry]
+# Metadata retry scheduler configuration for failed metadata fetches
+# Max retry attempts before deleting peer from database
+metadata_fetch_retry_count = 5
+# Retry interval in seconds (default: 3 minutes)
+metadata_fetch_retry_interval = 180
+# Max age in seconds without metadata before deleting peer (default: 1 hour)
+metadata_fetch_max_age = 3600
 
 [peer_discovery]
 # On-demand peer discovery using DHT queries
-# Discovery interval: 30 seconds (how often to discover new peers)
-discovery_interval = 30
-# Limit known peers shared during identity exchange
-max_known_peers_to_share = 50
+# Periodic DHT discovery interval: 3 hours (how often to run full DHT rediscovery)
+periodic_discovery_interval_hours = 3
+# Periodic bootstrap re-query interval: 3 hours (how often to re-query bootstrap peers for updated peer lists)
+periodic_bootstrap_requery_interval_hours = 3

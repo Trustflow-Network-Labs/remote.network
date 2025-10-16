@@ -20,6 +20,7 @@ type RelayManager struct {
 	quicPeer          *QUICPeer
 	dhtPeer           *DHTPeer
 	metadataPublisher *MetadataPublisher
+	metadataFetcher   *MetadataFetcher
 
 	// Relay selection
 	selector *RelaySelector
@@ -43,7 +44,7 @@ type RelayManager struct {
 }
 
 // NewRelayManager creates a new relay manager for NAT peers
-func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher) *RelayManager {
+func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher, metadataFetcher *MetadataFetcher) *RelayManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	selector := NewRelaySelector(config, logger, dbManager, quicPeer)
@@ -55,6 +56,7 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 		quicPeer:          quicPeer,
 		dhtPeer:           dhtPeer,
 		metadataPublisher: metadataPublisher,
+		metadataFetcher:   metadataFetcher,
 		selector:          selector,
 		ctx:               ctx,
 		cancel:            cancel,
@@ -75,8 +77,15 @@ func (rm *RelayManager) Start() error {
 
 	// Perform initial relay selection
 	go func() {
-		// Wait a bit for peers to be discovered
+		// Wait a bit for peers to be discovered via identity exchange
 		time.Sleep(10 * time.Second)
+
+		// First, discover relay candidates from database
+		rm.logger.Info("Initial relay discovery: loading candidates from database...", "relay-manager")
+		candidatesFound := rm.rediscoverRelayCandidates()
+		rm.logger.Info(fmt.Sprintf("Initial relay discovery: found %d candidates", candidatesFound), "relay-manager")
+
+		// Then attempt to select and connect
 		if err := rm.SelectAndConnectRelay(); err != nil {
 			rm.logger.Error(fmt.Sprintf("Initial relay selection failed: %v", err), "relay-manager")
 		}
@@ -110,7 +119,8 @@ func (rm *RelayManager) AddRelayCandidate(metadata *database.PeerMetadata) error
 
 // SelectAndConnectRelay selects the best relay and establishes connection
 func (rm *RelayManager) SelectAndConnectRelay() error {
-	rm.logger.Info("Selecting best relay peer...", "relay-manager")
+	candidateCount := rm.selector.GetCandidateCount()
+	rm.logger.Info(fmt.Sprintf("🎯 Selecting best relay peer from %d candidates...", candidateCount), "relay-manager")
 
 	// Measure latency to all candidates
 	rm.selector.MeasureAllCandidates()
@@ -118,8 +128,12 @@ func (rm *RelayManager) SelectAndConnectRelay() error {
 	// Select best relay
 	bestRelay := rm.selector.SelectBestRelay()
 	if bestRelay == nil {
+		rm.logger.Warn(fmt.Sprintf("❌ No suitable relay found (had %d candidates)", candidateCount), "relay-manager")
 		return fmt.Errorf("no suitable relay found")
 	}
+
+	rm.logger.Info(fmt.Sprintf("🏆 Best relay selected: %s (endpoint: %s, latency: %v)",
+		bestRelay.NodeID, bestRelay.Endpoint, bestRelay.Latency), "relay-manager")
 
 	// Check if we should switch
 	rm.relayMutex.RLock()
@@ -486,14 +500,35 @@ func (rm *RelayManager) rediscoverRelayCandidates() int {
 
 		rm.logger.Debug(fmt.Sprintf("Found %d relay peers from known_peers for topic %s", len(relayPeers), topic), "relay-manager")
 
-		// Note: We can no longer directly add to relay selector here because AddCandidate expects *database.PeerMetadata
-		// The relay selector will need to be refactored to use MetadataFetcher to fetch metadata from DHT
-		// For now, just log that relay peers were found
+		// Fetch metadata from DHT and add to relay selector
 		for _, peer := range relayPeers {
 			rm.logger.Debug(fmt.Sprintf("Found relay peer: %s", peer.PeerID[:8]), "relay-manager")
-			addedCount++
+
+			// Fetch metadata from DHT
+			metadata, err := rm.metadataFetcher.GetPeerMetadata(peer.PublicKey)
+			if err != nil {
+				rm.logger.Debug(fmt.Sprintf("Failed to fetch metadata for relay %s: %v", peer.PeerID[:8], err), "relay-manager")
+				continue
+			}
+
+			// Verify it's actually a relay
+			rm.logger.Info(fmt.Sprintf("🔍 Checking relay metadata: peer=%s, is_relay=%v, relay_endpoint=%s, node_type=%s",
+				peer.PeerID[:8], metadata.NetworkInfo.IsRelay, metadata.NetworkInfo.RelayEndpoint, metadata.NetworkInfo.NodeType), "relay-manager")
+
+			if !metadata.NetworkInfo.IsRelay {
+				rm.logger.Warn(fmt.Sprintf("❌ Peer %s metadata shows is_relay=false - REJECTING", peer.PeerID[:8]), "relay-manager")
+				continue
+			}
+
+			// Add to relay selector
+			if err := rm.selector.AddCandidate(metadata); err != nil {
+				rm.logger.Debug(fmt.Sprintf("Failed to add relay candidate %s: %v", peer.PeerID[:8], err), "relay-manager")
+			} else {
+				addedCount++
+				rm.logger.Info(fmt.Sprintf("✅ Added relay candidate: %s (endpoint: %s, is_relay: true)",
+					peer.PeerID[:8], metadata.NetworkInfo.RelayEndpoint), "relay-manager")
+			}
 		}
-		// TODO: Refactor relay selector to fetch metadata from DHT instead of accepting PeerMetadata directly
 	}
 
 	if addedCount > 0 {

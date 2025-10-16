@@ -28,6 +28,10 @@ type MetadataPublisher struct {
 	stopChan          chan struct{}
 	republishRunning  bool
 	republishMutex    sync.Mutex
+
+	// Callback for NAT peer metadata publishing (called after relay connection)
+	onNATMetadataPublished func()
+	callbackMutex          sync.RWMutex
 }
 
 // NewMetadataPublisher creates a new metadata publisher
@@ -59,16 +63,34 @@ func (mp *MetadataPublisher) PublishMetadata(metadata *database.PeerMetadata) er
 	mp.currentMetadata = metadata
 	mp.currentSequence = 0 // Initial publish starts at sequence 0
 
-	mp.logger.Info(fmt.Sprintf("Publishing initial metadata to DHT (peer_id: %s, seq: %d)",
+	mp.logger.Info(fmt.Sprintf("Metadata publish starting: peer_id=%s, seq=%d",
 		mp.keyPair.PeerID(), mp.currentSequence), "metadata-publisher")
 
-	// Publish to DHT
-	err := mp.bep44Manager.PutMutable(mp.keyPair, metadata, mp.currentSequence)
+	// Get topic from config
+	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	topic := topics[0] // Use first topic
+
+	// Publish to DHT with store peer discovery
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadata, mp.currentSequence, mp.dbManager, topic)
 	if err != nil {
+		mp.logger.Error(fmt.Sprintf("Metadata publish FAILED: %v", err), "metadata-publisher")
 		return fmt.Errorf("failed to publish metadata to DHT: %v", err)
 	}
 
-	mp.logger.Info(fmt.Sprintf("Successfully published metadata to DHT (seq: %d)", mp.currentSequence), "metadata-publisher")
+	mp.logger.Info(fmt.Sprintf("Metadata publish SUCCESS (seq=%d)", mp.currentSequence), "metadata-publisher")
+
+	// Verify published metadata can be retrieved
+	mp.logger.Debug("Verifying published metadata retrieval...", "metadata-publisher")
+	time.Sleep(1 * time.Second) // Give DHT nodes time to process the PUT
+
+	retrievedMetadata, err := mp.bep44Manager.GetMutable(mp.keyPair.PublicKey)
+	if err != nil {
+		mp.logger.Error(fmt.Sprintf("Metadata publish VERIFICATION FAILED: Cannot retrieve just-published metadata: %v", err), "metadata-publisher")
+		// Don't fail the publish operation - metadata was sent, retrieval might work later
+	} else {
+		mp.logger.Info(fmt.Sprintf("Metadata publish VERIFICATION SUCCESS: Retrieved metadata seq=%d", retrievedMetadata.Sequence), "metadata-publisher")
+	}
+
 	return nil
 }
 
@@ -82,16 +104,33 @@ func (mp *MetadataPublisher) UpdateMetadata(metadata *database.PeerMetadata) err
 	mp.currentSequence++
 	mp.currentMetadata = metadata
 
-	mp.logger.Info(fmt.Sprintf("Updating metadata in DHT (peer_id: %s, seq: %d)",
+	mp.logger.Info(fmt.Sprintf("Metadata update starting: peer_id=%s, seq=%d",
 		mp.keyPair.PeerID(), mp.currentSequence), "metadata-publisher")
 
-	// Publish updated metadata to DHT
-	err := mp.bep44Manager.PutMutable(mp.keyPair, metadata, mp.currentSequence)
+	// Get topic from config
+	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	topic := topics[0]
+
+	// Publish updated metadata to DHT with store peer discovery
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadata, mp.currentSequence, mp.dbManager, topic)
 	if err != nil {
+		mp.logger.Error(fmt.Sprintf("Metadata update FAILED: %v", err), "metadata-publisher")
 		return fmt.Errorf("failed to update metadata in DHT: %v", err)
 	}
 
-	mp.logger.Info(fmt.Sprintf("Successfully updated metadata in DHT (seq: %d)", mp.currentSequence), "metadata-publisher")
+	mp.logger.Info(fmt.Sprintf("Metadata update SUCCESS (seq=%d)", mp.currentSequence), "metadata-publisher")
+
+	// Verify updated metadata can be retrieved
+	mp.logger.Debug("Verifying updated metadata retrieval...", "metadata-publisher")
+	time.Sleep(1 * time.Second) // Give DHT nodes time to process the PUT
+
+	retrievedMetadata, err := mp.bep44Manager.GetMutable(mp.keyPair.PublicKey)
+	if err != nil {
+		mp.logger.Error(fmt.Sprintf("Metadata update VERIFICATION FAILED: Cannot retrieve just-updated metadata: %v", err), "metadata-publisher")
+	} else {
+		mp.logger.Info(fmt.Sprintf("Metadata update VERIFICATION SUCCESS: Retrieved metadata seq=%d", retrievedMetadata.Sequence), "metadata-publisher")
+	}
+
 	return nil
 }
 
@@ -109,8 +148,12 @@ func (mp *MetadataPublisher) Republish() error {
 
 	mp.logger.Debug(fmt.Sprintf("Republishing metadata to DHT (seq: %d)", sequence), "metadata-publisher")
 
+	// Get topic from config
+	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	topic := topics[0]
+
 	// Republish with same sequence number (no changes, just keeping it alive)
-	err := mp.bep44Manager.PutMutable(mp.keyPair, metadata, sequence)
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadata, sequence, mp.dbManager, topic)
 	if err != nil {
 		return fmt.Errorf("failed to republish metadata: %v", err)
 	}
@@ -197,6 +240,27 @@ func (mp *MetadataPublisher) GetCurrentMetadata() *database.PeerMetadata {
 	return &metadataCopy
 }
 
+// SetInitialMetadata stores initial metadata without publishing to DHT
+// This is used for NAT peers that need to defer publishing until relay connection
+func (mp *MetadataPublisher) SetInitialMetadata(metadata *database.PeerMetadata) {
+	mp.metadataMutex.Lock()
+	defer mp.metadataMutex.Unlock()
+
+	mp.currentMetadata = metadata
+	mp.currentSequence = 0 // Will be used when NotifyRelayConnected publishes
+
+	mp.logger.Debug(fmt.Sprintf("Stored initial metadata for deferred publishing (peer_id: %s)",
+		mp.keyPair.PeerID()), "metadata-publisher")
+}
+
+// SetNATMetadataPublishedCallback sets a callback to be called after NAT peer metadata is published
+// This allows PeerManager to connect to known peers after metadata is available in DHT
+func (mp *MetadataPublisher) SetNATMetadataPublishedCallback(callback func()) {
+	mp.callbackMutex.Lock()
+	defer mp.callbackMutex.Unlock()
+	mp.onNATMetadataPublished = callback
+}
+
 // NotifyRelayConnected is a helper function to update metadata when relay connection is established
 // This is specifically for NAT peers that connect to a relay (Phase 3, Step 12)
 func (mp *MetadataPublisher) NotifyRelayConnected(relayNodeID, relaySessionID, relayAddress string) error {
@@ -220,7 +284,11 @@ func (mp *MetadataPublisher) NotifyRelayConnected(relayNodeID, relaySessionID, r
 	// Increment sequence and publish
 	mp.currentSequence++
 
-	err := mp.bep44Manager.PutMutable(mp.keyPair, mp.currentMetadata, mp.currentSequence)
+	// Get topic from config
+	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	topic := topics[0]
+
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.dbManager, topic)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata with relay info: %v", err)
 	}
@@ -232,6 +300,16 @@ func (mp *MetadataPublisher) NotifyRelayConnected(relayNodeID, relaySessionID, r
 	// Start periodic republishing if not already running
 	// This handles NAT nodes that deferred initial publishing until relay connection
 	go mp.StartPeriodicRepublish()
+
+	// Call NAT metadata published callback if set (allows PeerManager to connect to known peers)
+	mp.callbackMutex.RLock()
+	callback := mp.onNATMetadataPublished
+	mp.callbackMutex.RUnlock()
+
+	if callback != nil {
+		mp.logger.Debug("Calling NAT metadata published callback", "metadata-publisher")
+		go callback() // Call in goroutine to avoid blocking
+	}
 
 	return nil
 }
@@ -257,7 +335,11 @@ func (mp *MetadataPublisher) NotifyRelayDisconnected() error {
 	// Increment sequence and publish
 	mp.currentSequence++
 
-	err := mp.bep44Manager.PutMutable(mp.keyPair, mp.currentMetadata, mp.currentSequence)
+	// Get topic from config
+	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	topic := topics[0]
+
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.dbManager, topic)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata after relay disconnect: %v", err)
 	}
@@ -292,7 +374,11 @@ func (mp *MetadataPublisher) NotifyIPChange(newPublicIP, newPrivateIP string) er
 	// Increment sequence and publish
 	mp.currentSequence++
 
-	err := mp.bep44Manager.PutMutable(mp.keyPair, mp.currentMetadata, mp.currentSequence)
+	// Get topic from config
+	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	topic := topics[0]
+
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.dbManager, topic)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata with new IPs: %v", err)
 	}

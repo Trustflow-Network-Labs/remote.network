@@ -233,7 +233,7 @@ func (hp *HolePuncher) DirectConnect(peerID string) error {
 
 	// Step 2: Check if LAN peer (same public IP + subnet)
 	if hp.config.GetConfigBool("hole_punch_lan_detection_enabled", true) {
-		if hp.isLANPeer(metadata) {
+		if hp.IsLANPeer(metadata) {
 			hp.logger.Info(fmt.Sprintf("Detected LAN peer %s, attempting direct LAN dial", peerID), "hole-puncher")
 			hp.recordLANDetection()
 
@@ -339,8 +339,8 @@ func (hp *HolePuncher) hasDirectConnection(peerID string) bool {
 	return false
 }
 
-// isLANPeer checks if a peer is on the same local network
-func (hp *HolePuncher) isLANPeer(metadata *database.PeerMetadata) bool {
+// IsLANPeer checks if a peer is on the same local network (exported for use in peer connection logic)
+func (hp *HolePuncher) IsLANPeer(metadata *database.PeerMetadata) bool {
 	if hp.natDetector == nil {
 		return false
 	}

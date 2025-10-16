@@ -668,6 +668,7 @@ type IdentityExchangeData struct {
 	PublicKey []byte `json:"public_key"`  // Ed25519 public key - 32 bytes
 	NodeType  string `json:"node_type"`   // "public" or "private"
 	IsRelay   bool   `json:"is_relay"`    // Is this peer offering relay services?
+	IsStore   bool   `json:"is_store"`    // Has BEP_44 storage enabled?
 	Topic     string `json:"topic"`       // Topic this connection is for
 }
 
@@ -692,16 +693,18 @@ type KnownPeerEntry struct {
 	DHTNodeID string `json:"dht_node_id"` // DHT routing node_id
 	PublicKey []byte `json:"public_key"`  // Ed25519 public key
 	IsRelay   bool   `json:"is_relay"`    // Is this peer a relay?
+	IsStore   bool   `json:"is_store"`    // Has BEP_44 storage enabled?
 }
 
 // CreateIdentityExchange creates an identity exchange message
-func CreateIdentityExchange(peerID string, dhtNodeID string, publicKey []byte, nodeType string, isRelay bool, topic string) *QUICMessage {
+func CreateIdentityExchange(peerID string, dhtNodeID string, publicKey []byte, nodeType string, isRelay bool, isStore bool, topic string) *QUICMessage {
 	return NewQUICMessage(MessageTypeIdentityExchange, &IdentityExchangeData{
 		PeerID:    peerID,
 		DHTNodeID: dhtNodeID,
 		PublicKey: publicKey,
 		NodeType:  nodeType,
 		IsRelay:   isRelay,
+		IsStore:   isStore,
 		Topic:     topic,
 	})
 }

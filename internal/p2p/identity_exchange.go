@@ -20,6 +20,7 @@ type IdentityExchanger struct {
 	config        *utils.ConfigManager
 	ourNodeType   string // "public" or "private"
 	isRelay       bool   // Are we offering relay services?
+	isStore       bool   // Has BEP_44 storage enabled?
 }
 
 // NewIdentityExchanger creates a new identity exchanger
@@ -42,6 +43,10 @@ func NewIdentityExchanger(
 	// Check if we're offering relay services
 	isRelay := config.GetConfigBool("relay_mode", false)
 
+	// Check if we have BEP_44 storage enabled (default: true)
+	// Use same config key as dht.go to ensure consistency
+	isStore := config.GetConfigBool("enable_bep44_store", true)
+
 	return &IdentityExchanger{
 		keyPair:     keyPair,
 		dhtNodeID:   dhtNodeID,
@@ -50,6 +55,7 @@ func NewIdentityExchanger(
 		config:      config,
 		ourNodeType: nodeType,
 		isRelay:     isRelay,
+		isStore:     isStore,
 	}
 }
 
@@ -85,6 +91,7 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 		ie.keyPair.PublicKeyBytes(),
 		ie.ourNodeType,
 		ie.isRelay,
+		ie.isStore,
 		topic,
 	)
 
@@ -92,8 +99,8 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 		return nil, fmt.Errorf("failed to send our identity: %v", err)
 	}
 
-	ie.logger.Debug(fmt.Sprintf("Sent our identity (peer_id: %s, type: %s, relay: %v)",
-		ie.keyPair.PeerID()[:8], ie.ourNodeType, ie.isRelay), "identity-exchange")
+	ie.logger.Debug(fmt.Sprintf("Sent our identity (peer_id: %s, type: %s, relay: %v, store: %v)",
+		ie.keyPair.PeerID()[:8], ie.ourNodeType, ie.isRelay, ie.isStore), "identity-exchange")
 
 	// Receive remote identity
 	remoteMsg, err := ie.receiveMessage(stream, 5*time.Second) //nolint:copylocks
@@ -121,8 +128,14 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 		return nil, fmt.Errorf("identity validation failed: %v", err)
 	}
 
-	ie.logger.Debug(fmt.Sprintf("Received valid identity from peer %s (type: %s, relay: %v)",
-		remoteIdentity.PeerID[:8], remoteIdentity.NodeType, remoteIdentity.IsRelay), "identity-exchange")
+	ie.logger.Debug(fmt.Sprintf("Received valid identity from peer %s (type: %s, relay: %v, store: %v)",
+		remoteIdentity.PeerID[:8], remoteIdentity.NodeType, remoteIdentity.IsRelay, remoteIdentity.IsStore), "identity-exchange")
+
+	// Check if this is ourselves (shouldn't happen, but guard against it)
+	if remoteIdentity.PeerID == ie.keyPair.PeerID() {
+		ie.logger.Warn("Received our own identity from connection, skipping storage", "identity-exchange")
+		return nil, fmt.Errorf("received our own identity")
+	}
 
 	// Store in known_peers database
 	knownPeer := &database.KnownPeer{
@@ -130,6 +143,7 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 		DHTNodeID: remoteIdentity.DHTNodeID,
 		PublicKey: remoteIdentity.PublicKey,
 		IsRelay:   remoteIdentity.IsRelay,
+		IsStore:   remoteIdentity.IsStore,
 		Topic:     topic,
 		Source:    "identity_exchange",
 	}
@@ -138,7 +152,7 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 		return nil, fmt.Errorf("failed to store known peer: %v", err)
 	}
 
-	ie.logger.Info(fmt.Sprintf("Stored peer %s in known_peers database (relay: %v)", remoteIdentity.PeerID[:8], remoteIdentity.IsRelay), "identity-exchange")
+	ie.logger.Info(fmt.Sprintf("Stored peer %s in known_peers database (relay: %v, store: %v)", remoteIdentity.PeerID[:8], remoteIdentity.IsRelay, remoteIdentity.IsStore), "identity-exchange")
 
 	return knownPeer, nil
 }
@@ -226,6 +240,7 @@ func (ie *IdentityExchanger) selectPeersToShare(topic string, limit int, exclude
 			DHTNodeID: peer.DHTNodeID,
 			PublicKey: peer.PublicKey,
 			IsRelay:   peer.IsRelay,
+			IsStore:   peer.IsStore,
 		})
 
 		if len(entries) >= limit {
@@ -266,6 +281,7 @@ func (ie *IdentityExchanger) storeReceivedPeers(peers []*KnownPeerEntry, topic s
 			DHTNodeID: entry.DHTNodeID,
 			PublicKey: entry.PublicKey,
 			IsRelay:   entry.IsRelay,
+			IsStore:   entry.IsStore,
 			Topic:     topic,
 			Source:    "peer_exchange",
 		}
