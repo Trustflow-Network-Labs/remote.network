@@ -83,13 +83,14 @@ func (pv *PeerValidator) ValidateStalePeers(topic string) error {
 			continue
 		}
 
-		// Peer still exists in DHT - update last_seen timestamp
+		// Peer still exists in DHT - update last_seen timestamp and dht_node_id
 		validatedCount++
 		peer.LastSeen = time.Now()
+		peer.DHTNodeID = metadata.NodeID // Update DHT node ID from fresh metadata
 		if err := pv.dbManager.KnownPeers.StoreKnownPeer(peer); err != nil {
 			pv.logger.Warn(fmt.Sprintf("Failed to update validated peer %s: %v", peer.PeerID[:8], err), "peer-validator")
 		} else {
-			pv.logger.Debug(fmt.Sprintf("Validated peer %s (found in DHT, updated last_seen)", peer.PeerID[:8]), "peer-validator")
+			pv.logger.Debug(fmt.Sprintf("Validated peer %s (found in DHT, updated last_seen and dht_node_id)", peer.PeerID[:8]), "peer-validator")
 		}
 	}
 

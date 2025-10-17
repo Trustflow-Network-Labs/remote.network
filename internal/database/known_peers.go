@@ -103,11 +103,13 @@ func (kpm *KnownPeersManager) prepareStatements() error {
 	var err error
 
 	// Insert new peer only (never overwrite existing entries)
-	// If peer exists, only update last_seen timestamp via separate UpdateLastSeen call
+	// If peer exists, update dht_node_id, last_seen, and is_store
+	// Note: dht_node_id must be updated because it changes on peer restart
 	kpm.insertStmt, err = kpm.db.Prepare(`
 		INSERT INTO known_peers (peer_id, dht_node_id, public_key, is_relay, is_store, last_seen, topic, first_seen, source)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(peer_id, topic) DO UPDATE SET
+			dht_node_id = excluded.dht_node_id,
 			last_seen = excluded.last_seen,
 			is_store = excluded.is_store
 	`)
