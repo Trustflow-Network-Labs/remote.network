@@ -8,6 +8,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,6 +82,22 @@ func NewMonitoringServer(config *ConfigManager, logger *LogsManager) *Monitoring
 	}
 }
 
+// parsePortList parses a comma-separated list of ports
+func parsePortList(portList string) []string {
+	if portList == "" {
+		return []string{}
+	}
+	ports := strings.Split(portList, ",")
+	result := make([]string, 0, len(ports))
+	for _, port := range ports {
+		port = strings.TrimSpace(port)
+		if port != "" {
+			result = append(result, port)
+		}
+	}
+	return result
+}
+
 func (ms *MonitoringServer) Start() error {
 	// Get pprof port from config or use default
 	pprofPort := ms.config.GetConfigWithDefault("pprof_port", "6060")
@@ -88,8 +105,12 @@ func (ms *MonitoringServer) Start() error {
 
 	ms.logger.Info(fmt.Sprintf("Starting monitoring server on port %s", pprofPort), "monitoring")
 
-	// Try multiple ports with proper error handling
-	ports := []string{pprofPort, "6061", "6062"} // Fallback ports
+	// Get fallback ports from config
+	fallbackPortsStr := ms.config.GetConfigWithDefault("pprof_fallback_ports", "6061,6062")
+	fallbackPorts := parsePortList(fallbackPortsStr)
+
+	// Build ports list: primary port + fallbacks
+	ports := append([]string{pprofPort}, fallbackPorts...)
 	var err error
 
 	// Create custom mux for our endpoints

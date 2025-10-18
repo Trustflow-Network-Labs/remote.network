@@ -46,6 +46,14 @@ log_enable_rotation = true
 pid_path = ./remote-network.pid
 # Port for pprof profiling (0 = disabled)
 pprof_port = 6060
+# Fallback ports for pprof if primary is unavailable (comma-separated)
+pprof_fallback_ports = 6061,6062
+
+[api]
+# API Server Configuration
+api_port = 8080
+# Fallback ports for API server if primary is unavailable (comma-separated)
+api_fallback_ports = 8081,8082
 
 [database]
 # Database configuration

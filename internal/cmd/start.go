@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -47,6 +48,9 @@ This will:
 			os.Exit(1)
 		}
 		logger.Info(fmt.Sprintf("Monitoring server started on port %s", monitoringServer.GetPort()), "cli")
+
+		// Initialize API server for web UI (will start after peer manager)
+		var apiServer *api.APIServer
 
 		// Check if another instance is already running
 		if existingPID, err := pidManager.ReadPID(); err == nil {
@@ -106,6 +110,16 @@ This will:
 			logger.Info(fmt.Sprintf("Subscribed to topics: %v", topics), "cli")
 		}
 
+		// Start API server for web UI
+		apiServer = api.NewAPIServer(config, logger, peerManager, peerManager.GetDBManager())
+		if err := apiServer.Start(); err != nil {
+			logger.Warn(fmt.Sprintf("Failed to start API server: %v", err), "cli")
+			fmt.Println("⚠ Web UI unavailable - API server failed to start")
+		} else {
+			fmt.Printf("✓ Web UI available at http://localhost:%s\n", apiServer.GetPort())
+			logger.Info(fmt.Sprintf("API server started on port %s", apiServer.GetPort()), "cli")
+		}
+
 		fmt.Println("Remote Network Node is running. Press Ctrl+C to stop.")
 
 		// Setup signal handling for graceful shutdown
@@ -124,6 +138,13 @@ This will:
 			// Stop monitoring server
 			if err := monitoringServer.Stop(); err != nil {
 				logger.Error(fmt.Sprintf("Error stopping monitoring server: %v", err), "cli")
+			}
+
+			// Stop API server
+			if apiServer != nil {
+				if err := apiServer.Stop(); err != nil {
+					logger.Error(fmt.Sprintf("Error stopping API server: %v", err), "cli")
+				}
 			}
 
 			// Clean up PID file

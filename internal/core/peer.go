@@ -691,6 +691,11 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 	return stats
 }
 
+// GetDBManager returns the database manager instance
+func (pm *PeerManager) GetDBManager() *database.SQLiteManager {
+	return pm.dbManager
+}
+
 func (pm *PeerManager) Stop() error {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
