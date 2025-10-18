@@ -181,12 +181,13 @@ export async function loadPrivateKeyFromFile(file: File): Promise<string> {
             return
           }
 
-          // Not a valid binary size - try to decode as PEM text
+          // Not a valid binary size - try to decode as text
           try {
             // Decode ArrayBuffer as UTF-8 text
             const decoder = new TextDecoder('utf-8')
-            const text = decoder.decode(bytes)
+            const text = decoder.decode(bytes).trim()
 
+            // Check for PEM format
             if (text.includes('BEGIN PRIVATE KEY')) {
               const keyBytes = decodePEM(text)
 
@@ -203,18 +204,30 @@ export async function loadPrivateKeyFromFile(file: File): Promise<string> {
                 reject(new Error(`Unexpected PEM key size: ${keyBytes.length} bytes`))
                 return
               }
-            } else {
-              reject(
-                new Error(
-                  `Invalid key file: expected 32 or 64 bytes for binary format, or PEM format with BEGIN PRIVATE KEY header. Got ${bytes.length} bytes.`
-                )
-              )
+            }
+
+            // Check for hex string format (64 or 128 hex characters)
+            if (/^[0-9a-fA-F]{64}$/.test(text)) {
+              // 64 hex chars = 32 bytes (seed only)
+              resolve(text.toLowerCase())
+              return
+            } else if (/^[0-9a-fA-F]{128}$/.test(text)) {
+              // 128 hex chars = 64 bytes (full key)
+              resolve(text.toLowerCase())
               return
             }
-          } catch (pemError: any) {
+
+            // Not a recognized format
             reject(
               new Error(
-                `Failed to parse key file: not a valid binary key (${bytes.length} bytes) or PEM format`
+                `Invalid key file: expected 32 or 64 bytes for binary format, 64 or 128 hex characters for hex format, or PEM format with BEGIN PRIVATE KEY header. Got ${bytes.length} bytes.`
+              )
+            )
+            return
+          } catch (textError: any) {
+            reject(
+              new Error(
+                `Failed to parse key file: not a valid binary key (${bytes.length} bytes), hex format, or PEM format`
               )
             )
             return

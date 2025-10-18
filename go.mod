@@ -5,6 +5,7 @@ go 1.24.6
 require (
 	github.com/anacrolix/dht/v2 v2.23.0
 	github.com/anacrolix/torrent v1.48.1-0.20230103142631-c20f73d53e9f
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/quic-go/quic-go v0.54.1
 	github.com/sirupsen/logrus v1.9.3
@@ -27,7 +28,6 @@ require (
 	github.com/bradfitz/iter v0.0.0-20191230175014-e8f45d346db8 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/edsrzf/mmap-go v1.1.0 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/huandu/xstrings v1.3.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

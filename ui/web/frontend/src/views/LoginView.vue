@@ -40,8 +40,8 @@
     <div v-if="showEd25519Modal" class="modal">
       <div class="modal-content">
         <h2>Ed25519 Authentication</h2>
-        <p>Select your Ed25519 private key file (ed25519_private.key)</p>
-        <input type="file" @change="handleEd25519File" accept=".key" />
+        <p>Select your Ed25519 private key file (.key, .bin, .txt, .pem)</p>
+        <input type="file" @change="handleEd25519File" accept=".key,.bin,.txt,.pem" />
         <button @click="showEd25519Modal = false" class="close-button">Cancel</button>
       </div>
     </div>

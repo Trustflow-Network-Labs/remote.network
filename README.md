@@ -83,6 +83,26 @@ go build -o remote-network ./cmd/main.go
 go tool pprof http://localhost:6060/debug/pprof/heap
 ```
 
+### Key Management
+
+The node uses Ed25519 keys for identity and authentication. You can manage these keys using the CLI:
+
+```bash
+# View key information (peer ID, public key, file locations)
+./remote-network key info
+
+# Export private key for web UI authentication
+./remote-network key export --format binary
+
+# Export as hex format to custom location
+./remote-network key export --format hex --output /path/to/key.txt
+
+# Skip confirmation prompt (use with caution)
+./remote-network key export --force
+```
+
+**Security Note:** The private key grants full control over your node's identity. Never share it with untrusted parties. The exported key can be used to authenticate with the web UI at `http://localhost:8080`.
+
 ### Linux Server Configuration
 
 For optimal QUIC performance on Linux servers, configure UDP buffer sizes:

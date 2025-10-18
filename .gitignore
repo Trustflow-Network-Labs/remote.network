@@ -50,3 +50,4 @@
 **/local_storage/
 **/build/
 **/*.pid
+**/*.bin

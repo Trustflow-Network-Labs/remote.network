@@ -44,9 +44,9 @@ exchange messages with other peers interested in the same topics.`,
 		// Initialize logging
 		logger = utils.NewLogsManager(config)
 
-		// Skip peer manager initialization for stop command and its aliases
+		// Skip peer manager initialization for stop and key commands
 		cmdName := cmd.Name()
-		if cmdName == "stop" || cmdName == "stop-node" || cmdName == "kill" {
+		if cmdName == "stop" || cmdName == "stop-node" || cmdName == "kill" || cmdName == "key" || cmdName == "export" || cmdName == "info" {
 			return
 		}
 
