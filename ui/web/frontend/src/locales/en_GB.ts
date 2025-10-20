@@ -1,0 +1,139 @@
+export default {
+  message: {
+    common: {
+      save: 'Save',
+      cancel: 'Cancel',
+      delete: 'Delete',
+      edit: 'Edit',
+      add: 'Add',
+      remove: 'Remove',
+      close: 'Close',
+      confirm: 'Confirm',
+      success: 'Success',
+      error: 'Error',
+      warning: 'Warning',
+      info: 'Info',
+      loading: 'Loading...',
+      noData: 'No data available',
+      total: 'Total'
+    },
+    auth: {
+      login: 'Login',
+      logout: 'Logout',
+      authenticating: 'Authenticating...',
+      authenticationSuccess: 'Authentication successful',
+      authenticationFailed: 'Authentication failed',
+      welcome: 'Welcome to Remote Network',
+      selectPrivateKey: 'Select your Ed25519 private key file to authenticate',
+      chooseKeyFile: 'Choose Key File',
+      noFileSelected: 'No file selected',
+      authMethod: 'Authentication Method',
+      ed25519Auth: 'Ed25519 Key Authentication'
+    },
+    dashboard: {
+      title: 'Dashboard',
+      nodeStatus: 'Node Status',
+      peerId: 'Peer ID',
+      dhtNodeId: 'DHT Node ID',
+      wallet: 'Wallet',
+      provider: 'Provider',
+      uptime: 'Uptime',
+      knownPeers: 'Known Peers',
+      activeServices: 'Active Services',
+      recentWorkflows: 'Recent Workflows'
+    },
+    workflows: {
+      title: 'Workflows',
+      list: 'Workflow List',
+      create: 'Create Workflow',
+      edit: 'Edit Workflow',
+      delete: 'Delete Workflow',
+      execute: 'Execute Workflow',
+      name: 'Workflow Name',
+      description: 'Description',
+      deleteConfirm: 'Are you sure you want to delete this workflow?',
+      deleteSuccess: 'Workflow deleted successfully',
+      deleteError: 'Failed to delete workflow',
+      createSuccess: 'Workflow created successfully',
+      createError: 'Failed to create workflow',
+      updateSuccess: 'Workflow updated successfully',
+      updateError: 'Failed to update workflow',
+      editor: {
+        title: 'Workflow Editor',
+        snapToGrid: 'Snap to Grid',
+        searchServices: 'Search Services',
+        dragServiceHere: 'Drag services here to build your workflow',
+        noServiceSelected: 'No service selected',
+        addService: 'Add Service',
+        removeService: 'Remove Service'
+      }
+    },
+    services: {
+      title: 'Services',
+      list: 'Service List',
+      add: 'Add Service',
+      edit: 'Edit Service',
+      delete: 'Delete Service',
+      type: 'Service Type',
+      endpoint: 'Endpoint',
+      status: 'Status',
+      pricing: 'Pricing',
+      capabilities: 'Capabilities',
+      types: {
+        storage: 'File Storage',
+        docker: 'Docker Container',
+        standalone: 'Standalone App',
+        relay: 'Relay Service'
+      },
+      statuses: {
+        available: 'Available',
+        busy: 'Busy',
+        offline: 'Offline'
+      },
+      deleteConfirm: 'Are you sure you want to delete this service?',
+      deleteSuccess: 'Service deleted successfully',
+      deleteError: 'Failed to delete service',
+      addSuccess: 'Service added successfully',
+      addError: 'Failed to add service',
+      updateSuccess: 'Service updated successfully',
+      updateError: 'Failed to update service'
+    },
+    peers: {
+      title: 'Peers',
+      peerId: 'Peer ID',
+      isRelay: 'Relay',
+      isStore: 'Store',
+      lastSeen: 'Last Seen',
+      source: 'Source'
+    },
+    configuration: {
+      title: 'Configuration',
+      services: 'Services',
+      blacklist: 'Blacklist',
+      settings: 'Settings',
+      blacklistPeer: 'Blacklist Peer',
+      addToBlacklist: 'Add to Blacklist',
+      removeFromBlacklist: 'Remove from Blacklist',
+      blacklistConfirm: 'Are you sure you want to blacklist this peer?',
+      unblacklistConfirm: 'Are you sure you want to remove this peer from the blacklist?',
+      blacklistSuccess: 'Peer blacklisted successfully',
+      blacklistError: 'Failed to blacklist peer',
+      unblacklistSuccess: 'Peer removed from blacklist',
+      unblacklistError: 'Failed to remove peer from blacklist'
+    },
+    navigation: {
+      dashboard: 'Dashboard',
+      peers: 'Peers',
+      workflows: 'Workflows',
+      listWorkflows: 'List Workflows',
+      createWorkflow: 'Create Workflow',
+      configureNode: 'Configure Node',
+      blacklist: 'Blacklist',
+      services: 'Services',
+      restartPeer: 'Restart Peer',
+      logout: 'Logout',
+      restartSuccess: 'Node restart initiated. Logging out...',
+      restartFailed: 'Failed to restart node'
+    }
+  }
+}

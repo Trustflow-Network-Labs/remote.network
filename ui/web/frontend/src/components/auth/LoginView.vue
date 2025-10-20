@@ -1,23 +1,26 @@
 <template>
   <div class="login-container">
     <div class="login-box">
-      <h1>Remote Network</h1>
-      <p class="subtitle">Connect to your node</p>
+      <div class="logo-container">
+        <img class="logo" alt="Remote Network logo" src="../../assets/images/logo.png" />
+      </div>
+      <h1>{{ $t('message.auth.welcome') }}</h1>
+      <p class="subtitle">{{ $t('message.auth.selectPrivateKey') }}</p>
 
       <!-- Node Endpoint Selection -->
       <div class="node-endpoint">
-        <label for="endpoint">Node Endpoint:</label>
+        <label for="endpoint">{{ $t('message.auth.authMethod') }}:</label>
         <div class="endpoint-input-group">
           <input
             id="endpoint"
             v-model="nodeEndpoint"
             type="text"
-            placeholder="localhost:6060 or remote-ip:port"
+            placeholder="localhost:8080"
             @blur="updateEndpoint"
             :disabled="loading"
           />
           <button class="test-button" @click="testConnection" :disabled="loading || testing">
-            {{ testing ? 'Testing...' : 'Test' }}
+            {{ testing ? $t('message.common.loading') : 'Test' }}
           </button>
         </div>
         <p v-if="connectionStatus" :class="['connection-status', connectionStatus.type]">
@@ -28,21 +31,21 @@
       <div class="auth-methods">
         <button class="auth-button primary" @click="connectEd25519" :disabled="loading">
           <span class="icon">🔑</span>
-          <span>Sign with Private Key</span>
+          <span>{{ $t('message.auth.ed25519Auth') }}</span>
         </button>
       </div>
 
       <div v-if="error" class="error-message">{{ error }}</div>
-      <div v-if="loading" class="loading-message">Connecting...</div>
+      <div v-if="loading" class="loading-message">{{ $t('message.auth.authenticating') }}</div>
     </div>
 
     <!-- Ed25519 file upload modal -->
     <div v-if="showEd25519Modal" class="modal">
       <div class="modal-content">
-        <h2>Ed25519 Authentication</h2>
-        <p>Select your Ed25519 private key file (.key, .bin, .txt, .pem)</p>
+        <h2>{{ $t('message.auth.ed25519Auth') }}</h2>
+        <p>{{ $t('message.auth.chooseKeyFile') }}</p>
         <input type="file" @change="handleEd25519File" accept=".key,.bin,.txt,.pem" />
-        <button @click="showEd25519Modal = false" class="close-button">Cancel</button>
+        <button @click="showEd25519Modal = false" class="close-button">{{ $t('message.common.cancel') }}</button>
       </div>
     </div>
 
@@ -52,11 +55,13 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useAuthStore } from '../stores/auth'
-import { useConnectionStore } from '../stores/connection'
-import { authenticateEd25519, loadPrivateKeyFromFile } from '../services/auth/ed25519'
+import { useI18n } from 'vue-i18n'
+import { useAuthStore } from '../../stores/auth'
+import { useConnectionStore } from '../../stores/connection'
+import { authenticateEd25519, loadPrivateKeyFromFile } from '../../services/auth/ed25519'
 
 const router = useRouter()
+const { t } = useI18n()
 const authStore = useAuthStore()
 const connectionStore = useConnectionStore()
 
@@ -140,11 +145,11 @@ async function handleEd25519File(event: Event) {
       console.log('Redirected to dashboard')
     } else {
       console.error('Auth failed:', result.error)
-      error.value = result.error || 'Authentication failed'
+      error.value = result.error || t('message.auth.authenticationFailed')
     }
   } catch (err: any) {
     console.error('Exception during auth:', err)
-    error.value = err.message || 'Authentication failed'
+    error.value = err.message || t('message.auth.authenticationFailed')
   } finally {
     loading.value = false
     showEd25519Modal.value = false
@@ -153,32 +158,46 @@ async function handleEd25519File(event: Event) {
 
 </script>
 
-<style scoped>
+<style scoped lang="scss">
+@use '../../scss/variables' as vars;
+
 .login-container {
   display: flex;
   justify-content: center;
   align-items: center;
   min-height: 100vh;
-  background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+  background: linear-gradient(135deg, vars.$color-background 0%, rgb(35, 48, 68) 100%);
 }
 
 .login-box {
-  background: #16213e;
-  border-radius: 16px;
+  background: vars.$color-surface;
+  border-radius: vars.$border-radius-lg;
   padding: 48px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  box-shadow: vars.$shadow-lg;
   min-width: 400px;
+  border: 1px solid vars.$color-border;
+}
+
+.logo-container {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 24px;
+
+  .logo {
+    width: 120px;
+    height: auto;
+  }
 }
 
 h1 {
-  font-size: 32px;
-  color: #e94560;
+  font-size: vars.$font-size-xxl;
+  color: vars.$color-primary;
   margin-bottom: 8px;
   text-align: center;
 }
 
 .subtitle {
-  color: #a0a0a0;
+  color: vars.$color-text-secondary;
   text-align: center;
   margin-bottom: 32px;
 }
@@ -186,20 +205,20 @@ h1 {
 .auth-methods {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: vars.$spacing-md;
 }
 
 .auth-button {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 16px 24px;
+  padding: vars.$spacing-md vars.$spacing-lg;
   border: none;
-  border-radius: 8px;
-  font-size: 16px;
+  border-radius: vars.$border-radius-md;
+  font-size: vars.$font-size-md;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: vars.$transition-normal;
 }
 
 .auth-button:disabled {
@@ -208,32 +227,31 @@ h1 {
 }
 
 .auth-button.primary {
-  background: #e94560;
-  color: white;
+  background: vars.$color-primary;
+  color: vars.$color-text;
 }
 
 .auth-button.primary:hover:not(:disabled) {
-  background: #ff5575;
+  background: vars.$color-primary-hover;
 }
-
 
 .icon {
   font-size: 24px;
 }
 
 .error-message {
-  margin-top: 16px;
+  margin-top: vars.$spacing-md;
   padding: 12px;
-  background: #ff5252;
+  background: vars.$color-error;
   color: white;
-  border-radius: 8px;
+  border-radius: vars.$border-radius-md;
   text-align: center;
 }
 
 .loading-message {
-  margin-top: 16px;
+  margin-top: vars.$spacing-md;
   text-align: center;
-  color: #a0a0a0;
+  color: vars.$color-text-secondary;
 }
 
 .modal {
@@ -246,48 +264,51 @@ h1 {
   display: flex;
   justify-content: center;
   align-items: center;
+  z-index: vars.$z-index-modal;
 }
 
 .modal-content {
-  background: #16213e;
+  background: vars.$color-surface;
   padding: 32px;
-  border-radius: 16px;
+  border-radius: vars.$border-radius-lg;
   min-width: 300px;
+  border: 1px solid vars.$color-border;
 }
 
 .modal-content h2 {
-  color: #e94560;
-  margin-bottom: 16px;
+  color: vars.$color-primary;
+  margin-bottom: vars.$spacing-md;
 }
 
 .modal-content p {
-  color: #a0a0a0;
+  color: vars.$color-text-secondary;
   margin-bottom: 20px;
 }
 
 .modal-content input[type="file"] {
   width: 100%;
   padding: 12px;
-  margin-bottom: 16px;
-  background: #0f3460;
-  border: 1px solid #1a4d7f;
-  border-radius: 8px;
-  color: white;
+  margin-bottom: vars.$spacing-md;
+  background: vars.$color-background;
+  border: 1px solid vars.$color-border;
+  border-radius: vars.$border-radius-md;
+  color: vars.$color-text;
 }
 
 .modal-content button {
   width: 100%;
   padding: 12px;
-  background: #e94560;
-  color: white;
+  background: vars.$color-primary;
+  color: vars.$color-text;
   border: none;
-  border-radius: 8px;
+  border-radius: vars.$border-radius-md;
   cursor: pointer;
-  font-size: 16px;
+  font-size: vars.$font-size-md;
+  transition: vars.$transition-normal;
 }
 
 .modal-content button:hover {
-  background: #ff5575;
+  background: vars.$color-primary-hover;
 }
 
 .node-endpoint {
@@ -296,29 +317,29 @@ h1 {
 
 .node-endpoint label {
   display: block;
-  color: #a0a0a0;
-  margin-bottom: 8px;
-  font-size: 14px;
+  color: vars.$color-text-secondary;
+  margin-bottom: vars.$spacing-sm;
+  font-size: vars.$font-size-sm;
 }
 
 .endpoint-input-group {
   display: flex;
-  gap: 8px;
+  gap: vars.$spacing-sm;
 }
 
 .endpoint-input-group input {
   flex: 1;
   padding: 12px 16px;
-  background: #0f3460;
-  border: 1px solid #1a4d7f;
-  border-radius: 8px;
-  color: white;
-  font-size: 14px;
+  background: vars.$color-background;
+  border: 1px solid vars.$color-border;
+  border-radius: vars.$border-radius-md;
+  color: vars.$color-text;
+  font-size: vars.$font-size-sm;
 }
 
 .endpoint-input-group input:focus {
   outline: none;
-  border-color: #e94560;
+  border-color: vars.$color-primary;
 }
 
 .endpoint-input-group input:disabled {
@@ -328,17 +349,18 @@ h1 {
 
 .test-button {
   padding: 12px 24px;
-  background: #0f3460;
-  border: 1px solid #1a4d7f;
-  border-radius: 8px;
-  color: white;
+  background: vars.$color-background;
+  border: 1px solid vars.$color-border;
+  border-radius: vars.$border-radius-md;
+  color: vars.$color-text;
   cursor: pointer;
-  font-size: 14px;
-  transition: all 0.3s ease;
+  font-size: vars.$font-size-sm;
+  transition: vars.$transition-normal;
 }
 
 .test-button:hover:not(:disabled) {
-  background: #1a5a8f;
+  background: vars.$color-secondary;
+  border-color: vars.$color-primary;
 }
 
 .test-button:disabled {
@@ -347,19 +369,19 @@ h1 {
 }
 
 .connection-status {
-  margin-top: 8px;
-  padding: 8px 12px;
-  border-radius: 4px;
-  font-size: 14px;
+  margin-top: vars.$spacing-sm;
+  padding: vars.$spacing-sm 12px;
+  border-radius: vars.$border-radius-sm;
+  font-size: vars.$font-size-sm;
 }
 
 .connection-status.success {
   background: rgba(76, 175, 80, 0.2);
-  color: #4caf50;
+  color: vars.$color-success;
 }
 
 .connection-status.error {
   background: rgba(244, 67, 54, 0.2);
-  color: #f44336;
+  color: vars.$color-error;
 }
 </style>

@@ -10,13 +10,20 @@
   },
   "dependencies": {
     "@noble/curves": "^2.0.1",
+    "@primeuix/themes": "^1.1.1",
     "axios": "^1.7.9",
+    "leader-line-new": "^1.1.9",
     "pinia": "^2.3.0",
+    "plain-draggable": "^2.5.15",
+    "primeicons": "^7.0.0",
+    "primevue": "^4.3.4",
     "vue": "^3.5.13",
+    "vue-i18n": "^11.1.5",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
+    "sass": "^1.89.0",
     "typescript": "~5.6.3",
     "vite": "^6.0.7",
     "vue-tsc": "^2.2.0"

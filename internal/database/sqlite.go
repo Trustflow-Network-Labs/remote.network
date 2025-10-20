@@ -18,6 +18,7 @@ type SQLiteManager struct {
 	dir string
 	cm  *utils.ConfigManager
 	db  *sql.DB
+	logger *utils.LogsManager
 
 	// Specialized managers
 	Relay         *RelayDB
@@ -30,6 +31,7 @@ func NewSQLiteManager(cm *utils.ConfigManager) (*SQLiteManager, error) {
 	sqlm := &SQLiteManager{
 		dir: paths.DataDir,
 		cm:  cm,
+		logger: utils.NewLogsManager(cm),
 	}
 
 	// Create database connection
@@ -42,6 +44,21 @@ func NewSQLiteManager(cm *utils.ConfigManager) (*SQLiteManager, error) {
 	// Initialize specialized managers
 	if err := sqlm.initializeManagers(); err != nil {
 		return nil, fmt.Errorf("failed to initialize database managers: %v", err)
+	}
+
+	// Initialize services table
+	if err := sqlm.InitServicesTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize services table: %v", err)
+	}
+
+	// Initialize blacklist table
+	if err := sqlm.InitBlacklistTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize blacklist table: %v", err)
+	}
+
+	// Initialize workflows table
+	if err := sqlm.InitWorkflowsTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize workflows table: %v", err)
 	}
 
 	return sqlm, nil

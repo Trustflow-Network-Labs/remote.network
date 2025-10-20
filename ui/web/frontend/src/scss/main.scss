@@ -1,0 +1,288 @@
+@use 'sass:color';
+@use './variables' as vars;
+@use './mixins' as *;
+
+// Global reset and base styles
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family: vars.$font-family-base;
+  background: vars.$color-background;
+  color: vars.$color-text;
+  font-size: vars.$font-size-md;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  min-height: 100vh;
+  width: 100%;
+}
+
+// Dark mode class
+.dark-mode {
+  // Already using dark theme by default
+}
+
+// Utility classes
+.text-primary {
+  color: vars.$color-primary;
+}
+
+.text-secondary {
+  color: vars.$color-text-secondary;
+}
+
+.text-success {
+  color: vars.$color-success;
+}
+
+.text-warning {
+  color: vars.$color-warning;
+}
+
+.text-error {
+  color: vars.$color-error;
+}
+
+.mt-1 { margin-top: vars.$spacing-sm; }
+.mt-2 { margin-top: vars.$spacing-md; }
+.mt-3 { margin-top: vars.$spacing-lg; }
+.mt-4 { margin-top: vars.$spacing-xl; }
+
+.mb-1 { margin-bottom: vars.$spacing-sm; }
+.mb-2 { margin-bottom: vars.$spacing-md; }
+.mb-3 { margin-bottom: vars.$spacing-lg; }
+.mb-4 { margin-bottom: vars.$spacing-xl; }
+
+.ml-1 { margin-left: vars.$spacing-sm; }
+.ml-2 { margin-left: vars.$spacing-md; }
+.ml-3 { margin-left: vars.$spacing-lg; }
+
+.mr-1 { margin-right: vars.$spacing-sm; }
+.mr-2 { margin-right: vars.$spacing-md; }
+.mr-3 { margin-right: vars.$spacing-lg; }
+
+.p-1 { padding: vars.$spacing-sm; }
+.p-2 { padding: vars.$spacing-md; }
+.p-3 { padding: vars.$spacing-lg; }
+.p-4 { padding: vars.$spacing-xl; }
+
+// Card component
+.card {
+  @include card;
+}
+
+// Button styles
+.btn {
+  @include button-base;
+}
+
+.btn-primary {
+  @include button-primary;
+}
+
+.btn-secondary {
+  @include button-secondary;
+}
+
+// Custom scrollbar for the app
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(vars.$color-surface, 0.5);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(vars.$color-primary, 0.5);
+  border-radius: 4px;
+
+  &:hover {
+    background: rgba(vars.$color-primary, 0.7);
+  }
+}
+
+// Override PrimeVue theme colors to match our palette
+:root {
+  // Primary colors
+  --p-primary-color: #{vars.$color-primary};
+  --p-primary-contrast-color: #{vars.$color-text};
+
+  // Surface colors (backgrounds)
+  --p-surface-0: #{vars.$color-background};
+  --p-surface-50: #{vars.$color-card};
+  --p-surface-100: #{color.adjust(vars.$color-card, $lightness: 5%)};
+  --p-surface-200: #{color.adjust(vars.$color-card, $lightness: 10%)};
+  --p-surface-ground: #{vars.$color-background};
+  --p-surface-section: #{vars.$color-card};
+  --p-surface-card: #{vars.$color-card};
+
+  // Text colors
+  --p-text-color: #{vars.$color-text};
+  --p-text-muted-color: #{vars.$color-text-secondary};
+  --p-text-hover-muted-color: #{vars.$color-text};
+
+  // Border colors
+  --p-surface-border: #{vars.$color-border};
+  --p-content-border-color: #{vars.$color-border};
+
+  // Component specific
+  --p-content-background: #{vars.$color-card};
+  --p-content-hover-background: #{color.adjust(vars.$color-card, $lightness: 5%)};
+
+  // Card specific
+  --p-card-background: #{vars.$color-card};
+  --p-card-color: #{vars.$color-text};
+  --p-card-border-radius: #{vars.$border-radius-md};
+  --p-card-shadow: #{vars.$shadow-sm};
+
+  // DataTable specific
+  --p-datatable-background: #{vars.$color-card};
+  --p-datatable-header-background: #{vars.$color-card};
+  --p-datatable-header-color: #{vars.$color-text};
+  --p-datatable-header-border-color: #{vars.$color-border};
+  --p-datatable-row-background: #{vars.$color-card};
+  --p-datatable-row-color: #{vars.$color-text};
+  --p-datatable-row-hover-background: #{color.adjust(vars.$color-card, $lightness: 5%)};
+  --p-datatable-border-color: #{vars.$color-border};
+
+  // TabView specific
+  --p-tabview-nav-background: #{vars.$color-surface};
+  --p-tabview-nav-border-color: #{vars.$color-border};
+  --p-tabview-nav-link-color: #{vars.$color-text-secondary};
+  --p-tabview-nav-link-hover-color: #{vars.$color-text};
+  --p-tabview-nav-link-active-color: #{vars.$color-primary};
+  --p-tabview-panel-background: #{vars.$color-card};
+  --p-tabview-panel-color: #{vars.$color-text};
+}
+
+// Global PrimeVue component overrides
+.p-card {
+  background: vars.$color-card !important;
+  border: 1px solid vars.$color-border !important;
+  color: vars.$color-text !important;
+
+  .p-card-title {
+    color: vars.$color-text !important;
+  }
+
+  .p-card-content {
+    color: vars.$color-text !important;
+  }
+
+  .p-card-body {
+    color: vars.$color-text !important;
+  }
+}
+
+.p-datatable {
+  background: vars.$color-card !important;
+  color: vars.$color-text !important;
+
+  .p-datatable-header {
+    background: vars.$color-card !important;
+    border-color: vars.$color-border !important;
+    color: vars.$color-text !important;
+  }
+
+  .p-datatable-thead > tr > th {
+    background: vars.$color-surface !important;
+    border-color: vars.$color-border !important;
+    color: vars.$color-text !important;
+  }
+
+  .p-datatable-tbody > tr {
+    background: vars.$color-card !important;
+    color: vars.$color-text !important;
+
+    &:hover {
+      background: color.adjust(vars.$color-card, $lightness: 5%) !important;
+    }
+  }
+
+  .p-datatable-tbody > tr > td {
+    border-color: vars.$color-border !important;
+    color: vars.$color-text !important;
+  }
+}
+
+.p-tabview {
+  .p-tabview-nav {
+    background: vars.$color-surface !important;
+    border-color: vars.$color-border !important;
+
+    .p-tabview-nav-link {
+      color: vars.$color-text-secondary !important;
+
+      &:hover {
+        color: vars.$color-text !important;
+      }
+    }
+
+    .p-highlight .p-tabview-nav-link {
+      color: vars.$color-primary !important;
+      border-color: vars.$color-primary !important;
+    }
+  }
+
+  .p-tabview-panels {
+    background: vars.$color-card !important;
+    color: vars.$color-text !important;
+  }
+}
+
+// Dialog overrides
+.p-dialog {
+  background: vars.$color-card !important;
+  color: vars.$color-text !important;
+  border: 1px solid vars.$color-border !important;
+
+  .p-dialog-header {
+    background: vars.$color-surface !important;
+    color: vars.$color-text !important;
+    border-bottom: 1px solid vars.$color-border !important;
+  }
+
+  .p-dialog-content {
+    background: vars.$color-card !important;
+    color: vars.$color-text !important;
+  }
+
+  .p-dialog-footer {
+    background: vars.$color-surface !important;
+    border-top: 1px solid vars.$color-border !important;
+  }
+}
+
+// Input overrides
+.p-inputtext,
+.p-dropdown,
+.p-inputnumber-input,
+.p-textarea {
+  background: vars.$color-surface !important;
+  color: vars.$color-text !important;
+  border-color: vars.$color-border !important;
+
+  &:enabled:hover {
+    border-color: vars.$color-primary !important;
+  }
+
+  &:enabled:focus {
+    border-color: vars.$color-primary !important;
+    box-shadow: 0 0 0 0.2rem rgba(vars.$color-primary, 0.25) !important;
+  }
+}

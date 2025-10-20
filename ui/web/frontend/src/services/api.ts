@@ -99,10 +99,160 @@ class APIClient {
   }
 
   /**
+   * Restart the node
+   */
+  async restartNode() {
+    const response = await this.client.post('/api/node/restart')
+    return response.data
+  }
+
+  /**
    * Get list of known peers
    */
   async getPeers() {
     const response = await this.client.get('/api/peers')
+    return response.data
+  }
+
+  // ===== Services API =====
+
+  /**
+   * Get all services
+   */
+  async getServices() {
+    const response = await this.client.get('/api/services')
+    return response.data
+  }
+
+  /**
+   * Get service by ID
+   */
+  async getService(id: number) {
+    const response = await this.client.get(`/api/services/${id}`)
+    return response.data
+  }
+
+  /**
+   * Add a new service
+   */
+  async addService(service: any) {
+    const response = await this.client.post('/api/services', service)
+    return response.data
+  }
+
+  /**
+   * Update a service
+   */
+  async updateService(id: number, service: any) {
+    const response = await this.client.put(`/api/services/${id}`, service)
+    return response.data
+  }
+
+  /**
+   * Delete a service
+   */
+  async deleteService(id: number) {
+    const response = await this.client.delete(`/api/services/${id}`)
+    return response.data
+  }
+
+  // ===== Blacklist API =====
+
+  /**
+   * Get blacklist
+   */
+  async getBlacklist() {
+    const response = await this.client.get('/api/blacklist')
+    return response.data
+  }
+
+  /**
+   * Add peer to blacklist
+   */
+  async addToBlacklist(peerId: string) {
+    const response = await this.client.post('/api/blacklist', { peer_id: peerId })
+    return response.data
+  }
+
+  /**
+   * Remove peer from blacklist
+   */
+  async removeFromBlacklist(peerId: string) {
+    const response = await this.client.delete(`/api/blacklist/${peerId}`)
+    return response.data
+  }
+
+  // ===== Workflows API =====
+
+  /**
+   * Get all workflows
+   */
+  async getWorkflows() {
+    const response = await this.client.get('/api/workflows')
+    return response.data
+  }
+
+  /**
+   * Get workflow by ID with jobs
+   */
+  async getWorkflow(id: number) {
+    const response = await this.client.get(`/api/workflows/${id}`)
+    return response.data
+  }
+
+  /**
+   * Create a new workflow
+   */
+  async createWorkflow(workflow: { name: string; description: string }) {
+    const response = await this.client.post('/api/workflows', workflow)
+    return response.data
+  }
+
+  /**
+   * Update workflow metadata
+   */
+  async updateWorkflow(id: number, updates: any) {
+    const response = await this.client.put(`/api/workflows/${id}`, updates)
+    return response.data
+  }
+
+  /**
+   * Delete workflow
+   */
+  async deleteWorkflow(id: number) {
+    const response = await this.client.delete(`/api/workflows/${id}`)
+    return response.data
+  }
+
+  /**
+   * Add job to workflow
+   */
+  async addWorkflowJob(workflowId: number, job: any) {
+    const response = await this.client.post(`/api/workflows/${workflowId}/jobs`, job)
+    return response.data
+  }
+
+  /**
+   * Remove job from workflow
+   */
+  async removeWorkflowJob(workflowId: number, jobId: number) {
+    const response = await this.client.delete(`/api/workflows/${workflowId}/jobs/${jobId}`)
+    return response.data
+  }
+
+  /**
+   * Update job GUI properties (position)
+   */
+  async updateJobGUIProps(workflowId: number, jobId: number, props: { x: number; y: number }) {
+    const response = await this.client.put(`/api/workflows/${workflowId}/jobs/${jobId}/gui-props`, props)
+    return response.data
+  }
+
+  /**
+   * Execute workflow
+   */
+  async executeWorkflow(id: number) {
+    const response = await this.client.post(`/api/workflows/${id}/execute`)
     return response.data
   }
 }

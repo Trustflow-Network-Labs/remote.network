@@ -169,9 +169,85 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 
 	// Node routes
 	mux.HandleFunc("/api/node/status", s.handleNodeStatus)
+	mux.HandleFunc("/api/node/restart", s.handleNodeRestart)
 
 	// Peer routes
 	mux.HandleFunc("/api/peers", s.handlePeers)
+
+	// Services routes
+	mux.HandleFunc("/api/services", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.handleGetServices(w, r)
+		} else if r.Method == http.MethodPost {
+			s.handleAddService(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/services/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.handleGetService(w, r)
+		} else if r.Method == http.MethodPut {
+			s.handleUpdateService(w, r)
+		} else if r.Method == http.MethodDelete {
+			s.handleDeleteService(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// Blacklist routes
+	mux.HandleFunc("/api/blacklist", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.handleGetBlacklist(w, r)
+		} else if r.Method == http.MethodPost {
+			s.handleAddToBlacklist(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/blacklist/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			s.handleRemoveFromBlacklist(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/blacklist/check", s.handleCheckBlacklist)
+
+	// Workflows routes
+	mux.HandleFunc("/api/workflows", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.handleGetWorkflows(w, r)
+		} else if r.Method == http.MethodPost {
+			s.handleCreateWorkflow(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/workflows/", func(w http.ResponseWriter, r *http.Request) {
+		// Check if it's an execute request
+		if strings.HasSuffix(r.URL.Path, "/execute") {
+			s.handleExecuteWorkflow(w, r)
+			return
+		}
+		// Check if it's a jobs request
+		if strings.HasSuffix(r.URL.Path, "/jobs") {
+			s.handleGetWorkflowJobs(w, r)
+			return
+		}
+
+		// Otherwise, handle as CRUD operations
+		if r.Method == http.MethodGet {
+			s.handleGetWorkflow(w, r)
+		} else if r.Method == http.MethodPut {
+			s.handleUpdateWorkflow(w, r)
+		} else if r.Method == http.MethodDelete {
+			s.handleDeleteWorkflow(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 
 	// WebSocket endpoint (to be implemented)
 	// mux.HandleFunc("/api/ws", s.handleWebSocket)

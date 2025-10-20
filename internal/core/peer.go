@@ -28,6 +28,7 @@ type TopicState struct {
 type PeerManager struct {
 	config                *utils.ConfigManager
 	logger                *utils.LogsManager
+	keyPair               *crypto.KeyPair
 	dht                   *p2p.DHTPeer
 	quic                  *p2p.QUICPeer
 	relayPeer             *p2p.RelayPeer
@@ -160,6 +161,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 	pm := &PeerManager{
 		config:                  config,
 		logger:                  logger,
+		keyPair:                 keyPair,
 		dht:                     dht,
 		quic:                    quic,
 		relayPeer:               relayPeer,
@@ -634,10 +636,13 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 	pm.mutex.RLock()
 	defer pm.mutex.RUnlock()
 
+	nodeID := pm.dht.NodeID()
+	peerID := pm.keyPair.PeerID() // Persistent peer ID derived from Ed25519 public key
 	stats := map[string]interface{}{
 		"running":          pm.running,
 		"dht_stats":        pm.dht.GetStats(),
-		"dht_node_id":      pm.dht.NodeID(),
+		"dht_node_id":      nodeID,      // DHT node ID (changes on restart)
+		"peer_id":          peerID,      // Persistent peer ID (based on Ed25519 keypair)
 		"quic_connections": pm.quic.GetConnectionCount(),
 		"topics":           make(map[string]interface{}),
 	}

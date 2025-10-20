@@ -10,18 +10,24 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/login',
     name: 'Login',
-    component: () => import('../views/LoginView.vue')
+    component: () => import('../components/auth/LoginView.vue')
   },
   {
     path: '/dashboard',
     name: 'Dashboard',
-    component: () => import('../views/DashboardView.vue'),
+    component: () => import('../components/dashboard/DashboardView.vue'),
     meta: { requiresAuth: true }
   },
   {
     path: '/peers',
     name: 'Peers',
-    component: () => import('../views/PeersView.vue'),
+    component: () => import('../components/peers/PeersView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/configuration',
+    name: 'Configuration',
+    component: () => import('../components/configuration/ConfigurationView.vue'),
     meta: { requiresAuth: true }
   }
 ]

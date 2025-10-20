@@ -1,0 +1,102 @@
+@use './variables' as vars;
+
+// Card mixin
+@mixin card {
+  background: vars.$color-surface;
+  border-radius: vars.$border-radius-lg;
+  padding: vars.$spacing-lg;
+  box-shadow: vars.$shadow-md;
+}
+
+// Flex center mixin
+@mixin flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+// Flex column mixin
+@mixin flex-column {
+  display: flex;
+  flex-direction: column;
+}
+
+// Button mixin
+@mixin button-base {
+  padding: 12px 24px;
+  border: none;
+  border-radius: vars.$border-radius-md;
+  cursor: pointer;
+  font-size: vars.$font-size-sm;
+  font-weight: 500;
+  transition: all vars.$transition-normal;
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+@mixin button-primary {
+  @include button-base;
+  background: vars.$color-primary;
+  color: vars.$color-text;
+
+  &:hover:not(:disabled) {
+    background: vars.$color-primary-hover;
+  }
+}
+
+@mixin button-secondary {
+  @include button-base;
+  background: transparent;
+  color: vars.$color-text;
+  border: 1px solid vars.$color-border;
+
+  &:hover:not(:disabled) {
+    background: rgba(vars.$color-primary, 0.1);
+    border-color: vars.$color-primary;
+  }
+}
+
+// Scrollbar mixin
+@mixin custom-scrollbar {
+  &::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: rgba(vars.$color-surface, 0.5);
+    border-radius: 4px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: rgba(vars.$color-primary, 0.5);
+    border-radius: 4px;
+
+    &:hover {
+      background: rgba(vars.$color-primary, 0.7);
+    }
+  }
+}
+
+// Truncate text
+@mixin truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// Responsive breakpoints
+@mixin responsive($breakpoint) {
+  @if $breakpoint == mobile {
+    @media (max-width: 768px) { @content; }
+  }
+  @else if $breakpoint == tablet {
+    @media (min-width: 769px) and (max-width: 1024px) { @content; }
+  }
+  @else if $breakpoint == desktop {
+    @media (min-width: 1025px) { @content; }
+  }
+}
