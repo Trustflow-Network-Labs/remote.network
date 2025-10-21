@@ -638,11 +638,13 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 
 	nodeID := pm.dht.NodeID()
 	peerID := pm.keyPair.PeerID() // Persistent peer ID derived from Ed25519 public key
+	quicPort := pm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
 	stats := map[string]interface{}{
 		"running":          pm.running,
 		"dht_stats":        pm.dht.GetStats(),
 		"dht_node_id":      nodeID,      // DHT node ID (changes on restart)
 		"peer_id":          peerID,      // Persistent peer ID (based on Ed25519 keypair)
+		"quic_port":        quicPort,    // Configured QUIC port (for private endpoint)
 		"quic_connections": pm.quic.GetConnectionCount(),
 		"topics":           make(map[string]interface{}),
 	}

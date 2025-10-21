@@ -9,15 +9,6 @@
     </nav>
 
     <div class="sidebar-footer">
-      <button
-        class="action-btn restart-btn"
-        :class="{ disabled: restarting }"
-        :disabled="restarting"
-        @click="restartPeer"
-      >
-        <i :class="restarting ? 'pi pi-spin pi-spinner' : 'pi pi-refresh'"></i>
-        {{ restarting ? $t('message.common.loading') : $t('message.navigation.restartPeer') }}
-      </button>
       <button class="action-btn logout-btn" @click="logout">
         <i class="pi pi-sign-out"></i>
         {{ $t('message.auth.logout') }}
@@ -27,22 +18,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { useToast } from 'primevue/usetoast'
 import PanelMenu from 'primevue/panelmenu'
 import { useAuthStore } from '../../stores/auth'
 import { useUIStore } from '../../stores/ui'
-import { api } from '../../services/api'
 
 const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
-const toast = useToast()
 const authStore = useAuthStore()
 const uiStore = useUIStore()
-const restarting = ref(false)
 
 const menuItems = computed(() => {
   const currentPath = route.path
@@ -109,48 +96,6 @@ const menuItems = computed(() => {
   ]
 })
 
-async function restartPeer() {
-  if (restarting.value) return
-
-  restarting.value = true
-
-  try {
-    const result = await api.restartNode()
-
-    if (result.success) {
-      toast.add({
-        severity: 'success',
-        summary: t('message.common.success'),
-        detail: result.message || t('message.navigation.restartSuccess'),
-        life: 3000
-      })
-
-      // Logout after showing the message to avoid connection errors
-      setTimeout(() => {
-        authStore.clearAuth()
-        router.push('/login')
-      }, 1500)
-    } else {
-      toast.add({
-        severity: 'error',
-        summary: t('message.common.error'),
-        detail: result.error || t('message.navigation.restartFailed'),
-        life: 5000
-      })
-      restarting.value = false
-    }
-  } catch (error: any) {
-    console.error('Failed to restart peer:', error)
-    toast.add({
-      severity: 'error',
-      summary: t('message.common.error'),
-      detail: error.response?.data?.error || error.message || t('message.navigation.restartFailed'),
-      life: 5000
-    })
-    restarting.value = false
-  }
-}
-
 function logout() {
   authStore.clearAuth()
   router.push('/login')
@@ -199,6 +144,25 @@ function logout() {
   :deep(.p-panelmenu-item-content:hover .p-panelmenu-submenu-icon) {
     color: rgba(240, 240, 240, 1) !important;
   }
+
+  // Menu item text handling for narrow sidebars
+  :deep(.p-panelmenu-item-content),
+  :deep(.p-panelmenu-header-content) {
+    white-space: nowrap;
+    overflow: hidden;
+
+    .p-panelmenu-item-label,
+    .p-panelmenu-header-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  }
+
+  // Ensure icons don't shrink
+  :deep(.p-menuitem-icon),
+  :deep(.p-panelmenu-icon) {
+    flex-shrink: 0;
+  }
 }
 
 .sidebar-header {
@@ -228,7 +192,7 @@ function logout() {
 
   .action-btn {
     width: calc(100% - 0.5rem);
-    min-width: 60px;
+    min-width: 40px;
     height: 30px;
     line-height: 30px;
     border-radius: 3px;
@@ -243,17 +207,18 @@ function logout() {
     justify-content: center;
     gap: vars.$spacing-sm;
     transition: background-color 0.2s ease;
+    white-space: nowrap;
+    overflow: hidden;
 
     i {
       font-size: 0.9rem;
+      flex-shrink: 0; // Prevent icon from shrinking
     }
 
-    &.restart-btn {
-      background-color: #4060c3; // Same as p-panelmenu-item-active-background
-
-      &:hover {
-        background-color: #5070d3;
-      }
+    // Hide text when sidebar is too narrow, show only icon
+    span {
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     &.logout-btn {

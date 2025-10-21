@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api/auth"
@@ -41,7 +40,6 @@ type APIServer struct {
 	challengeManager *auth.ChallengeManager
 	ed25519Provider  *auth.Ed25519Provider
 	startTime        time.Time
-	mutex            sync.RWMutex
 }
 
 // NewAPIServer creates a new API server instance
@@ -165,7 +163,7 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 
 	// Auth routes
 	mux.HandleFunc("/api/auth/challenge", s.handleGetChallenge) // GET - Request new challenge
-	mux.HandleFunc("/api/auth/ed25519", s.handleAuthEd25519)     // POST - Ed25519 authentication
+	mux.HandleFunc("/api/auth/ed25519", s.handleAuthEd25519)    // POST - Ed25519 authentication
 
 	// Node routes
 	mux.HandleFunc("/api/node/status", s.handleNodeStatus)

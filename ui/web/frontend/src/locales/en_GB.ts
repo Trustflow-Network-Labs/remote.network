@@ -15,7 +15,9 @@ export default {
       info: 'Info',
       loading: 'Loading...',
       noData: 'No data available',
-      total: 'Total'
+      total: 'Total',
+      copy: 'Copy',
+      copiedToClipboard: 'Copied to clipboard'
     },
     auth: {
       login: 'Login',
@@ -35,12 +37,24 @@ export default {
       nodeStatus: 'Node Status',
       peerId: 'Peer ID',
       dhtNodeId: 'DHT Node ID',
+      nodeType: 'Node Type',
+      publicEndpoint: 'Public Endpoint',
+      privateEndpoint: 'Private Endpoint',
+      isRelay: 'Is Relay',
+      isStore: 'Is Store',
       wallet: 'Wallet',
       provider: 'Provider',
       uptime: 'Uptime',
       knownPeers: 'Known Peers',
       activeServices: 'Active Services',
-      recentWorkflows: 'Recent Workflows'
+      purchasedServices: 'Purchased Services',
+      soldServices: 'Sold Services',
+      runningWorkflows: 'Running Workflows',
+      workflowsInDesign: 'Workflows in Design',
+      quickLinks: 'Quick Links',
+      recentWorkflows: 'Recent Workflows',
+      addLocalService: 'Add Local Service',
+      searchRemoteService: 'Search Remote Service'
     },
     workflows: {
       title: 'Workflows',

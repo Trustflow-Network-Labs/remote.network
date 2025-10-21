@@ -49,7 +49,7 @@ export const useNodeStore = defineStore('node', {
         this.peerId = response.peer_id
         this.dhtNodeId = response.dht_node_id
         this.stats = {
-          uptime: response.uptime || 0,
+          uptime: response.uptime_seconds || 0,
           knownPeers: response.known_peers || 0,
           ...response.stats
         }
