@@ -140,7 +140,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 		logger.Info("Relay mode enabled - node will act as relay", "core")
 	} else {
 		// For NAT peers, initialize relay manager for connecting to relays
-		relayManager = p2p.NewRelayManager(config, logger, dbManager, quic, dht, metadataPublisher, metadataFetcher)
+		relayManager = p2p.NewRelayManager(config, logger, dbManager, keyPair, quic, dht, metadataPublisher, metadataFetcher)
 		logger.Info("Relay manager initialized for NAT peer", "core")
 	}
 
@@ -668,10 +668,43 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 	// Add relay info
 	if pm.relayPeer != nil {
 		stats["relay_mode"] = true
-		stats["relay_stats"] = pm.relayPeer.GetStats()
+		relayStats := pm.relayPeer.GetStats()
+		stats["relay_stats"] = relayStats
+
+		// Also include key relay stats at top level for easier frontend access
+		if pricingPerGB, ok := relayStats["pricing_per_gb"].(float64); ok {
+			stats["pricing_per_gb"] = pricingPerGB
+		}
+		if maxConn, ok := relayStats["max_connections"].(int); ok {
+			stats["max_connections"] = maxConn
+		}
+		if activeSessions, ok := relayStats["active_sessions"].(int); ok {
+			stats["active_sessions"] = activeSessions
+		}
+		if totalBytes, ok := relayStats["total_bytes"].(int64); ok {
+			stats["total_bytes"] = totalBytes
+		}
 	}
 	if pm.relayManager != nil {
-		stats["relay_manager_stats"] = pm.relayManager.GetStats()
+		relayManagerStats := pm.relayManager.GetStats()
+		stats["relay_manager_stats"] = relayManagerStats
+
+		// Also include current relay session at top level for NAT mode
+		if connectedRelay, ok := relayManagerStats["connected_relay"]; ok && connectedRelay != nil {
+			stats["current_relay_session"] = map[string]interface{}{
+				"relay_peer_id":    relayManagerStats["connected_relay_peer_id"], // Persistent Ed25519-based peer ID
+				"relay_node_id":    relayManagerStats["connected_relay"],         // DHT node ID
+				"endpoint":         relayManagerStats["connected_relay_endpoint"],
+				"latency":          relayManagerStats["connected_relay_latency"],
+				"latency_ms":       relayManagerStats["connected_relay_latency_ms"],
+				"pricing":          relayManagerStats["connected_relay_pricing"],
+				"duration_seconds": relayManagerStats["session_duration_seconds"],
+				"ingress_bytes":    relayManagerStats["session_ingress_bytes"],
+				"egress_bytes":     relayManagerStats["session_egress_bytes"],
+				"total_bytes":      relayManagerStats["session_total_bytes"],
+				"current_cost":     relayManagerStats["session_current_cost"],
+			}
+		}
 	}
 	if pm.trafficMonitor != nil {
 		stats["traffic_stats"] = pm.trafficMonitor.GetStats()
@@ -701,6 +734,16 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 // GetDBManager returns the database manager instance
 func (pm *PeerManager) GetDBManager() *database.SQLiteManager {
 	return pm.dbManager
+}
+
+// GetRelayPeer returns the relay peer instance
+func (pm *PeerManager) GetRelayPeer() *p2p.RelayPeer {
+	return pm.relayPeer
+}
+
+// GetRelayManager returns the relay manager instance
+func (pm *PeerManager) GetRelayManager() *p2p.RelayManager {
+	return pm.relayManager
 }
 
 func (pm *PeerManager) Stop() error {
@@ -821,7 +864,8 @@ func (pm *PeerManager) publishInitialMetadata() error {
 	}
 
 	metadata := &database.PeerMetadata{
-		NodeID:       pm.dht.NodeID(),
+		PeerID:       pm.keyPair.PeerID(), // Persistent Ed25519-based peer ID
+		NodeID:       pm.dht.NodeID(),     // DHT routing node ID
 		Topic:        topic,
 		Version:      1,
 		NetworkInfo:  networkInfo,

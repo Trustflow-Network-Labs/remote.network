@@ -8,7 +8,8 @@ import (
 // This is no longer persisted in local database - only used for DHT storage/retrieval
 type PeerMetadata struct {
 	// Core Identity
-	NodeID    string    `json:"node_id"`
+	PeerID    string    `json:"peer_id"`    // Persistent Ed25519-based peer ID (SHA1 of public key)
+	NodeID    string    `json:"node_id"`    // DHT routing node ID (may change on restart)
 	Topic     string    `json:"topic"`
 	Version   int       `json:"version"`
 	Timestamp time.Time `json:"timestamp"`

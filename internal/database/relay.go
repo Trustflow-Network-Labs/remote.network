@@ -61,6 +61,22 @@ func (rdb *RelayDB) createTables() error {
 		return fmt.Errorf("failed to create relay_traffic table: %v", err)
 	}
 
+	// Peer preferences table for storing preferred relay
+	createPreferencesTableSQL := `
+	CREATE TABLE IF NOT EXISTS peer_preferences (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		peer_id TEXT NOT NULL UNIQUE,
+		preferred_relay_peer_id TEXT,
+		created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+		updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+	);
+	CREATE INDEX IF NOT EXISTS idx_peer_preferences_peer ON peer_preferences(peer_id);
+	`
+
+	if _, err := rdb.db.ExecContext(context.Background(), createPreferencesTableSQL); err != nil {
+		return fmt.Errorf("failed to create peer_preferences table: %v", err)
+	}
+
 	// Note: relay_service_info table removed - relay discovery uses DHT metadata, not database
 	// Note: relay_sessions table removed - sessions are in-memory only per DHT-only architecture
 	// Note: relay_billing table removed - no billing implementation exists
@@ -164,6 +180,61 @@ func (rdb *RelayDB) GetStats() map[string]interface{} {
 	stats["total_bytes"] = totalIngress + totalEgress
 
 	return stats
+}
+
+// SetPreferredRelay sets the preferred relay for a peer
+func (rdb *RelayDB) SetPreferredRelay(peerID, preferredRelayPeerID string) error {
+	query := `
+		INSERT INTO peer_preferences (peer_id, preferred_relay_peer_id, updated_at)
+		VALUES (?, ?, strftime('%s', 'now'))
+		ON CONFLICT(peer_id) DO UPDATE SET
+			preferred_relay_peer_id = excluded.preferred_relay_peer_id,
+			updated_at = excluded.updated_at
+	`
+
+	_, err := rdb.db.Exec(query, peerID, preferredRelayPeerID)
+	if err != nil {
+		return fmt.Errorf("failed to set preferred relay: %v", err)
+	}
+
+	rdb.logger.Debug(fmt.Sprintf("Set preferred relay for peer %s to %s", peerID, preferredRelayPeerID), "relay-db")
+	return nil
+}
+
+// GetPreferredRelay gets the preferred relay for a peer
+func (rdb *RelayDB) GetPreferredRelay(peerID string) (string, error) {
+	query := `SELECT preferred_relay_peer_id FROM peer_preferences WHERE peer_id = ?`
+
+	var preferredRelayPeerID sql.NullString
+	err := rdb.db.QueryRow(query, peerID).Scan(&preferredRelayPeerID)
+
+	if err == sql.ErrNoRows {
+		// No preference set
+		return "", nil
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("failed to get preferred relay: %v", err)
+	}
+
+	if !preferredRelayPeerID.Valid {
+		return "", nil
+	}
+
+	return preferredRelayPeerID.String, nil
+}
+
+// ClearPreferredRelay clears the preferred relay for a peer
+func (rdb *RelayDB) ClearPreferredRelay(peerID string) error {
+	query := `DELETE FROM peer_preferences WHERE peer_id = ?`
+
+	_, err := rdb.db.Exec(query, peerID)
+	if err != nil {
+		return fmt.Errorf("failed to clear preferred relay: %v", err)
+	}
+
+	rdb.logger.Debug(fmt.Sprintf("Cleared preferred relay for peer %s", peerID), "relay-db")
+	return nil
 }
 
 // Close closes the relay database manager

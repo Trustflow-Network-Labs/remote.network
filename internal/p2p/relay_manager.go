@@ -8,6 +8,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -17,6 +18,7 @@ type RelayManager struct {
 	config            *utils.ConfigManager
 	logger            *utils.LogsManager
 	dbManager         *database.SQLiteManager
+	keyPair           *crypto.KeyPair
 	quicPeer          *QUICPeer
 	dhtPeer           *DHTPeer
 	metadataPublisher *MetadataPublisher
@@ -31,8 +33,12 @@ type RelayManager struct {
 	relayMutex       sync.RWMutex
 
 	// Session management
-	sessionID     string
-	keepaliveStop chan struct{}
+	sessionID       string
+	sessionStart    time.Time
+	ingressBytes    int64
+	egressBytes     int64
+	trafficMutex    sync.RWMutex
+	keepaliveStop   chan struct{}
 
 	// Context
 	ctx    context.Context
@@ -44,7 +50,7 @@ type RelayManager struct {
 }
 
 // NewRelayManager creates a new relay manager for NAT peers
-func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher, metadataFetcher *MetadataFetcher) *RelayManager {
+func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, keyPair *crypto.KeyPair, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher, metadataFetcher *MetadataFetcher) *RelayManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	selector := NewRelaySelector(config, logger, dbManager, quicPeer)
@@ -53,6 +59,7 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 		config:            config,
 		logger:            logger,
 		dbManager:         dbManager,
+		keyPair:           keyPair,
 		quicPeer:          quicPeer,
 		dhtPeer:           dhtPeer,
 		metadataPublisher: metadataPublisher,
@@ -185,7 +192,8 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 	privateEndpoint := fmt.Sprintf("%s:%d", privateIP, rm.config.GetConfigInt("quic_port", 30906, 1024, 65535))
 
 	registerMsg := CreateRelayRegister(
-		rm.dhtPeer.NodeID(),
+		rm.keyPair.PeerID(), // Persistent Ed25519-based peer ID
+		rm.dhtPeer.NodeID(), // DHT node ID
 		"",    // topic - will be filled by relay if needed
 		"nat", // natType
 		publicEndpoint,
@@ -253,7 +261,14 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 	rm.currentRelay = relay
 	rm.currentRelayConn = conn
 	rm.sessionID = sessionID
+	rm.sessionStart = time.Now()
 	rm.relayMutex.Unlock()
+
+	// Reset traffic counters
+	rm.trafficMutex.Lock()
+	rm.ingressBytes = 0
+	rm.egressBytes = 0
+	rm.trafficMutex.Unlock()
 
 	// Update metadata in database to include relay info
 	if err := rm.updateOurMetadataWithRelay(relay, sessionID); err != nil {
@@ -293,13 +308,24 @@ func (rm *RelayManager) DisconnectRelay() {
 		cancel()
 
 		if err == nil {
+			// Get actual traffic stats and duration
+			rm.trafficMutex.RLock()
+			ingress := rm.ingressBytes
+			egress := rm.egressBytes
+			rm.trafficMutex.RUnlock()
+
+			duration := int64(0)
+			if !rm.sessionStart.IsZero() {
+				duration = int64(time.Since(rm.sessionStart).Seconds())
+			}
+
 			disconnectMsg := CreateRelayDisconnect(
 				rm.sessionID,
 				rm.dhtPeer.NodeID(),
 				"switching relay",
-				0, // bytesIngress - would track actual bytes
-				0, // bytesEgress - would track actual bytes
-				0, // duration - would calculate actual duration
+				ingress,
+				egress,
+				duration,
 			)
 			if msgBytes, err := disconnectMsg.Marshal(); err == nil {
 				stream.Write(msgBytes)
@@ -323,6 +349,13 @@ func (rm *RelayManager) DisconnectRelay() {
 	rm.currentRelay = nil
 	rm.currentRelayConn = nil
 	rm.sessionID = ""
+	rm.sessionStart = time.Time{}
+
+	// Clear traffic counters
+	rm.trafficMutex.Lock()
+	rm.ingressBytes = 0
+	rm.egressBytes = 0
+	rm.trafficMutex.Unlock()
 }
 
 // sendKeepalives sends periodic keepalive messages to maintain relay connection
@@ -592,20 +625,135 @@ func (rm *RelayManager) GetCurrentRelay() *RelayCandidate {
 	return rm.currentRelay
 }
 
+// GetSelector returns the relay selector
+func (rm *RelayManager) GetSelector() *RelaySelector {
+	return rm.selector
+}
+
 // GetStats returns relay manager statistics
 func (rm *RelayManager) GetStats() map[string]interface{} {
 	stats := rm.selector.GetStats()
 
 	rm.relayMutex.RLock()
-	if rm.currentRelay != nil {
-		stats["connected_relay"] = rm.currentRelay.NodeID
-		stats["connected_relay_endpoint"] = rm.currentRelay.Endpoint
-		stats["connected_relay_latency"] = rm.currentRelay.Latency.String()
-		stats["session_id"] = rm.sessionID
+	currentRelay := rm.currentRelay
+	sessionID := rm.sessionID
+	sessionStart := rm.sessionStart
+	rm.relayMutex.RUnlock()
+
+	if currentRelay != nil {
+		// Get traffic stats
+		rm.trafficMutex.RLock()
+		ingress := rm.ingressBytes
+		egress := rm.egressBytes
+		rm.trafficMutex.RUnlock()
+
+		totalBytes := ingress + egress
+
+		// Calculate session duration
+		var durationSeconds int64
+		if !sessionStart.IsZero() {
+			durationSeconds = int64(time.Since(sessionStart).Seconds())
+		}
+
+		// Calculate current cost (using relay's pricing)
+		// Note: Pricing comes from relay's service configuration
+		var currentCost float64
+		if currentRelay.PricingPerGB > 0 {
+			billableGB := float64(totalBytes) / (1024 * 1024 * 1024)
+			currentCost = billableGB * currentRelay.PricingPerGB
+		}
+
+		stats["connected_relay"] = currentRelay.NodeID
+		stats["connected_relay_peer_id"] = currentRelay.PeerID // Persistent Ed25519-based peer ID
+		stats["connected_relay_endpoint"] = currentRelay.Endpoint
+		stats["connected_relay_latency"] = currentRelay.Latency.String()
+		stats["connected_relay_latency_ms"] = currentRelay.Latency.Milliseconds()
+		stats["connected_relay_pricing"] = currentRelay.PricingPerGB
+		stats["session_id"] = sessionID
+		stats["session_duration_seconds"] = durationSeconds
+		stats["session_ingress_bytes"] = ingress
+		stats["session_egress_bytes"] = egress
+		stats["session_total_bytes"] = totalBytes
+		stats["session_current_cost"] = currentCost
 	} else {
 		stats["connected_relay"] = nil
 	}
-	rm.relayMutex.RUnlock()
 
 	return stats
+}
+
+// ConnectToSpecificRelay connects to a user-selected relay by peer ID or node ID
+func (rm *RelayManager) ConnectToSpecificRelay(peerIDOrNodeID string) error {
+	rm.logger.Info(fmt.Sprintf("Attempting to connect to specific relay: %s", peerIDOrNodeID), "relay-manager")
+
+	// Find the relay candidate with matching ID
+	// Match against both PeerID (persistent Ed25519-based) and NodeID (DHT-based) for flexibility
+	candidates := rm.selector.GetCandidates()
+
+	var targetCandidate *RelayCandidate
+	for _, candidate := range candidates {
+		// Match against both PeerID (persistent) and NodeID (DHT)
+		if candidate.PeerID == peerIDOrNodeID || candidate.NodeID == peerIDOrNodeID {
+			targetCandidate = candidate
+			break
+		}
+	}
+
+	if targetCandidate == nil {
+		return fmt.Errorf("relay peer %s not found in candidates", peerIDOrNodeID)
+	}
+
+	// Disconnect current relay if connected
+	rm.DisconnectRelay()
+
+	// Connect to the specific relay
+	return rm.ConnectToRelay(targetCandidate)
+}
+
+// SetPreferredRelay saves a relay as the preferred relay for this peer
+func (rm *RelayManager) SetPreferredRelay(myPeerID, preferredRelayPeerID string) error {
+	rm.logger.Info(fmt.Sprintf("Setting preferred relay: %s", preferredRelayPeerID), "relay-manager")
+
+	// Save to database
+	relayDB, err := database.NewRelayDB(rm.dbManager.GetDB(), rm.logger)
+	if err != nil {
+		return fmt.Errorf("failed to access relay database: %v", err)
+	}
+
+	err = relayDB.SetPreferredRelay(myPeerID, preferredRelayPeerID)
+	if err != nil {
+		return fmt.Errorf("failed to set preferred relay: %v", err)
+	}
+
+	rm.logger.Debug(fmt.Sprintf("Preferred relay set to: %s", preferredRelayPeerID), "relay-manager")
+	return nil
+}
+
+// GetPreferredRelay gets the preferred relay for this peer
+func (rm *RelayManager) GetPreferredRelay(myPeerID string) (string, error) {
+	relayDB, err := database.NewRelayDB(rm.dbManager.GetDB(), rm.logger)
+	if err != nil {
+		return "", fmt.Errorf("failed to access relay database: %v", err)
+	}
+
+	preferredPeerID, err := relayDB.GetPreferredRelay(myPeerID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get preferred relay: %v", err)
+	}
+
+	return preferredPeerID, nil
+}
+
+// RecordIngressTraffic records bytes received through the relay
+func (rm *RelayManager) RecordIngressTraffic(bytes int64) {
+	rm.trafficMutex.Lock()
+	rm.ingressBytes += bytes
+	rm.trafficMutex.Unlock()
+}
+
+// RecordEgressTraffic records bytes sent through the relay
+func (rm *RelayManager) RecordEgressTraffic(bytes int64) {
+	rm.trafficMutex.Lock()
+	rm.egressBytes += bytes
+	rm.trafficMutex.Unlock()
 }

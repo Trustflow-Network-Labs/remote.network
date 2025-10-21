@@ -178,6 +178,13 @@
           </div>
         </div>
       </div>
+
+      <!-- Relay Info Section -->
+      <RelayInfoSection
+        v-if="showRelaySection"
+        :is-relay-mode="isRelay"
+        :relay-stats="nodeStore.stats"
+      />
     </main>
   </AppLayout>
 </template>
@@ -192,6 +199,7 @@ import Avatar from 'primevue/avatar'
 import OverlayBadge from 'primevue/overlaybadge'
 
 import AppLayout from '../layout/AppLayout.vue'
+import RelayInfoSection from './RelayInfoSection.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useNodeStore } from '../../stores/node'
 import { usePeersStore } from '../../stores/peers'
@@ -267,6 +275,11 @@ const uptimeFormatted = computed(() => {
   const minutes = Math.floor((seconds % 3600) / 60)
   const secs = Math.floor(seconds % 60)
   return `${hours}h ${minutes}m ${secs}s`
+})
+
+const showRelaySection = computed(() => {
+  // Show if node is acting as a relay OR if node requires a relay (NAT mode)
+  return nodeStore.stats.relay_mode === true || nodeStore.stats.requires_relay === true
 })
 
 async function copyPeerId() {

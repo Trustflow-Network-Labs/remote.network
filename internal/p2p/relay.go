@@ -16,7 +16,8 @@ import (
 // RelaySession represents an active relay session
 type RelaySession struct {
 	SessionID         string
-	ClientNodeID      string
+	ClientPeerID      string // Persistent Ed25519-based peer ID
+	ClientNodeID      string // DHT node ID (may change on restart)
 	RelayNodeID       string
 	SessionType       string // "coordination" or "full_relay"
 	Connection        *quic.Conn
@@ -60,9 +61,29 @@ func NewRelayPeer(config *utils.ConfigManager, logger *utils.LogsManager, dbMana
 	// Read relay configuration
 	isRelayMode := config.GetConfigBool("relay_mode", false)
 	maxConnections := config.GetConfigInt("relay_max_connections", 100, 1, 1000)
-	pricingPerGB := config.GetConfigFloat64("relay_pricing_per_gb", 0.001, 0, 1.0)
 	freeCoordination := config.GetConfigBool("relay_free_coordination", true)
 	maxCoordMsgSize := config.GetConfigInt64("relay_max_coordination_msg_size", 10240, 1024, 1048576)
+
+	// Get pricing from services database
+	// Relay is a service like file storage, so pricing comes from the service configuration
+	pricingPerGB := 0.0
+	services, err := dbManager.GetAllServices()
+	if err == nil {
+		// Find relay service
+		for _, service := range services {
+			if service.Type == "relay" {
+				pricingPerGB = service.Pricing
+				logger.Debug(fmt.Sprintf("Found relay service with pricing: %.4f/GB", pricingPerGB), "relay")
+				break
+			}
+		}
+	}
+
+	// Fall back to config if no relay service found
+	if pricingPerGB == 0.0 {
+		pricingPerGB = config.GetConfigFloat64("relay_pricing_per_gb", 0.001, 0, 1.0)
+		logger.Debug(fmt.Sprintf("No relay service found, using config pricing: %.4f/GB", pricingPerGB), "relay")
+	}
 
 	rp := &RelayPeer{
 		config:            config,
@@ -126,7 +147,8 @@ func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remo
 
 	session := &RelaySession{
 		SessionID:         sessionID,
-		ClientNodeID:      data.NodeID,
+		ClientPeerID:      data.PeerID,  // Persistent Ed25519-based peer ID
+		ClientNodeID:      data.NodeID,  // DHT node ID
 		RelayNodeID:       "", // Will be set by caller
 		SessionType:       "full_relay",
 		Connection:        conn,
@@ -510,6 +532,69 @@ func (rp *RelayPeer) Stop() error {
 		rp.terminateSession(sessionID, "relay shutdown")
 	}
 	rp.sessionsMutex.Unlock()
+
+	return nil
+}
+
+// GetSessionDetails returns detailed information about all active sessions
+func (rp *RelayPeer) GetSessionDetails() []map[string]interface{} {
+	rp.sessionsMutex.RLock()
+	defer rp.sessionsMutex.RUnlock()
+
+	sessions := make([]map[string]interface{}, 0, len(rp.sessions))
+
+	for _, session := range rp.sessions {
+		session.mutex.RLock()
+
+		// Calculate session duration
+		duration := time.Since(session.StartTime)
+
+		// Calculate total bytes
+		totalBytes := session.IngressBytes + session.EgressBytes
+
+		// Calculate earnings (only for relay traffic, coordination is free)
+		var earnings float64
+		if session.SessionType == "full_relay" {
+			// Convert bytes to GB and multiply by pricing
+			billableGB := float64(totalBytes) / (1024 * 1024 * 1024)
+			earnings = billableGB * rp.pricingPerGB
+		}
+
+		sessionDetail := map[string]interface{}{
+			"session_id":       session.SessionID,
+			"client_peer_id":   session.ClientPeerID, // Persistent Ed25519-based peer ID
+			"client_node_id":   session.ClientNodeID, // DHT node ID
+			"session_type":     session.SessionType,
+			"start_time":       session.StartTime.Unix(),
+			"duration_seconds": int64(duration.Seconds()),
+			"ingress_bytes":    session.IngressBytes,
+			"egress_bytes":     session.EgressBytes,
+			"total_bytes":      totalBytes,
+			"earnings":         earnings,
+			"last_keepalive":   session.LastKeepalive.Unix(),
+		}
+
+		session.mutex.RUnlock()
+		sessions = append(sessions, sessionDetail)
+	}
+
+	return sessions
+}
+
+// DisconnectSession terminates a specific relay session
+func (rp *RelayPeer) DisconnectSession(sessionID string) error {
+	rp.sessionsMutex.Lock()
+	defer rp.sessionsMutex.Unlock()
+
+	session, exists := rp.sessions[sessionID]
+	if !exists {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	rp.logger.Info(fmt.Sprintf("Disconnecting session %s for client %s", sessionID, session.ClientNodeID), "relay")
+
+	// Terminate the session
+	rp.terminateSession(sessionID, "manual disconnect")
 
 	return nil
 }

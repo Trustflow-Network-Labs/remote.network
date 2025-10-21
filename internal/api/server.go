@@ -213,6 +213,23 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("/api/blacklist/check", s.handleCheckBlacklist)
 
+	// Relay routes
+	mux.HandleFunc("/api/relay/sessions", s.handleRelayGetSessions) // GET - Get all relay sessions (relay mode)
+	mux.HandleFunc("/api/relay/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		// Parse path to check for session actions
+		if strings.Contains(r.URL.Path, "/disconnect") {
+			s.handleRelayDisconnectSession(w, r)
+		} else if strings.Contains(r.URL.Path, "/blacklist") {
+			s.handleRelayBlacklistSession(w, r)
+		} else {
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
+	})
+	mux.HandleFunc("/api/relay/candidates", s.handleRelayGetCandidates) // GET - Get available relay candidates (NAT mode)
+	mux.HandleFunc("/api/relay/connect", s.handleRelayConnect)          // POST - Connect to specific relay
+	mux.HandleFunc("/api/relay/disconnect", s.handleRelayDisconnect)    // POST - Disconnect from current relay
+	mux.HandleFunc("/api/relay/prefer", s.handleRelayPrefer)            // POST - Set preferred relay
+
 	// Workflows routes
 	mux.HandleFunc("/api/workflows", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {

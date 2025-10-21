@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"syscall"
 	"time"
 )
 
@@ -134,10 +133,8 @@ func (s *APIServer) handleNodeRestart(w http.ResponseWriter, r *http.Request) {
 		// Execute the restart command in a detached process
 		restartCmd := exec.Command(exePath, restartArgs...)
 
-		// Set up process attributes for proper detachment
-		restartCmd.SysProcAttr = &syscall.SysProcAttr{
-			Setsid: true, // Create new session
-		}
+		// Set up process attributes for proper detachment (platform-specific)
+		restartCmd.SysProcAttr = getDetachedProcessAttr()
 
 		// Detach standard streams
 		restartCmd.Stdout = nil

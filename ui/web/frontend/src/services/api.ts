@@ -255,6 +255,64 @@ class APIClient {
     const response = await this.client.post(`/api/workflows/${id}/execute`)
     return response.data
   }
+
+  // ===== Relay API =====
+
+  /**
+   * Get all active relay sessions (relay mode only)
+   */
+  async getRelaySessions() {
+    const response = await this.client.get('/api/relay/sessions')
+    return response.data
+  }
+
+  /**
+   * Disconnect a specific relay session
+   */
+  async disconnectRelaySession(sessionId: string) {
+    const response = await this.client.post(`/api/relay/sessions/${sessionId}/disconnect`)
+    return response.data
+  }
+
+  /**
+   * Blacklist and disconnect a peer from relay session
+   */
+  async blacklistRelaySession(sessionId: string) {
+    const response = await this.client.post(`/api/relay/sessions/${sessionId}/blacklist`)
+    return response.data
+  }
+
+  /**
+   * Get available relay candidates (NAT mode only)
+   */
+  async getRelayCandidates() {
+    const response = await this.client.get('/api/relay/candidates')
+    return response.data
+  }
+
+  /**
+   * Connect to a specific relay
+   */
+  async connectToRelay(peerId: string) {
+    const response = await this.client.post('/api/relay/connect', { peer_id: peerId })
+    return response.data
+  }
+
+  /**
+   * Disconnect from current relay
+   */
+  async disconnectFromRelay() {
+    const response = await this.client.post('/api/relay/disconnect')
+    return response.data
+  }
+
+  /**
+   * Set preferred relay
+   */
+  async setPreferredRelay(peerId: string) {
+    const response = await this.client.post('/api/relay/prefer', { peer_id: peerId })
+    return response.data
+  }
 }
 
 // Create default instance for localhost

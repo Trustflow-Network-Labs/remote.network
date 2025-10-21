@@ -11,7 +11,8 @@ import (
 
 // RelayCandidate represents a potential relay peer with metrics
 type RelayCandidate struct {
-	NodeID          string
+	PeerID          string // Persistent Ed25519-based peer ID
+	NodeID          string // DHT node ID (may change on restart)
 	Endpoint        string
 	Latency         time.Duration
 	ReputationScore float64
@@ -64,7 +65,8 @@ func (rs *RelaySelector) AddCandidate(metadata *database.PeerMetadata) error {
 	defer rs.candidatesMutex.Unlock()
 
 	candidate := &RelayCandidate{
-		NodeID:          metadata.NodeID,
+		PeerID:          metadata.PeerID, // Persistent Ed25519-based peer ID
+		NodeID:          metadata.NodeID, // DHT node ID
 		Endpoint:        metadata.NetworkInfo.RelayEndpoint,
 		ReputationScore: float64(metadata.NetworkInfo.ReputationScore) / 10000.0, // Convert from basis points to 0.0-1.0
 		PricingPerGB:    float64(metadata.NetworkInfo.RelayPricing) / 1000000.0,  // Convert from micro-units

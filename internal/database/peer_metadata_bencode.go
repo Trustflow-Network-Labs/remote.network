@@ -12,7 +12,8 @@ import (
 // This ensures proper BEP_44 signature validation
 type BencodePeerMetadata struct {
 	// Core Identity
-	NodeID    string `bencode:"node_id"`
+	PeerID    string `bencode:"peer_id"`    // Persistent Ed25519-based peer ID
+	NodeID    string `bencode:"node_id"`    // DHT routing node ID
 	Topic     string `bencode:"topic"`
 	Version   int    `bencode:"version"`
 	Timestamp int64  `bencode:"timestamp"` // Unix timestamp
@@ -99,6 +100,7 @@ func (pm *PeerMetadata) ToBencodeSafe() *BencodePeerMetadata {
 	}
 
 	return &BencodePeerMetadata{
+		PeerID:       pm.PeerID,
 		NodeID:       pm.NodeID,
 		Topic:        pm.Topic,
 		Version:      pm.Version,
@@ -154,6 +156,7 @@ func FromBencodeSafe(bpm *BencodePeerMetadata) *PeerMetadata {
 	}
 
 	return &PeerMetadata{
+		PeerID:       bpm.PeerID,
 		NodeID:       bpm.NodeID,
 		Topic:        bpm.Topic,
 		Version:      bpm.Version,

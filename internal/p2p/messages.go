@@ -338,7 +338,8 @@ func (msg *QUICMessage) Validate() error {
 
 // RelayRegisterData contains relay registration request
 type RelayRegisterData struct {
-	NodeID          string  `json:"node_id"`
+	PeerID          string  `json:"peer_id"`           // Persistent Ed25519-based peer ID
+	NodeID          string  `json:"node_id"`           // DHT node ID (may change on restart)
 	Topic           string  `json:"topic"`
 	NATType         string  `json:"nat_type"`
 	PublicEndpoint  string  `json:"public_endpoint,omitempty"`
@@ -447,8 +448,9 @@ type HolePunchSyncData struct {
 }
 
 // CreateRelayRegister creates a relay registration request
-func CreateRelayRegister(nodeID, topic, natType, publicEndpoint, privateEndpoint string, requiresRelay bool) *QUICMessage {
+func CreateRelayRegister(peerID, nodeID, topic, natType, publicEndpoint, privateEndpoint string, requiresRelay bool) *QUICMessage {
 	return NewQUICMessage(MessageTypeRelayRegister, &RelayRegisterData{
+		PeerID:          peerID,
 		NodeID:          nodeID,
 		Topic:           topic,
 		NATType:         natType,
