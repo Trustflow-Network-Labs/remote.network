@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { api } from '../services/api'
+import { getWebSocketService, MessageType } from '../services/websocket'
 
 export interface WorkflowJob {
   id: number
@@ -43,6 +44,9 @@ export const useWorkflowsStore = defineStore('workflows', {
     error: null,
     pickedService: null
   }),
+
+  // Track unsubscribe function
+  _wsUnsubscribe: null as (() => void) | null,
 
   getters: {
     totalWorkflows: (state) => state.workflows.length,
@@ -197,6 +201,53 @@ export const useWorkflowsStore = defineStore('workflows', {
     clearCurrentWorkflow() {
       this.currentWorkflow = null
       this.pickedService = null
+    },
+
+    // Initialize WebSocket subscription
+    initializeWebSocket() {
+      const wsService = getWebSocketService()
+      if (!wsService) {
+        console.warn('[WorkflowsStore] WebSocket service not available')
+        return
+      }
+
+      // Subscribe to workflows updates
+      const unsubscribe = wsService.subscribe(
+        MessageType.WORKFLOWS_UPDATED,
+        this.handleWorkflowsUpdate.bind(this)
+      )
+
+      // Store unsubscribe function
+      ;(this as any)._wsUnsubscribe = unsubscribe
+
+      console.log('[WorkflowsStore] WebSocket subscription initialized')
+    },
+
+    // Cleanup WebSocket subscription
+    cleanupWebSocket() {
+      const unsubscribe = (this as any)._wsUnsubscribe
+      if (unsubscribe) {
+        unsubscribe()
+        ;(this as any)._wsUnsubscribe = null
+      }
+    },
+
+    // Handle WebSocket workflows update
+    handleWorkflowsUpdate(payload: any) {
+      if (payload && payload.workflows) {
+        this.workflows = payload.workflows.map((wf: any) => ({
+          id: parseInt(wf.id),
+          name: wf.name,
+          description: wf.description,
+          jobs: wf.jobs || [],
+          snap_to_grid: false,
+          status: wf.status || 'draft',
+          created_at: new Date(wf.created_at * 1000).toISOString(),
+          updated_at: new Date(wf.updated_at * 1000).toISOString()
+        }))
+        this.loading = false
+        this.error = null
+      }
     }
   }
 })

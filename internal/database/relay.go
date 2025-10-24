@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
@@ -192,13 +193,31 @@ func (rdb *RelayDB) SetPreferredRelay(peerID, preferredRelayPeerID string) error
 			updated_at = excluded.updated_at
 	`
 
-	_, err := rdb.db.Exec(query, peerID, preferredRelayPeerID)
-	if err != nil {
+	// Retry logic for handling transient SQLite BUSY errors
+	maxRetries := 3
+	retryDelay := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		_, err := rdb.db.Exec(query, peerID, preferredRelayPeerID)
+		if err == nil {
+			rdb.logger.Debug(fmt.Sprintf("Set preferred relay for peer %s to %s", peerID, preferredRelayPeerID), "relay-db")
+			return nil
+		}
+
+		// Check if it's a BUSY error
+		if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked") {
+			if attempt < maxRetries-1 {
+				rdb.logger.Debug(fmt.Sprintf("Database busy, retrying in %v (attempt %d/%d)", retryDelay, attempt+1, maxRetries), "relay-db")
+				time.Sleep(retryDelay)
+				retryDelay *= 2 // Exponential backoff
+				continue
+			}
+		}
+
 		return fmt.Errorf("failed to set preferred relay: %v", err)
 	}
 
-	rdb.logger.Debug(fmt.Sprintf("Set preferred relay for peer %s to %s", peerID, preferredRelayPeerID), "relay-db")
-	return nil
+	return fmt.Errorf("failed to set preferred relay after %d attempts", maxRetries)
 }
 
 // GetPreferredRelay gets the preferred relay for a peer

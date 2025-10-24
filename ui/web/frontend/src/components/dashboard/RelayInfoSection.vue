@@ -38,15 +38,14 @@
           :rows="10"
           responsiveLayout="scroll"
         >
-          <Column field="client_peer_id" :header="$t('message.dashboard.peerId')">
+          <Column field="remote_peer_id" :header="$t('message.dashboard.peerId')">
             <template #body="slotProps">
               <div class="id-with-copy">
-                <span>{{ shorten(slotProps.data.client_peer_id, 6, 6) }}</span>
-                <i class="pi pi-copy copy-icon" @click="copyToClipboard(slotProps.data.client_peer_id)" :title="$t('message.common.copy')"></i>
+                <span>{{ shorten(slotProps.data.remote_peer_id, 6, 6) }}</span>
+                <i class="pi pi-copy copy-icon" @click="copyToClipboard(slotProps.data.remote_peer_id)" :title="$t('message.common.copy')"></i>
               </div>
             </template>
-          </Column>
-          <Column field="duration_seconds" :header="$t('message.dashboard.sessionDuration')">
+          </Column>          <Column field="duration_seconds" :header="$t('message.dashboard.sessionDuration')">
             <template #body="slotProps">
               {{ formatDuration(slotProps.data.duration_seconds) }}
             </template>
@@ -68,7 +67,7 @@
           </Column>
           <Column field="earnings" :header="$t('message.dashboard.earnings')">
             <template #body="slotProps">
-              {{ slotProps.data.earnings.toFixed(4) }} tokens
+              {{ (slotProps.data.earnings || 0).toFixed(4) }} tokens
             </template>
           </Column>
           <Column :header="$t('message.common.actions')">
@@ -164,6 +163,8 @@
           :paginator="candidates.length > 10"
           :rows="10"
           responsiveLayout="scroll"
+          sortField="latency_ms"
+          :sortOrder="1"
         >
           <Column field="peer_id" :header="$t('message.dashboard.peerId')">
             <template #body="slotProps">
@@ -185,7 +186,7 @@
           </Column>
           <Column field="reputation_score" :header="$t('message.dashboard.reputationScore')" sortable>
             <template #body="slotProps">
-              {{ slotProps.data.reputation_score.toFixed(2) }}
+              {{ slotProps.data.reputation_score?.toFixed(2) ?? '0.00' }}
             </template>
           </Column>
           <Column field="capacity" :header="$t('message.dashboard.capacity')" sortable>
@@ -216,10 +217,11 @@
                 @click="confirmConnect(slotProps.data)"
               />
               <Button
-                v-if="!slotProps.data.is_preferred"
-                icon="pi pi-star"
+                :icon="slotProps.data.is_preferred ? 'pi pi-star-fill' : 'pi pi-star'"
                 class="p-button-sm p-button-text"
-                :label="$t('message.dashboard.setPreferred')"
+                :class="{ 'p-button-warning': slotProps.data.is_preferred }"
+                :label="slotProps.data.is_preferred ? $t('message.dashboard.preferred') : $t('message.dashboard.setPreferred')"
+                :disabled="slotProps.data.is_preferred"
                 @click="setPreferred(slotProps.data)"
               />
             </template>
@@ -268,7 +270,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useToast } from 'primevue/usetoast'
 import DataTable from 'primevue/datatable'
@@ -278,6 +280,7 @@ import Dialog from 'primevue/dialog'
 import { api } from '../../services/api'
 import { useClipboard } from '../../composables/useClipboard'
 import { useTextUtils } from '../../composables/useTextUtils'
+import { getWebSocketService, MessageType } from '../../services/websocket'
 
 interface Props {
   isRelayMode: boolean
@@ -300,7 +303,31 @@ const showDisconnectDialog = ref(false)
 const showBlacklistDialog = ref(false)
 const showConnectDialog = ref(false)
 const showDisconnectRelayDialog = ref(false)
-let refreshInterval: number | null = null
+
+// WebSocket unsubscribe functions
+let unsubscribeSessions: (() => void) | null = null
+let unsubscribeCandidates: (() => void) | null = null
+
+// Watch for changes to current relay session from WebSocket NODE_STATUS updates
+watch(() => props.relayStats.current_relay_session, (newSession) => {
+  if (newSession) {
+    currentRelay.value = {
+      peer_id: newSession.relay_peer_id,
+      node_id: newSession.relay_node_id,
+      endpoint: newSession.endpoint,
+      latency: newSession.latency,
+      latency_ms: newSession.latency_ms,
+      pricing_per_gb: newSession.pricing,
+      duration_seconds: newSession.duration_seconds,
+      ingress_bytes: newSession.ingress_bytes,
+      egress_bytes: newSession.egress_bytes,
+      total_bytes: newSession.total_bytes,
+      current_cost: newSession.current_cost
+    }
+  } else {
+    currentRelay.value = null
+  }
+}, { deep: true })
 
 // Load data
 async function loadRelayData() {
@@ -407,6 +434,17 @@ function confirmDisconnectRelay() {
 }
 
 async function connectRelay() {
+  // Close dialog immediately for non-blocking UI
+  showConnectDialog.value = false
+
+  // Show loading toast
+  toast.add({
+    severity: 'info',
+    summary: t('message.common.loading'),
+    detail: t('message.dashboard.connectingToRelay'),
+    life: 2000
+  })
+
   try {
     await api.connectToRelay(selectedCandidate.value.peer_id)
     toast.add({
@@ -415,7 +453,6 @@ async function connectRelay() {
       detail: t('message.dashboard.relayConnected'),
       life: 3000
     })
-    showConnectDialog.value = false
     await loadRelayData()
   } catch (error: any) {
     toast.add({
@@ -428,6 +465,17 @@ async function connectRelay() {
 }
 
 async function disconnectFromRelay() {
+  // Close dialog immediately for non-blocking UI
+  showDisconnectRelayDialog.value = false
+
+  // Show loading toast
+  toast.add({
+    severity: 'info',
+    summary: t('message.common.loading'),
+    detail: t('message.dashboard.disconnectingRelay'),
+    life: 2000
+  })
+
   try {
     await api.disconnectFromRelay()
     toast.add({
@@ -436,7 +484,6 @@ async function disconnectFromRelay() {
       detail: t('message.dashboard.relayDisconnected'),
       life: 3000
     })
-    showDisconnectRelayDialog.value = false
     await loadRelayData()
   } catch (error: any) {
     toast.add({
@@ -482,7 +529,7 @@ async function copyToClipboard(text: string) {
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
+  if (bytes == null || isNaN(bytes) || bytes === 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
@@ -490,6 +537,7 @@ function formatBytes(bytes: number): string {
 }
 
 function formatDuration(seconds: number): string {
+  if (seconds == null || isNaN(seconds)) return '0h 0m 0s'
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
   const secs = Math.floor(seconds % 60)
@@ -503,18 +551,47 @@ function getLatencyClass(latencyMs: number): string {
 }
 
 onMounted(async () => {
+  // Load initial data
   await loadRelayData()
 
-  // Refresh data every 30 seconds
-  refreshInterval = window.setInterval(() => {
-    loadRelayData()
-  }, 30000)
+  // Initialize WebSocket subscriptions for real-time relay updates
+  const wsService = getWebSocketService()
+  if (wsService) {
+    // Subscribe to relay sessions (relay mode)
+    unsubscribeSessions = wsService.subscribe(MessageType.RELAY_SESSIONS, (payload: any) => {
+      if (payload && payload.sessions) {
+        sessions.value = payload.sessions
+      }
+    })
+
+    // Subscribe to relay candidates (NAT mode)
+    unsubscribeCandidates = wsService.subscribe(MessageType.RELAY_CANDIDATES, (payload: any) => {
+      if (payload && payload.candidates) {
+        candidates.value = payload.candidates
+        // Note: Current relay session data (duration, traffic, cost) comes from
+        // props.relayStats.current_relay_session via NODE_STATUS WebSocket updates,
+        // NOT from the candidates list which only has static relay info (latency, pricing, etc.)
+      }
+    })
+
+    console.log('[RelayInfoSection] WebSocket subscriptions initialized')
+  }
+
+  // Note: Removed 30-second polling - now using WebSocket for real-time updates
 })
 
 onUnmounted(() => {
-  if (refreshInterval) {
-    clearInterval(refreshInterval)
+  // Cleanup WebSocket subscriptions
+  if (unsubscribeSessions) {
+    unsubscribeSessions()
+    unsubscribeSessions = null
   }
+  if (unsubscribeCandidates) {
+    unsubscribeCandidates()
+    unsubscribeCandidates = null
+  }
+
+  console.log('[RelayInfoSection] WebSocket subscriptions cleaned up')
 })
 </script>
 
@@ -707,6 +784,22 @@ onUnmounted(() => {
       font-size: 1.5rem;
       margin-bottom: 0.5rem;
       display: block;
+    }
+  }
+
+  .loading-state {
+    text-align: center;
+    padding: 1rem 0;
+    color: vars.$color-text-secondary;
+
+    i {
+      display: block;
+      margin-bottom: 1rem;
+      color: vars.$color-primary;
+    }
+
+    p {
+      margin: 0;
     }
   }
 }

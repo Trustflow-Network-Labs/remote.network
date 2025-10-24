@@ -12,7 +12,7 @@ class APIClient {
     this.baseURL = baseURL
     this.client = axios.create({
       baseURL: this.baseURL,
-      timeout: 15000,
+      timeout: 60000, // 60 seconds for relay operations that may take time
       headers: {
         'Content-Type': 'application/json',
       },
@@ -292,9 +292,12 @@ class APIClient {
 
   /**
    * Connect to a specific relay
+   * Uses extended timeout as relay connection can take time (NAT traversal, handshakes, etc.)
    */
   async connectToRelay(peerId: string) {
-    const response = await this.client.post('/api/relay/connect', { peer_id: peerId })
+    const response = await this.client.post('/api/relay/connect', { peer_id: peerId }, {
+      timeout: 60000 // 60 seconds for relay connection
+    })
     return response.data
   }
 

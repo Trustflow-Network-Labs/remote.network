@@ -208,6 +208,7 @@ import { useWorkflowsStore } from '../../stores/workflows'
 import { api } from '../../services/api'
 import { useClipboard } from '../../composables/useClipboard'
 import { useTextUtils } from '../../composables/useTextUtils'
+import { disconnectWebSocket } from '../../services/websocket'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -331,6 +332,10 @@ async function restartPeer() {
 
   restarting.value = true
 
+  // Disconnect WebSocket before restarting to prevent reconnection attempts
+  console.log('[Dashboard] Disconnecting WebSocket before peer restart')
+  disconnectWebSocket()
+
   try {
     const result = await api.restartNode()
 
@@ -369,18 +374,29 @@ async function restartPeer() {
 }
 
 onMounted(async () => {
+  // Load initial data
   await loadDashboardData()
 
-  // Refresh data every 30 seconds
-  refreshInterval = window.setInterval(() => {
-    loadDashboardData()
-  }, 30000)
+  // Initialize WebSocket subscriptions in all stores
+  // (WebSocket connection is already initialized in LoginView after authentication)
+  nodeStore.initializeWebSocket()
+  peersStore.initializeWebSocket()
+  servicesStore.initializeWebSocket()
+  workflowsStore.initializeWebSocket()
+
+  console.log('[Dashboard] All WebSocket subscriptions initialized')
+
+  // Note: Removed 30-second polling - now using WebSocket for real-time updates
 })
 
 onUnmounted(() => {
-  if (refreshInterval) {
-    clearInterval(refreshInterval)
-  }
+  // Cleanup WebSocket subscriptions (but don't disconnect - persist across routes)
+  nodeStore.cleanupWebSocket()
+  peersStore.cleanupWebSocket()
+  servicesStore.cleanupWebSocket()
+  workflowsStore.cleanupWebSocket()
+
+  console.log('[Dashboard] All WebSocket subscriptions cleaned up')
 })
 </script>
 

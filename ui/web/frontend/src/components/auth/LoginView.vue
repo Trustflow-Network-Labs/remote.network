@@ -13,10 +13,9 @@
         <div class="endpoint-input-group">
           <input
             id="endpoint"
-            v-model="nodeEndpoint"
+            v-model="inputEndpoint"
             type="text"
             placeholder="localhost:8080"
-            @blur="updateEndpoint"
             :disabled="loading"
           />
           <button class="test-button" @click="testConnection" :disabled="loading || testing">
@@ -59,6 +58,7 @@ import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '../../stores/auth'
 import { useConnectionStore } from '../../stores/connection'
 import { authenticateEd25519, loadPrivateKeyFromFile } from '../../services/auth/ed25519'
+import { initializeWebSocket } from '../../services/websocket'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -69,7 +69,7 @@ const loading = ref(false)
 const testing = ref(false)
 const error = ref<string | null>(null)
 const showEd25519Modal = ref(false)
-const nodeEndpoint = ref(connectionStore.nodeEndpoint)
+const inputEndpoint = ref(connectionStore.nodeEndpoint)
 const connectionStatus = ref<{ type: string; message: string } | null>(null)
 
 onMounted(() => {
@@ -77,12 +77,10 @@ onMounted(() => {
   testConnection()
 })
 
-function updateEndpoint() {
-  connectionStore.setNodeEndpoint(nodeEndpoint.value)
-  connectionStatus.value = null
-}
-
 async function testConnection() {
+  // Update store with current input value
+  connectionStore.setNodeEndpoint(inputEndpoint.value)
+
   testing.value = true
   connectionStatus.value = null
   error.value = null
@@ -111,6 +109,9 @@ async function testConnection() {
 }
 
 async function connectEd25519() {
+  // Update store with current input value before authenticating
+  connectionStore.setNodeEndpoint(inputEndpoint.value)
+
   // Show file picker for private key
   showEd25519Modal.value = true
 }
@@ -139,6 +140,10 @@ async function handleEd25519File(event: Event) {
       console.log('Authentication successful, updating store and redirecting...')
       // Update auth store
       authStore.setAuth(result.token, '', result.peer_id, 'ed25519')
+
+      // Initialize WebSocket connection
+      initializeWebSocket(connectionStore.nodeEndpoint, result.token)
+      console.log('WebSocket initialized')
 
       // Redirect to dashboard
       await router.push('/dashboard')

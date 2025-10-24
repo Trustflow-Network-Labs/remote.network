@@ -3,6 +3,9 @@ import { createPinia } from 'pinia'
 import { createI18n } from 'vue-i18n'
 import router from './router'
 import App from './App.vue'
+import { useAuthStore } from './stores/auth'
+import { useConnectionStore } from './stores/connection'
+import { initializeWebSocket } from './services/websocket'
 
 // PrimeVue imports
 import PrimeVue from 'primevue/config'
@@ -50,5 +53,14 @@ app.use(router)
 app.use(i18n)
 app.use(ConfirmationService)
 app.use(ToastService)
+
+// Initialize WebSocket if user is already authenticated (page refresh scenario)
+const authStore = useAuthStore()
+const connectionStore = useConnectionStore()
+
+if (authStore.isAuthenticated && authStore.token) {
+  console.log('[Main] User already authenticated, initializing WebSocket')
+  initializeWebSocket(connectionStore.nodeEndpoint, authStore.token)
+}
 
 app.mount('#app')

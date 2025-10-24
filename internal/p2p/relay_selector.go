@@ -20,6 +20,8 @@ type RelayCandidate struct {
 	Capacity        int
 	LastSeen        time.Time
 	Metadata        *database.PeerMetadata
+	FailureCount    int       // Number of consecutive connection failures
+	LastFailure     time.Time // Timestamp of last connection failure
 }
 
 // RelaySelector selects the best relay peer for NAT traversal
@@ -92,6 +94,18 @@ func (rs *RelaySelector) RemoveCandidate(nodeID string) {
 
 	delete(rs.candidates, nodeID)
 	rs.logger.Debug(fmt.Sprintf("Removed relay candidate: %s", nodeID), "relay-selector")
+}
+
+// UpdateCandidateLastSeen updates the LastSeen timestamp for a candidate
+// This prevents actively-used relays from being removed as stale
+func (rs *RelaySelector) UpdateCandidateLastSeen(nodeID string) {
+	rs.candidatesMutex.Lock()
+	defer rs.candidatesMutex.Unlock()
+
+	if candidate, ok := rs.candidates[nodeID]; ok {
+		candidate.LastSeen = time.Now()
+		rs.logger.Debug(fmt.Sprintf("Updated LastSeen for relay candidate: %s", nodeID), "relay-selector")
+	}
 }
 
 // GetCandidateCount returns the number of available relay candidates

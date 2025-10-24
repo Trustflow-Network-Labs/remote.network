@@ -11,6 +11,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.1
 	modernc.org/sqlite v1.39.0
+	github.com/gorilla/websocket v1.5.3
 )
 
 require (

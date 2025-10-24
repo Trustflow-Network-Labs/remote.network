@@ -3,6 +3,7 @@
     <NavigationSidebar class="sidebar-pane" />
     <div class="resizer"></div>
     <div class="main-content content-pane">
+      <ConnectionStatus class="connection-status-bar" />
       <slot />
     </div>
   </div>
@@ -11,6 +12,7 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import NavigationSidebar from './NavigationSidebar.vue'
+import ConnectionStatus from '../common/ConnectionStatus.vue'
 import { useResizer } from '../../composables/useResizer'
 
 const { initResizer } = useResizer()
@@ -85,5 +87,15 @@ onMounted(() => {
   flex: 1;
   overflow: hidden;
   height: 100vh;
+  position: relative;
+}
+
+.connection-status-bar {
+  position: sticky;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 </style>

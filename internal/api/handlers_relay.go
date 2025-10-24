@@ -363,19 +363,25 @@ func (s *APIServer) handleRelayConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Connect to specific relay
-	err := relayManager.ConnectToSpecificRelay(req.PeerID)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "Failed to connect to relay: " + err.Error()})
-		return
-	}
+	// Connect to specific relay asynchronously to avoid HTTP timeout
+	// Frontend will receive connection status via WebSocket RELAY_CANDIDATES message
+	go func() {
+		err := relayManager.ConnectToSpecificRelay(req.PeerID)
+		if err != nil {
+			s.logger.Warn("Failed to connect to relay: "+err.Error(), "api")
+		} else {
+			s.logger.Info("Successfully connected to relay "+req.PeerID, "api")
+			// Trigger immediate WebSocket update for responsive UI
+			s.eventEmitter.TriggerRelayBroadcast()
+		}
+	}()
 
+	// Return immediately with 202 Accepted
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(SuccessResponse{
 		Success: true,
-		Message: "Connected to relay successfully",
+		Message: "Relay connection initiated",
 	})
 }
 
@@ -397,6 +403,9 @@ func (s *APIServer) handleRelayDisconnect(w http.ResponseWriter, r *http.Request
 
 	// Disconnect from relay
 	relayManager.DisconnectRelay()
+
+	// Trigger immediate WebSocket update for responsive UI
+	s.eventEmitter.TriggerRelayBroadcast()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(SuccessResponse{

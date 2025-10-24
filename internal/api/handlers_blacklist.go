@@ -72,6 +72,9 @@ func (s *APIServer) handleAddToBlacklist(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Broadcast blacklist update via WebSocket
+	s.eventEmitter.BroadcastBlacklistUpdate()
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -101,6 +104,9 @@ func (s *APIServer) handleRemoveFromBlacklist(w http.ResponseWriter, r *http.Req
 		http.Error(w, "Failed to remove peer from blacklist", http.StatusInternalServerError)
 		return
 	}
+
+	// Broadcast blacklist update via WebSocket
+	s.eventEmitter.BroadcastBlacklistUpdate()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

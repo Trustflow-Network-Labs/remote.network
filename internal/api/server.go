@@ -12,11 +12,15 @@ import (
 	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api/auth"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api/events"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api/middleware"
+	ws "github.com/Trustflow-Network-Labs/remote-network-node/internal/api/websocket"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/core"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
+	"github.com/gorilla/websocket"
+	"github.com/sirupsen/logrus"
 )
 
 // Frontend dist files will be embedded here when built
@@ -39,6 +43,10 @@ type APIServer struct {
 	jwtManager       *middleware.JWTManager
 	challengeManager *auth.ChallengeManager
 	ed25519Provider  *auth.Ed25519Provider
+	wsHub            *ws.Hub
+	wsLogger         *logrus.Logger
+	wsUpgrader       websocket.Upgrader
+	eventEmitter     *events.Emitter
 	startTime        time.Time
 }
 
@@ -73,6 +81,26 @@ func NewAPIServer(
 		ed25519Provider = auth.NewEd25519Provider(keyPair)
 	}
 
+	// Initialize WebSocket hub (use separate logrus logger for WebSocket)
+	wsLogger := logrus.New()
+	wsLogger.SetLevel(logrus.InfoLevel)
+	wsLogger.SetFormatter(&logrus.JSONFormatter{})
+	wsHub := ws.NewHub(wsLogger)
+
+	// Configure WebSocket upgrader
+	wsUpgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			// Allow all origins for development
+			// TODO: Restrict in production based on config
+			return true
+		},
+	}
+
+	// Initialize event emitter
+	eventEmitter := events.NewEmitter(wsHub, peerManager, dbManager, wsLogger)
+
 	return &APIServer{
 		ctx:              ctx,
 		cancel:           cancel,
@@ -84,6 +112,10 @@ func NewAPIServer(
 		jwtManager:       jwtManager,
 		challengeManager: challengeManager,
 		ed25519Provider:  ed25519Provider,
+		wsHub:            wsHub,
+		wsLogger:         wsLogger,
+		wsUpgrader:       wsUpgrader,
+		eventEmitter:     eventEmitter,
 		startTime:        time.Now(),
 	}
 }
@@ -134,6 +166,14 @@ func (s *APIServer) Start() error {
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+
+	// Start WebSocket hub
+	go s.wsHub.Run()
+	s.logger.Info("WebSocket hub started", "api")
+
+	// Start event emitter
+	s.eventEmitter.Start()
+	s.logger.Info("Event emitter started", "api")
 
 	// Start server in goroutine
 	go func() {
@@ -264,8 +304,8 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		}
 	})
 
-	// WebSocket endpoint (to be implemented)
-	// mux.HandleFunc("/api/ws", s.handleWebSocket)
+	// WebSocket endpoint
+	mux.HandleFunc("/api/ws", s.handleWebSocket)
 
 	s.logger.Debug("API routes registered", "api")
 }
@@ -281,6 +321,11 @@ func (s *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *APIServer) Stop() error {
 	s.logger.Info("Stopping API server", "api")
 	s.cancel()
+
+	// Stop event emitter
+	if s.eventEmitter != nil {
+		s.eventEmitter.Stop()
+	}
 
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

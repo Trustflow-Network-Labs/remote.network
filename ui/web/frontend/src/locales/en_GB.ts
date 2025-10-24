@@ -30,7 +30,7 @@ export default {
       selectPrivateKey: 'Select your Ed25519 private key file to authenticate',
       chooseKeyFile: 'Choose Key File',
       noFileSelected: 'No file selected',
-      authMethod: 'Authentication Method',
+      authMethod: 'Node Endpoint',
       ed25519Auth: 'Ed25519 Key Authentication'
     },
     dashboard: {
@@ -99,6 +99,8 @@ export default {
       disconnectFromRelay: 'Disconnect from Relay',
       connectConfirm: 'Connect to this relay?',
       disconnectRelayConfirm: 'Disconnect from current relay?',
+      connectingToRelay: 'Connecting to relay...',
+      disconnectingRelay: 'Disconnecting from relay...',
       relayConnected: 'Connected to relay successfully',
       relayDisconnected: 'Disconnected from relay successfully',
       preferredSet: 'Preferred relay set successfully',

@@ -264,6 +264,13 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 	rm.sessionStart = time.Now()
 	rm.relayMutex.Unlock()
 
+	// Update LastSeen to prevent this relay from being marked as stale
+	rm.selector.UpdateCandidateLastSeen(relay.NodeID)
+
+	// Reset failure count on successful connection
+	relay.FailureCount = 0
+	relay.LastFailure = time.Time{}
+
 	// Reset traffic counters
 	rm.trafficMutex.Lock()
 	rm.ingressBytes = 0
@@ -460,20 +467,30 @@ func (rm *RelayManager) handleRelayConnectionLoss() {
 		// Try connecting to the same relay with a new QUIC connection
 		if err := rm.ConnectToRelay(failedRelay); err != nil {
 			rm.logger.Warn(fmt.Sprintf("Failed to reconnect to same relay %s: %v", failedRelayNodeID, err), "relay-manager")
-			// Will try different relay below
+
+			// Increment failure count and update last failure time
+			failedRelay.FailureCount++
+			failedRelay.LastFailure = time.Now()
+
+			// Only remove after MAX_RELAY_FAILURES consecutive failures
+			const MAX_RELAY_FAILURES = 3
+			if failedRelay.FailureCount >= MAX_RELAY_FAILURES {
+				rm.logger.Info(fmt.Sprintf("Removing failed relay %s from candidates after %d consecutive failures",
+					failedRelayNodeID, failedRelay.FailureCount), "relay-manager")
+				rm.selector.RemoveCandidate(failedRelayNodeID)
+
+				// Log remaining candidates
+				remainingCount := rm.selector.GetCandidateCount()
+				rm.logger.Info(fmt.Sprintf("Remaining relay candidates after removal: %d", remainingCount), "relay-manager")
+			} else {
+				rm.logger.Warn(fmt.Sprintf("Relay %s has %d/%d failures, keeping in candidate list",
+					failedRelayNodeID, failedRelay.FailureCount, MAX_RELAY_FAILURES), "relay-manager")
+			}
 		} else {
 			// Successfully reconnected to same relay with new connection
 			rm.logger.Info(fmt.Sprintf("Successfully reconnected to same relay %s with new QUIC connection", failedRelayNodeID), "relay-manager")
 			return
 		}
-
-		// Step 5: If reconnection to same relay failed, remove it and try a different relay
-		rm.logger.Info(fmt.Sprintf("Removing failed relay %s from candidates", failedRelayNodeID), "relay-manager")
-		rm.selector.RemoveCandidate(failedRelayNodeID)
-
-		// Log remaining candidates
-		remainingCount := rm.selector.GetCandidateCount()
-		rm.logger.Info(fmt.Sprintf("Remaining relay candidates after removal: %d", remainingCount), "relay-manager")
 	}
 
 	// Wait a bit before trying a different relay

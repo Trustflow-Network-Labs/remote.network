@@ -91,6 +91,9 @@ func (s *APIServer) handleCreateWorkflow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Broadcast workflow update via WebSocket
+	s.eventEmitter.BroadcastWorkflowUpdate()
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(workflow)
@@ -139,6 +142,9 @@ func (s *APIServer) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Broadcast workflow update via WebSocket
+	s.eventEmitter.BroadcastWorkflowUpdate()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "Workflow updated successfully",
@@ -170,6 +176,9 @@ func (s *APIServer) handleDeleteWorkflow(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
+
+	// Broadcast workflow update via WebSocket
+	s.eventEmitter.BroadcastWorkflowUpdate()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

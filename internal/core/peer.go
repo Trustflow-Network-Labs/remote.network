@@ -52,6 +52,7 @@ type PeerManager struct {
 	cancel                context.CancelFunc
 	mutex                 sync.RWMutex
 	running               bool
+	startTime             time.Time
 	maintenanceTicker     *time.Ticker
 }
 
@@ -313,6 +314,7 @@ func (pm *PeerManager) Start() error {
 	pm.logger.Debug("Starting periodic bootstrap re-query goroutine", "core")
 	go pm.periodicBootstrapRequeryLoop()
 
+	pm.startTime = time.Now()
 	pm.running = true
 	pm.logger.Info("Peer Manager started successfully with 4 background goroutines", "core")
 
@@ -639,8 +641,16 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 	nodeID := pm.dht.NodeID()
 	peerID := pm.keyPair.PeerID() // Persistent peer ID derived from Ed25519 public key
 	quicPort := pm.config.GetConfigInt("quic_port", 30906, 1024, 65535)
+
+	// Calculate uptime in seconds
+	var uptimeSeconds float64
+	if !pm.startTime.IsZero() {
+		uptimeSeconds = time.Since(pm.startTime).Seconds()
+	}
+
 	stats := map[string]interface{}{
 		"running":          pm.running,
+		"uptime_seconds":   uptimeSeconds,
 		"dht_stats":        pm.dht.GetStats(),
 		"dht_node_id":      nodeID,      // DHT node ID (changes on restart)
 		"peer_id":          peerID,      // Persistent peer ID (based on Ed25519 keypair)

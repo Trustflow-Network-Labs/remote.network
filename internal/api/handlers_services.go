@@ -113,6 +113,9 @@ func (s *APIServer) handleAddService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -191,6 +194,9 @@ func (s *APIServer) handleUpdateService(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"service": updatedService,
@@ -219,6 +225,9 @@ func (s *APIServer) handleDeleteService(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Failed to delete service", http.StatusInternalServerError)
 		return
 	}
+
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

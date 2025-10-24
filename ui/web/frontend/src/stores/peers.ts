@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { api } from '../services/api'
+import { getWebSocketService, MessageType } from '../services/websocket'
 
 export interface Peer {
   peer_id: string
@@ -25,6 +26,10 @@ export const usePeersStore = defineStore('peers', {
     loading: false,
     error: null
   }),
+
+  // Track unsubscribe functions
+  _wsUnsubscribePeers: null as (() => void) | null,
+  _wsUnsubscribeBlacklist: null as (() => void) | null,
 
   getters: {
     totalPeers: (state) => state.peers.length,
@@ -100,6 +105,74 @@ export const usePeersStore = defineStore('peers', {
 
     removePeer(peerId: string) {
       this.peers = this.peers.filter(p => p.peer_id !== peerId)
+    },
+
+    // Initialize WebSocket subscriptions
+    initializeWebSocket() {
+      const wsService = getWebSocketService()
+      if (!wsService) {
+        console.warn('[PeersStore] WebSocket service not available')
+        return
+      }
+
+      // Subscribe to peers updates
+      const unsubscribePeers = wsService.subscribe(
+        MessageType.PEERS_UPDATED,
+        this.handlePeersUpdate.bind(this)
+      )
+
+      // Subscribe to blacklist updates
+      const unsubscribeBlacklist = wsService.subscribe(
+        MessageType.BLACKLIST_UPDATED,
+        this.handleBlacklistUpdate.bind(this)
+      )
+
+      // Store unsubscribe functions
+      ;(this as any)._wsUnsubscribePeers = unsubscribePeers
+      ;(this as any)._wsUnsubscribeBlacklist = unsubscribeBlacklist
+
+      console.log('[PeersStore] WebSocket subscriptions initialized')
+    },
+
+    // Cleanup WebSocket subscriptions
+    cleanupWebSocket() {
+      const unsubscribePeers = (this as any)._wsUnsubscribePeers
+      if (unsubscribePeers) {
+        unsubscribePeers()
+        ;(this as any)._wsUnsubscribePeers = null
+      }
+
+      const unsubscribeBlacklist = (this as any)._wsUnsubscribeBlacklist
+      if (unsubscribeBlacklist) {
+        unsubscribeBlacklist()
+        ;(this as any)._wsUnsubscribeBlacklist = null
+      }
+    },
+
+    // Handle WebSocket peers update
+    handlePeersUpdate(payload: any) {
+      if (payload && payload.peers) {
+        this.peers = payload.peers.map((peer: any) => ({
+          peer_id: peer.id,
+          dht_node_id: peer.dht_node_id || '',
+          is_relay: peer.is_relay || false,
+          is_store: peer.is_store || false,
+          last_seen: new Date(peer.last_seen * 1000).toISOString(),
+          topic: peer.topic || '',
+          source: peer.source || ''
+        }))
+        this.loading = false
+        this.error = null
+      }
+    },
+
+    // Handle WebSocket blacklist update
+    handleBlacklistUpdate(payload: any) {
+      if (payload && payload.blacklist) {
+        this.blacklist = payload.blacklist.map((entry: any) => entry.peer_id)
+        this.loading = false
+        this.error = null
+      }
     }
   }
 })
