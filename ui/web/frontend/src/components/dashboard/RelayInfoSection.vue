@@ -36,36 +36,49 @@
           :value="sessions"
           :paginator="sessions.length > 10"
           :rows="10"
+          :rowsPerPageOptions="[10, 20, 50, 100]"
           responsiveLayout="scroll"
+          filterDisplay="row"
+          v-model:filters="sessionsFilters"
         >
-          <Column field="remote_peer_id" :header="$t('message.dashboard.peerId')">
+          <Column field="remote_peer_id" :header="$t('message.dashboard.peerId')" filterMatchMode="contains" :showFilterMenu="false">
             <template #body="slotProps">
               <div class="id-with-copy">
                 <span>{{ shorten(slotProps.data.remote_peer_id, 6, 6) }}</span>
                 <i class="pi pi-copy copy-icon" @click="copyToClipboard(slotProps.data.remote_peer_id)" :title="$t('message.common.copy')"></i>
               </div>
             </template>
-          </Column>          <Column field="duration_seconds" :header="$t('message.dashboard.sessionDuration')">
+            <template #filter="{ filterModel, filterCallback }">
+              <InputText
+                v-model="filterModel.value"
+                type="text"
+                @input="filterCallback()"
+                placeholder="Search by Peer ID"
+                class="p-column-filter"
+              />
+            </template>
+          </Column>
+          <Column field="duration_seconds" :header="$t('message.dashboard.sessionDuration')" sortable>
             <template #body="slotProps">
               {{ formatDuration(slotProps.data.duration_seconds) }}
             </template>
           </Column>
-          <Column field="ingress_bytes" :header="$t('message.dashboard.trafficIngress')">
+          <Column field="ingress_bytes" :header="$t('message.dashboard.trafficIngress')" sortable>
             <template #body="slotProps">
               {{ formatBytes(slotProps.data.ingress_bytes) }}
             </template>
           </Column>
-          <Column field="egress_bytes" :header="$t('message.dashboard.trafficEgress')">
+          <Column field="egress_bytes" :header="$t('message.dashboard.trafficEgress')" sortable>
             <template #body="slotProps">
               {{ formatBytes(slotProps.data.egress_bytes) }}
             </template>
           </Column>
-          <Column field="total_bytes" :header="$t('message.dashboard.trafficTotal')">
+          <Column field="total_bytes" :header="$t('message.dashboard.trafficTotal')" sortable>
             <template #body="slotProps">
               {{ formatBytes(slotProps.data.total_bytes) }}
             </template>
           </Column>
-          <Column field="earnings" :header="$t('message.dashboard.earnings')">
+          <Column field="earnings" :header="$t('message.dashboard.earnings')" sortable>
             <template #body="slotProps">
               {{ (slotProps.data.earnings || 0).toFixed(4) }} tokens
             </template>
@@ -162,16 +175,28 @@
           :value="candidates"
           :paginator="candidates.length > 10"
           :rows="10"
+          :rowsPerPageOptions="[10, 20, 50, 100]"
           responsiveLayout="scroll"
           sortField="latency_ms"
           :sortOrder="1"
+          filterDisplay="row"
+          v-model:filters="candidatesFilters"
         >
-          <Column field="peer_id" :header="$t('message.dashboard.peerId')">
+          <Column field="peer_id" :header="$t('message.dashboard.peerId')" filterMatchMode="contains" :showFilterMenu="false">
             <template #body="slotProps">
               <div class="id-with-copy">
                 <span>{{ shorten(slotProps.data.peer_id, 6, 6) }}</span>
                 <i class="pi pi-copy copy-icon" @click="copyToClipboard(slotProps.data.peer_id)" :title="$t('message.common.copy')"></i>
               </div>
+            </template>
+            <template #filter="{ filterModel, filterCallback }">
+              <InputText
+                v-model="filterModel.value"
+                type="text"
+                @input="filterCallback()"
+                placeholder="Search by Peer ID"
+                class="p-column-filter"
+              />
             </template>
           </Column>
           <Column field="latency_ms" :header="$t('message.dashboard.relayLatency')" sortable>
@@ -194,7 +219,7 @@
               {{ slotProps.data.capacity }}
             </template>
           </Column>
-          <Column :header="$t('message.dashboard.status')">
+          <Column field="status_priority" :header="$t('message.dashboard.status')" sortable>
             <template #body="slotProps">
               <span v-if="slotProps.data.is_connected" class="status-badge connected">
                 {{ $t('message.dashboard.connected') }}
@@ -277,6 +302,8 @@ import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
+import InputText from 'primevue/inputtext'
+import { FilterMatchMode } from '@primevue/core/api'
 import { api } from '../../services/api'
 import { useClipboard } from '../../composables/useClipboard'
 import { useTextUtils } from '../../composables/useTextUtils'
@@ -307,6 +334,15 @@ const showDisconnectRelayDialog = ref(false)
 // WebSocket unsubscribe functions
 let unsubscribeSessions: (() => void) | null = null
 let unsubscribeCandidates: (() => void) | null = null
+
+// Filter states
+const sessionsFilters = ref({
+  remote_peer_id: { value: null, matchMode: FilterMatchMode.CONTAINS }
+})
+
+const candidatesFilters = ref({
+  peer_id: { value: null, matchMode: FilterMatchMode.CONTAINS }
+})
 
 // Watch for changes to current relay session from WebSocket NODE_STATUS updates
 watch(() => props.relayStats.current_relay_session, (newSession) => {
@@ -567,7 +603,11 @@ onMounted(async () => {
     // Subscribe to relay candidates (NAT mode)
     unsubscribeCandidates = wsService.subscribe(MessageType.RELAY_CANDIDATES, (payload: any) => {
       if (payload && payload.candidates) {
-        candidates.value = payload.candidates
+        // Add status_priority for sorting: 1=Connected, 2=Preferred, 3=Available
+        candidates.value = payload.candidates.map((c: any) => ({
+          ...c,
+          status_priority: c.is_connected ? 1 : (c.is_preferred ? 2 : 3)
+        }))
         // Note: Current relay session data (duration, traffic, cost) comes from
         // props.relayStats.current_relay_session via NODE_STATUS WebSocket updates,
         // NOT from the candidates list which only has static relay info (latency, pricing, etc.)

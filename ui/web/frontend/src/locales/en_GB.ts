@@ -18,7 +18,8 @@ export default {
       total: 'Total',
       copy: 'Copy',
       copiedToClipboard: 'Copied to clipboard',
-      actions: 'Actions'
+      actions: 'Actions',
+      back: 'Back'
     },
     auth: {
       login: 'Login',
@@ -145,6 +146,8 @@ export default {
       status: 'Status',
       pricing: 'Pricing',
       capabilities: 'Capabilities',
+      peerServicesTitle: 'Peer Services',
+      peerServicesPlaceholder: 'Service discovery for peers is coming soon. This section will display all services hosted by this peer.',
       types: {
         storage: 'File Storage',
         docker: 'Docker Container',
@@ -170,7 +173,12 @@ export default {
       isRelay: 'Relay',
       isStore: 'Store',
       lastSeen: 'Last Seen',
-      source: 'Source'
+      source: 'Source',
+      filterActive: 'Active Peers',
+      filterBlacklisted: 'Blacklisted Peers',
+      servicesFiles: 'File Services',
+      servicesApps: 'App Services',
+      viewServices: 'View Services'
     },
     configuration: {
       title: 'Configuration',

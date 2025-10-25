@@ -50,48 +50,18 @@ const menuItems = computed(() => {
       class: currentPath === '/peers' ? 'active-menu-item' : ''
     },
     {
+      icon: 'pi pi-box',
+      label: t('message.navigation.services'),
+      key: 'services',
+      command: () => router.push('/services'),
+      class: currentPath === '/services' ? 'active-menu-item' : ''
+    },
+    {
       icon: 'pi pi-sitemap',
       label: t('message.navigation.workflows'),
       key: 'workflows',
-      class: currentPath.startsWith('/workflows') ? 'active-menu-item' : '',
-      items: [
-        {
-          icon: 'pi pi-list',
-          label: t('message.navigation.listWorkflows'),
-          key: 'list-workflows',
-          command: () => router.push('/workflows'),
-          class: currentPath === '/workflows' ? 'active-menu-item' : ''
-        },
-        {
-          icon: 'pi pi-plus',
-          label: t('message.navigation.createWorkflow'),
-          key: 'create-workflow',
-          command: () => router.push('/workflows/create'),
-          class: currentPath === '/workflows/create' ? 'active-menu-item' : ''
-        }
-      ]
-    },
-    {
-      icon: 'pi pi-cog',
-      label: t('message.navigation.configureNode'),
-      key: 'configure-node',
-      class: currentPath.startsWith('/configuration') ? 'active-menu-item' : '',
-      items: [
-        {
-          icon: 'pi pi-ban',
-          label: t('message.navigation.blacklist'),
-          key: 'blacklist',
-          command: () => router.push('/configuration#blacklist'),
-          class: currentPath === '/configuration' && route.hash === '#blacklist' ? 'active-menu-item' : ''
-        },
-        {
-          icon: 'pi pi-box',
-          label: t('message.navigation.services'),
-          key: 'services',
-          command: () => router.push('/configuration#services'),
-          class: currentPath === '/configuration' && (route.hash === '#services' || !route.hash) ? 'active-menu-item' : ''
-        }
-      ]
+      command: () => router.push('/workflows'),
+      class: currentPath.startsWith('/workflows') ? 'active-menu-item' : ''
     }
   ]
 })

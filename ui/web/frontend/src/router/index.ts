@@ -25,9 +25,21 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true }
   },
   {
-    path: '/configuration',
-    name: 'Configuration',
-    component: () => import('../components/configuration/ConfigurationView.vue'),
+    path: '/services',
+    name: 'Services',
+    component: () => import('../components/services/ServicesView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/services/peer/:peerId',
+    name: 'PeerServices',
+    component: () => import('../components/services/ServicesView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/workflows',
+    name: 'Workflows',
+    component: () => import('../components/workflows/WorkflowsView.vue'),
     meta: { requiresAuth: true }
   }
 ]

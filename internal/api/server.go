@@ -85,6 +85,8 @@ func NewAPIServer(
 	wsLogger := logrus.New()
 	wsLogger.SetLevel(logrus.InfoLevel)
 	wsLogger.SetFormatter(&logrus.JSONFormatter{})
+	// Write WebSocket logs to the main log file instead of CLI
+	wsLogger.SetOutput(logger.File)
 	wsHub := ws.NewHub(wsLogger)
 
 	// Configure WebSocket upgrader

@@ -40,6 +40,4 @@ func (s *APIServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Start client's read and write pumps
 	client.Start()
-
-	s.logger.Info(fmt.Sprintf("WebSocket client connected: %s", claims.PeerID), "api")
 }

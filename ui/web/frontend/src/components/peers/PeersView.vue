@@ -1,97 +1,149 @@
 <template>
   <AppLayout>
     <div class="peers">
-      <div class="peers-header">
-        <h1>{{ $t('message.peers.title') }}</h1>
+      <!-- Filter Section -->
+      <div class="filter-section">
+        <div class="filter-buttons">
+          <div
+            class="filter-button"
+            :class="{ active: activeFilter === 'active' }"
+            @click="toggleFilter('active')"
+          >
+            <div class="filter-button-content">
+              <div class="filter-button-icon">
+                <OverlayBadge :value="nonBlacklistedCount" severity="contrast" size="small">
+                  <Avatar icon="pi pi-users" size="large"
+                    style="background-color: #56a452; color: #fff" />
+                </OverlayBadge>
+              </div>
+              <div class="filter-button-label">
+                {{ $t('message.peers.filterActive') }}
+              </div>
+            </div>
+          </div>
+
+          <div
+            class="filter-button"
+            :class="{ active: activeFilter === 'blacklisted' }"
+            @click="toggleFilter('blacklisted')"
+          >
+            <div class="filter-button-content">
+              <div class="filter-button-icon">
+                <OverlayBadge :value="blacklistedCount" severity="contrast" size="small">
+                  <Avatar icon="pi pi-ban" size="large"
+                    style="background-color: rgb(205, 81, 36); color: #fff" />
+                </OverlayBadge>
+              </div>
+              <div class="filter-button-label">
+                {{ $t('message.peers.filterBlacklisted') }}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div v-if="peersStore.loading" class="loading">
         <ProgressSpinner style="width:50px;height:50px" strokeWidth="4" />
       </div>
 
-      <DataTable
-        v-else
-        :value="peersStore.peers"
-        :paginator="true"
-        :rows="25"
-        class="peers-table"
-        :rowsPerPageOptions="[10, 25, 50]"
-        responsiveLayout="scroll"
-        filterDisplay="row"
-        v-model:filters="filters"
-      >
-        <template #empty>
-          <div class="empty-state">
-            <i class="pi pi-inbox"></i>
-            <p>{{ $t('message.common.noData') }}</p>
-          </div>
-        </template>
+      <div v-else class="peers-table-section">
+        <DataTable
+          :value="filteredPeers"
+          :paginator="filteredPeers.length > 10"
+          :rows="10"
+          class="peers-table"
+          :rowsPerPageOptions="[10, 20, 50, 100]"
+          responsiveLayout="scroll"
+          sortField="last_seen"
+          :sortOrder="-1"
+          filterDisplay="row"
+          v-model:filters="peersFilters"
+        >
+          <template #empty>
+            <div class="empty-state">
+              <i class="pi pi-inbox"></i>
+              <p>{{ $t('message.common.noData') }}</p>
+            </div>
+          </template>
 
-        <Column field="peer_id" :header="$t('message.peers.peerId')" :sortable="true" filterMatchMode="contains" :showFilterMenu="false">
-          <template #body="slotProps">
-            <code class="peer-id">{{ slotProps.data.peer_id }}</code>
-          </template>
-          <template #filter="{ filterModel, filterCallback }">
-            <InputText
-              v-model="filterModel.value"
-              type="text"
-              @input="filterCallback()"
-              placeholder="Search by Peer ID"
-              class="p-column-filter"
-            />
-          </template>
-        </Column>
+          <Column field="peer_id" :header="$t('message.peers.peerId')" filterMatchMode="contains" :showFilterMenu="false">
+            <template #body="slotProps">
+              <div class="id-with-copy">
+                <span>{{ shorten(slotProps.data.peer_id, 6, 6) }}</span>
+                <i class="pi pi-copy copy-icon" @click="copyPeerId(slotProps.data.peer_id)" :title="$t('message.common.copy')"></i>
+              </div>
+            </template>
+            <template #filter="{ filterModel, filterCallback }">
+              <InputText
+                v-model="filterModel.value"
+                type="text"
+                @input="filterCallback()"
+                placeholder="Search by Peer ID"
+                class="p-column-filter"
+              />
+            </template>
+          </Column>
 
-        <Column field="is_relay" :header="$t('message.peers.isRelay')" :sortable="true" style="width:10%">
-          <template #body="slotProps">
-            <Tag
-              :value="slotProps.data.is_relay ? 'Yes' : 'No'"
-              :severity="slotProps.data.is_relay ? 'success' : 'secondary'"
-            />
-          </template>
-        </Column>
+          <Column field="is_relay" :header="$t('message.peers.isRelay')" :sortable="true">
+            <template #body="slotProps">
+              <span v-if="slotProps.data.is_relay" class="status-badge relay">
+                Yes
+              </span>
+              <span v-else class="status-badge no-relay">
+                No
+              </span>
+            </template>
+          </Column>
 
-        <Column field="is_store" :header="$t('message.peers.isStore')" :sortable="true" style="width:10%">
-          <template #body="slotProps">
-            <Tag
-              :value="slotProps.data.is_store ? 'Yes' : 'No'"
-              :severity="slotProps.data.is_store ? 'success' : 'secondary'"
-            />
-          </template>
-        </Column>
+          <Column field="last_seen" :header="$t('message.peers.lastSeen')" :sortable="true">
+            <template #body="slotProps">
+              {{ formatDate(slotProps.data.last_seen) }}
+            </template>
+          </Column>
 
-        <Column field="last_seen" :header="$t('message.peers.lastSeen')" :sortable="true" style="width:15%">
-          <template #body="slotProps">
-            {{ formatDate(slotProps.data.last_seen) }}
-          </template>
-        </Column>
+          <Column field="files_count" header="Files" sortable>
+            <template #body="slotProps">
+              {{ slotProps.data.files_count }}
+            </template>
+          </Column>
 
-        <Column field="source" :header="$t('message.peers.source')" :sortable="true" style="width:12%">
-          <template #body="slotProps">
-            <Tag :value="slotProps.data.source" severity="info" />
-          </template>
-        </Column>
+          <Column field="apps_count" header="Apps" sortable>
+            <template #body="slotProps">
+              {{ slotProps.data.apps_count }}
+            </template>
+          </Column>
 
-        <Column :exportable="false" style="min-width:8rem">
-          <template #body="slotProps">
-            <Button
-              v-if="!peersStore.isBlacklisted(slotProps.data.peer_id)"
-              icon="pi pi-ban"
-              text
-              rounded
-              severity="danger"
-              @click="blacklistPeer(slotProps.data)"
-            />
-            <Tag v-else value="Blacklisted" severity="danger" />
-          </template>
-        </Column>
-      </DataTable>
+          <Column :header="$t('message.common.actions')">
+            <template #body="slotProps">
+              <Button
+                icon="pi pi-box"
+                class="p-button-sm p-button-info p-button-text"
+                :label="$t('message.peers.viewServices')"
+                @click="viewPeerServices(slotProps.data)"
+              />
+              <Button
+                v-if="!peersStore.isBlacklisted(slotProps.data.peer_id)"
+                icon="pi pi-ban"
+                class="p-button-sm p-button-danger p-button-text"
+                :label="$t('message.dashboard.blacklist')"
+                @click="blacklistPeer(slotProps.data)"
+              />
+              <Button
+                v-else
+                icon="pi pi-check"
+                class="p-button-sm p-button-success p-button-text"
+                @click="unblacklistPeer(slotProps.data)"
+              />
+            </template>
+          </Column>
+        </DataTable>
+      </div>
     </div>
   </AppLayout>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useConfirm } from 'primevue/useconfirm'
@@ -102,26 +154,96 @@ import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import Button from 'primevue/button'
 import ProgressSpinner from 'primevue/progressspinner'
-import Tag from 'primevue/tag'
+import Avatar from 'primevue/avatar'
+import OverlayBadge from 'primevue/overlaybadge'
 import InputText from 'primevue/inputtext'
 
 import AppLayout from '../layout/AppLayout.vue'
 import { usePeersStore } from '../../stores/peers'
+import { useClipboard } from '../../composables/useClipboard'
+import { useTextUtils } from '../../composables/useTextUtils'
 
 const router = useRouter()
 const { t } = useI18n()
 const confirm = useConfirm()
 const toast = useToast()
 const peersStore = usePeersStore()
+const { copyToClipboard } = useClipboard()
+const { shorten } = useTextUtils()
 
-const filters = ref({
+// Filter state
+const activeFilter = ref<'all' | 'active' | 'blacklisted'>('all')
+
+const peersFilters = ref({
   peer_id: { value: null, matchMode: FilterMatchMode.CONTAINS }
 })
+
+// Computed properties
+const filteredPeers = computed(() => {
+  let peers = []
+  if (activeFilter.value === 'active') {
+    peers = peersStore.peers.filter(p => !peersStore.isBlacklisted(p.peer_id))
+  } else if (activeFilter.value === 'blacklisted') {
+    peers = peersStore.peers.filter(p => peersStore.isBlacklisted(p.peer_id))
+  } else {
+    peers = peersStore.peers
+  }
+
+  // Add sortable fields for Files and Apps
+  return peers.map(p => ({
+    ...p,
+    files_count: getFileServicesCount(p),
+    apps_count: getAppServicesCount(p)
+  }))
+})
+
+const nonBlacklistedCount = computed(() => {
+  return peersStore.peers.filter(p => !peersStore.isBlacklisted(p.peer_id)).length
+})
+
+const blacklistedCount = computed(() => {
+  return peersStore.peers.filter(p => peersStore.isBlacklisted(p.peer_id)).length
+})
+
+// Functions
+function toggleFilter(filter: 'active' | 'blacklisted') {
+  if (activeFilter.value === filter) {
+    activeFilter.value = 'all' // Toggle off
+  } else {
+    activeFilter.value = filter // Toggle on
+  }
+}
 
 function formatDate(dateString: string): string {
   if (!dateString) return 'N/A'
   const date = new Date(dateString)
   return date.toLocaleString()
+}
+
+async function copyPeerId(peerId: string) {
+  const success = await copyToClipboard(peerId)
+  if (success) {
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.common.copiedToClipboard'),
+      life: 2000
+    })
+  }
+}
+
+function getFileServicesCount(peer: any): number {
+  // Placeholder - backend will provide this data
+  return 0
+}
+
+function getAppServicesCount(peer: any): number {
+  // Placeholder - backend will provide this data
+  return 0
+}
+
+function viewPeerServices(peer: any) {
+  router.push(`/services/peer/${peer.peer_id}`)
 }
 
 function blacklistPeer(peer: any) {
@@ -151,6 +273,33 @@ function blacklistPeer(peer: any) {
   })
 }
 
+function unblacklistPeer(peer: any) {
+  confirm.require({
+    message: t('message.configuration.unblacklistConfirm'),
+    header: t('message.common.confirm'),
+    icon: 'pi pi-question-circle',
+    acceptClass: 'p-button-success',
+    accept: async () => {
+      try {
+        await peersStore.removeFromBlacklist(peer.peer_id)
+        toast.add({
+          severity: 'success',
+          summary: t('message.common.success'),
+          detail: t('message.configuration.unblacklistSuccess'),
+          life: 3000
+        })
+      } catch (error) {
+        toast.add({
+          severity: 'error',
+          summary: t('message.common.error'),
+          detail: t('message.configuration.unblacklistError'),
+          life: 3000
+        })
+      }
+    }
+  })
+}
+
 onMounted(async () => {
   await peersStore.fetchPeers()
   await peersStore.fetchBlacklist()
@@ -163,15 +312,74 @@ onMounted(async () => {
 .peers {
   min-height: 100vh;
   padding: vars.$spacing-lg;
+
+  // Badge styling - white background, black text
+  :deep(.p-badge) {
+    background-color: #fff !important;
+    color: #000 !important;
+  }
 }
 
-.peers-header {
-  margin-bottom: vars.$spacing-xl;
+.filter-section {
+  padding: 1rem 0;
 
-  h1 {
-    color: vars.$color-primary;
-    font-size: vars.$font-size-xxl;
-    margin: 0;
+  .filter-buttons {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-content: flex-start;
+    align-items: flex-start;
+    width: 100%;
+    max-width: 100%;
+
+    .filter-button {
+      width: 10rem;
+      min-width: 10rem;
+      height: 5rem;
+      background-color: rgb(38, 49, 65);
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 1rem 1rem 1rem 0;
+      padding: .5rem;
+      transition: background-color 0.2s ease, border-color 0.2s ease;
+      border: 2px solid transparent;
+
+      display: flex;
+      flex-direction: column;
+      flex-wrap: nowrap;
+      justify-content: center;
+      align-content: center;
+      align-items: center;
+
+      &.active {
+        border-color: rgb(205, 81, 36);
+        background-color: rgb(49, 64, 92);
+      }
+
+      &:hover {
+        background-color: rgb(49, 64, 92);
+      }
+
+      .filter-button-content {
+        width: 100%;
+        display: flex;
+        flex-direction: row;
+        flex-wrap: nowrap;
+        justify-content: flex-start;
+        align-content: center;
+        align-items: center;
+
+        .filter-button-icon {
+          padding: 0 .25rem;
+        }
+
+        .filter-button-label {
+          padding-left: 1rem;
+          font-size: .85rem;
+        }
+      }
+    }
   }
 }
 
@@ -180,6 +388,14 @@ onMounted(async () => {
   justify-content: center;
   align-items: center;
   padding: vars.$spacing-xl;
+}
+
+.peers-table-section {
+  margin-bottom: 1.5rem;
+
+  .peers-table {
+    // Table styling handled by PrimeVue
+  }
 }
 
 .empty-state {
@@ -198,15 +414,38 @@ onMounted(async () => {
   }
 }
 
-.peer-id {
-  font-family: 'Courier New', monospace;
-  font-size: vars.$font-size-sm;
-  background: rgba(vars.$color-primary, 0.1);
-  padding: vars.$spacing-xs;
-  border-radius: vars.$border-radius-sm;
+.id-with-copy {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+
+  .copy-icon {
+    color: vars.$color-text-secondary;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: color 0.2s ease;
+
+    &:hover {
+      color: vars.$color-primary;
+    }
+  }
 }
 
-.peers-table {
-  // Background handled by PrimeVue
+.status-badge {
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  display: inline-block;
+
+  &.relay {
+    background-color: #4caf50;
+    color: white;
+  }
+
+  &.no-relay {
+    background-color: #757575;
+    color: white;
+  }
 }
 </style>
