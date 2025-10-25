@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto/keystore"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -48,16 +48,23 @@ Supported formats:
 			config = utils.NewConfigManager(configPath)
 		}
 
-		// Get keys directory using centralized path management
+		// Get data directory using centralized path management
 		paths := utils.GetAppPaths("")
-		keysDir := filepath.Join(paths.DataDir, "keys")
+		keystorePath := filepath.Join(paths.DataDir, "keystore.dat")
 
-		// Load the node's keypair
-		keyPair, err := crypto.LoadKeys(keysDir)
+		// Load and unlock keystore
+		keystoreData, err := keystore.InitOrLoadKeystore(paths.DataDir, passphraseFile, config)
 		if err != nil {
-			fmt.Printf("Error: Failed to load node keys: %v\n", err)
-			fmt.Printf("Keys directory: %s\n", keysDir)
-			fmt.Println("\nMake sure the node has been started at least once to generate keys.")
+			fmt.Printf("Error: Failed to load keystore: %v\n", err)
+			fmt.Printf("Keystore path: %s\n", keystorePath)
+			fmt.Println("\nMake sure the node has been started at least once to create the keystore.")
+			os.Exit(1)
+		}
+
+		// Convert keystore data to keypair
+		keyPair, err := keystore.LoadKeysFromKeystore(keystoreData)
+		if err != nil {
+			fmt.Printf("Error: Failed to extract keys from keystore: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -143,24 +150,31 @@ var keyInfoCmd = &cobra.Command{
 This command shows:
   - Peer ID (derived from public key)
   - Public key (hex format)
-  - Keys directory location
-  - Key file status`,
+  - Keystore location
+  - Keystore status`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Initialize configuration if not already done
 		if config == nil {
 			config = utils.NewConfigManager(configPath)
 		}
 
-		// Get keys directory using centralized path management
+		// Get data directory using centralized path management
 		paths := utils.GetAppPaths("")
-		keysDir := filepath.Join(paths.DataDir, "keys")
+		keystorePath := filepath.Join(paths.DataDir, "keystore.dat")
 
-		// Load the node's keypair
-		keyPair, err := crypto.LoadKeys(keysDir)
+		// Load and unlock keystore
+		keystoreData, err := keystore.InitOrLoadKeystore(paths.DataDir, passphraseFile, config)
 		if err != nil {
-			fmt.Printf("Error: Failed to load node keys: %v\n", err)
-			fmt.Printf("Keys directory: %s\n", keysDir)
-			fmt.Println("\nMake sure the node has been started at least once to generate keys.")
+			fmt.Printf("Error: Failed to load keystore: %v\n", err)
+			fmt.Printf("Keystore path: %s\n", keystorePath)
+			fmt.Println("\nMake sure the node has been started at least once to create the keystore.")
+			os.Exit(1)
+		}
+
+		// Convert keystore data to keypair
+		keyPair, err := keystore.LoadKeysFromKeystore(keystoreData)
+		if err != nil {
+			fmt.Printf("Error: Failed to extract keys from keystore: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -168,20 +182,15 @@ This command shows:
 		fmt.Println("Node Key Information")
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println()
-		fmt.Printf("Peer ID:        %s\n", keyPair.PeerID())
-		fmt.Printf("Public Key:     %s\n", hex.EncodeToString(keyPair.PublicKeyBytes()))
-		fmt.Printf("Keys Directory: %s\n", keysDir)
+		fmt.Printf("Peer ID:     %s\n", keyPair.PeerID())
+		fmt.Printf("Public Key:  %s\n", hex.EncodeToString(keyPair.PublicKeyBytes()))
+		fmt.Printf("Keystore:    %s\n", keystorePath)
 		fmt.Println()
 
-		// Check file status
-		publicKeyPath := filepath.Join(keysDir, "ed25519_public.key")
-		privateKeyPath := filepath.Join(keysDir, "ed25519_private.key")
-
-		if info, err := os.Stat(publicKeyPath); err == nil {
-			fmt.Printf("Public Key File:  %s (%d bytes)\n", publicKeyPath, info.Size())
-		}
-		if info, err := os.Stat(privateKeyPath); err == nil {
-			fmt.Printf("Private Key File: %s (%d bytes)\n", privateKeyPath, info.Size())
+		// Check keystore file status
+		if info, err := os.Stat(keystorePath); err == nil {
+			fmt.Printf("Status:      Encrypted (%d bytes)\n", info.Size())
+			fmt.Printf("Contains:    Ed25519 keypair + JWT secret\n")
 		}
 		fmt.Println()
 	},

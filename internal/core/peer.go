@@ -4,15 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/anacrolix/dht/v2/krpc"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/p2p"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
-	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 )
 
 
@@ -56,8 +55,14 @@ type PeerManager struct {
 	maintenanceTicker     *time.Ticker
 }
 
-func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*PeerManager, error) {
+func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyPair *crypto.KeyPair) (*PeerManager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Initialize paths first - needed for TLS certificates
+	paths := utils.GetAppPaths("")
+
+	// KeyPair is now passed in from encrypted keystore (loaded in root.go)
+	logger.Info(fmt.Sprintf("Using Ed25519 keypair (peer_id: %s)", keyPair.PeerID()), "core")
 
 	// Initialize DHT peer
 	dht, err := p2p.NewDHTPeer(config, logger)
@@ -66,8 +71,8 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 		return nil, fmt.Errorf("failed to create DHT peer: %v", err)
 	}
 
-	// Initialize QUIC peer
-	quic, err := p2p.NewQUICPeer(config, logger)
+	// Initialize QUIC peer with Ed25519-based TLS certificates
+	quic, err := p2p.NewQUICPeer(config, logger, paths, keyPair)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create QUIC peer: %v", err)
@@ -101,17 +106,6 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager) (*Pe
 	// These services work alongside the existing broadcaster/PEX for gradual transition
 	bep44Manager := p2p.NewBEP44Manager(dht, logger, config)
 	logger.Info("BEP_44 manager initialized for DHT mutable data", "core")
-
-	// Load or generate Ed25519 keypair for peer identity and metadata signing
-	// Keys are stored in OS-specific data directory for security and persistence
-	paths := utils.GetAppPaths("")
-	keysDir := filepath.Join(paths.DataDir, "keys")
-	keyPair, err := crypto.LoadOrGenerateKeys(keysDir)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to load/generate keypair: %v", err)
-	}
-	logger.Info(fmt.Sprintf("Loaded Ed25519 keypair (peer_id: %s, keys_dir: %s)", keyPair.PeerID(), keysDir), "core")
 
 	// Initialize metadata publisher for publishing our own metadata to DHT
 	metadataPublisher := p2p.NewMetadataPublisher(bep44Manager, keyPair, logger, config, dbManager)

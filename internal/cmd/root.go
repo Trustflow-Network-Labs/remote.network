@@ -1,22 +1,27 @@
 package cmd
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/core"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto/keystore"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
 var (
-	configPath     string
-	relayMode      bool
-	enableDHTStore bool
-	config         *utils.ConfigManager
-	logger         *utils.LogsManager
-	peerManager    *core.PeerManager
+	configPath      string
+	relayMode       bool
+	enableDHTStore  bool
+	passphraseFile  string
+	config          *utils.ConfigManager
+	logger          *utils.LogsManager
+	peerManager     *core.PeerManager
+	keyPair         *crypto.KeyPair // Loaded from keystore, used by start command
 )
 
 var rootCmd = &cobra.Command{
@@ -65,13 +70,30 @@ exchange messages with other peers interested in the same topics.`,
 			}
 		}
 
-		// Initialize peer manager for other commands
-		var err error
-		peerManager, err = core.NewPeerManager(config, logger)
+		// Initialize encrypted keystore and load keys
+		paths := utils.GetAppPaths("")
+		keystoreData, err := keystore.InitOrLoadKeystore(paths.DataDir, passphraseFile, config)
 		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to initialize peer manager: %v", err), "cli")
+			logger.Error(fmt.Sprintf("Failed to initialize keystore: %v", err), "cli")
+			fmt.Printf("\n❌ Keystore initialization failed: %v\n", err)
 			os.Exit(1)
 		}
+
+		// Store JWT secret in config (in-memory only, never written to disk)
+		config.SetConfig("jwt_secret", hex.EncodeToString(keystoreData.JWTSecret))
+
+		// Convert keystore data to crypto.KeyPair and store in package variable
+		// The start command will use this to create the peer manager
+		keyPair, err = keystore.LoadKeysFromKeystore(keystoreData)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Failed to load keys from keystore: %v", err), "cli")
+			os.Exit(1)
+		}
+
+		logger.Info(fmt.Sprintf("Keystore unlocked successfully (peer_id: %s)", keyPair.PeerID()), "cli")
+
+		// Note: Peer manager is NOT created here to avoid resource leaks
+		// It will be created in the start command when actually needed
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
 		// Cleanup
@@ -92,4 +114,5 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "config file path")
 	rootCmd.PersistentFlags().BoolVarP(&relayMode, "relay", "r", false, "enable relay mode (requires public IP)")
 	rootCmd.PersistentFlags().BoolVarP(&enableDHTStore, "store", "s", true, "enable BEP_44 DHT storage for serving mutable data to other peers")
+	rootCmd.PersistentFlags().StringVarP(&passphraseFile, "passphrase-file", "p", "", "path to file containing keystore passphrase (for automated deployments)")
 }

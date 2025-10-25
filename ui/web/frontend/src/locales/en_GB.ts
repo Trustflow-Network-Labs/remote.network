@@ -178,7 +178,8 @@ export default {
       filterBlacklisted: 'Blacklisted Peers',
       servicesFiles: 'File Services',
       servicesApps: 'App Services',
-      viewServices: 'View Services'
+      viewServices: 'View Services',
+      noPeers: 'No peers found'
     },
     configuration: {
       title: 'Configuration',

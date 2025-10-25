@@ -62,7 +62,7 @@
           <template #empty>
             <div class="empty-state">
               <i class="pi pi-inbox"></i>
-              <p>{{ $t('message.common.noData') }}</p>
+              <p>{{ $t('message.peers.noPeers') }}</p>
             </div>
           </template>
 

@@ -2,12 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"fmt"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,6 +36,9 @@ type APIServer struct {
 	server           *http.Server
 	listener         net.Listener
 	port             string
+	httpServer       *http.Server   // HTTP server for localhost access
+	httpListener     net.Listener    // HTTP listener for localhost
+	httpPort         string          // HTTP port for localhost
 	logger           *utils.LogsManager
 	config           *utils.ConfigManager
 	peerManager      *core.PeerManager
@@ -56,17 +60,12 @@ func NewAPIServer(
 	logger *utils.LogsManager,
 	peerManager *core.PeerManager,
 	dbManager *database.SQLiteManager,
+	keyPair *crypto.KeyPair,
 ) *APIServer {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Load node's Ed25519 keypair using centralized path management
-	paths := utils.GetAppPaths("")
-	keysDir := filepath.Join(paths.DataDir, "keys")
-	keyPair, err := crypto.LoadKeys(keysDir)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Failed to load keys for API server: %v", err), "api")
-		// Continue without auth capabilities
-	}
+	// Use keyPair loaded from encrypted keystore (passed from start command)
+	logger.Info(fmt.Sprintf("API server using keyPair for peer_id: %s", keyPair.PeerID()), "api")
 
 	// Initialize JWT manager with a secret key from config or generate one
 	jwtSecret := config.GetConfigWithDefault("jwt_secret", "change-this-secret-key-in-production")
@@ -161,12 +160,37 @@ func (s *APIServer) Start() error {
 	// Wrap mux with CORS middleware
 	handler := middleware.CORSMiddleware(mux)
 
-	// Create HTTP server
+	// Check if HTTPS is enabled
+	useHTTPS := s.config.GetConfigBool("api_use_https", true)
+
+	// Create HTTP server with TLS configuration
 	s.server = &http.Server{
 		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
+		ErrorLog:     log.New(s.logger.File, "", 0), // Redirect errors to log file, not stdout
+	}
+
+	// Configure TLS if HTTPS is enabled
+	if useHTTPS {
+		paths := utils.GetAppPaths("")
+
+		// Load or generate ECDSA certificates for API server
+		// (browsers don't support Ed25519, so we use ECDSA P-256)
+		cert, err := loadOrGenerateAPICertificates(paths, s.logger)
+		if err != nil {
+			return fmt.Errorf("failed to load/generate API TLS certificates: %v", err)
+		}
+
+		// Configure TLS with modern settings
+		s.server.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12, // Minimum TLS 1.2 for browser compatibility
+			NextProtos:   []string{"h2", "http/1.1"}, // Enable HTTP/2
+		}
+
+		s.logger.Info("Configured HTTPS with ECDSA P-256 TLS 1.2+", "api")
 	}
 
 	// Start WebSocket hub
@@ -179,12 +203,61 @@ func (s *APIServer) Start() error {
 
 	// Start server in goroutine
 	go func() {
-		if err := s.server.Serve(s.listener); err != nil && err != http.ErrServerClosed {
-			s.logger.Error(fmt.Sprintf("API server error: %v", err), "api")
+		var serveErr error
+		if useHTTPS {
+			// Use HTTPS (certificates already loaded in TLSConfig)
+			s.logger.Info("Starting HTTPS server with ECDSA P-256 TLS 1.2+", "api")
+			serveErr = s.server.ServeTLS(s.listener, "", "") // Empty strings - certs in TLSConfig
+		} else {
+			// Use HTTP (not recommended for production)
+			s.logger.Warn("Starting HTTP server (HTTPS disabled - not recommended for production)", "api")
+			serveErr = s.server.Serve(s.listener)
+		}
+
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			s.logger.Error(fmt.Sprintf("API server error: %v", serveErr), "api")
 		}
 	}()
 
-	s.logger.Info("API server started successfully", "api")
+	protocol := "HTTP"
+	if useHTTPS {
+		protocol = "HTTPS (ECDSA P-256)"
+	}
+	s.logger.Info(fmt.Sprintf("API server started successfully (%s)", protocol), "api")
+
+	// Start HTTP localhost server if enabled
+	if s.config.GetConfigBool("api_http_localhost", true) {
+		httpPort := s.config.GetConfigWithDefault("api_http_port", "8081")
+		httpAddr := fmt.Sprintf("127.0.0.1:%s", httpPort)
+
+		s.httpListener, err = net.Listen("tcp", httpAddr)
+		if err != nil {
+			s.logger.Warn(fmt.Sprintf("Failed to bind HTTP localhost server to %s: %v", httpAddr, err), "api")
+		} else {
+			s.httpPort = httpPort
+
+			// Create HTTP server (same handler as HTTPS server)
+			s.httpServer = &http.Server{
+				Handler:      handler,
+				ReadTimeout:  15 * time.Second,
+				WriteTimeout: 15 * time.Second,
+				IdleTimeout:  60 * time.Second,
+				ErrorLog:     log.New(s.logger.File, "", 0),
+			}
+
+			// Start HTTP server in goroutine
+			go func() {
+				s.logger.Info(fmt.Sprintf("Starting HTTP localhost server on %s", httpAddr), "api")
+				serveErr := s.httpServer.Serve(s.httpListener)
+				if serveErr != nil && serveErr != http.ErrServerClosed {
+					s.logger.Error(fmt.Sprintf("HTTP localhost server error: %v", serveErr), "api")
+				}
+			}()
+
+			s.logger.Info(fmt.Sprintf("HTTP localhost server started successfully on %s", httpAddr), "api")
+		}
+	}
+
 	return nil
 }
 
@@ -207,15 +280,15 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/challenge", s.handleGetChallenge) // GET - Request new challenge
 	mux.HandleFunc("/api/auth/ed25519", s.handleAuthEd25519)    // POST - Ed25519 authentication
 
-	// Node routes
-	mux.HandleFunc("/api/node/status", s.handleNodeStatus)
-	mux.HandleFunc("/api/node/restart", s.handleNodeRestart)
+	// Node routes (protected with JWT authentication)
+	mux.Handle("/api/node/status", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleNodeStatus)))
+	mux.Handle("/api/node/restart", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleNodeRestart)))
 
-	// Peer routes
-	mux.HandleFunc("/api/peers", s.handlePeers)
+	// Peer routes (protected with JWT authentication)
+	mux.Handle("/api/peers", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handlePeers)))
 
-	// Services routes
-	mux.HandleFunc("/api/services", func(w http.ResponseWriter, r *http.Request) {
+	// Services routes (protected with JWT authentication)
+	mux.Handle("/api/services", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			s.handleGetServices(w, r)
 		} else if r.Method == http.MethodPost {
@@ -223,8 +296,8 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
-	mux.HandleFunc("/api/services/", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/api/services/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			s.handleGetService(w, r)
 		} else if r.Method == http.MethodPut {
@@ -234,10 +307,10 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	})))
 
-	// Blacklist routes
-	mux.HandleFunc("/api/blacklist", func(w http.ResponseWriter, r *http.Request) {
+	// Blacklist routes (protected with JWT authentication)
+	mux.Handle("/api/blacklist", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			s.handleGetBlacklist(w, r)
 		} else if r.Method == http.MethodPost {
@@ -245,19 +318,19 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
-	mux.HandleFunc("/api/blacklist/", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/api/blacklist/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			s.handleRemoveFromBlacklist(w, r)
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
-	mux.HandleFunc("/api/blacklist/check", s.handleCheckBlacklist)
+	})))
+	mux.Handle("/api/blacklist/check", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleCheckBlacklist)))
 
-	// Relay routes
-	mux.HandleFunc("/api/relay/sessions", s.handleRelayGetSessions) // GET - Get all relay sessions (relay mode)
-	mux.HandleFunc("/api/relay/sessions/", func(w http.ResponseWriter, r *http.Request) {
+	// Relay routes (protected with JWT authentication)
+	mux.Handle("/api/relay/sessions", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleRelayGetSessions)))
+	mux.Handle("/api/relay/sessions/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Parse path to check for session actions
 		if strings.Contains(r.URL.Path, "/disconnect") {
 			s.handleRelayDisconnectSession(w, r)
@@ -266,14 +339,14 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		} else {
 			http.Error(w, "Not found", http.StatusNotFound)
 		}
-	})
-	mux.HandleFunc("/api/relay/candidates", s.handleRelayGetCandidates) // GET - Get available relay candidates (NAT mode)
-	mux.HandleFunc("/api/relay/connect", s.handleRelayConnect)          // POST - Connect to specific relay
-	mux.HandleFunc("/api/relay/disconnect", s.handleRelayDisconnect)    // POST - Disconnect from current relay
-	mux.HandleFunc("/api/relay/prefer", s.handleRelayPrefer)            // POST - Set preferred relay
+	})))
+	mux.Handle("/api/relay/candidates", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleRelayGetCandidates)))
+	mux.Handle("/api/relay/connect", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleRelayConnect)))
+	mux.Handle("/api/relay/disconnect", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleRelayDisconnect)))
+	mux.Handle("/api/relay/prefer", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleRelayPrefer)))
 
-	// Workflows routes
-	mux.HandleFunc("/api/workflows", func(w http.ResponseWriter, r *http.Request) {
+	// Workflows routes (protected with JWT authentication)
+	mux.Handle("/api/workflows", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			s.handleGetWorkflows(w, r)
 		} else if r.Method == http.MethodPost {
@@ -281,8 +354,8 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
-	mux.HandleFunc("/api/workflows/", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/api/workflows/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if it's an execute request
 		if strings.HasSuffix(r.URL.Path, "/execute") {
 			s.handleExecuteWorkflow(w, r)
@@ -304,7 +377,7 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	})))
 
 	// WebSocket endpoint
 	mux.HandleFunc("/api/ws", s.handleWebSocket)
@@ -329,13 +402,24 @@ func (s *APIServer) Stop() error {
 		s.eventEmitter.Stop()
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Shutdown main HTTPS server
+	var mainErr error
 	if s.server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return s.server.Shutdown(ctx)
+		mainErr = s.server.Shutdown(ctx)
 	}
 
-	return nil
+	// Shutdown HTTP localhost server
+	if s.httpServer != nil {
+		httpErr := s.httpServer.Shutdown(ctx)
+		if httpErr != nil {
+			s.logger.Warn(fmt.Sprintf("Error shutting down HTTP localhost server: %v", httpErr), "api")
+		}
+	}
+
+	return mainErr
 }
 
 // GetPort returns the port the server is listening on

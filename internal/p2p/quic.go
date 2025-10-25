@@ -2,19 +2,22 @@ package p2p
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -45,19 +48,19 @@ type QUICPeer struct {
 	onConnectionFailure func(string)
 }
 
-func NewQUICPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*QUICPeer, error) {
+func NewQUICPeer(config *utils.ConfigManager, logger *utils.LogsManager, paths *utils.AppPaths, keyPair *crypto.KeyPair) (*QUICPeer, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	port := config.GetConfigInt("quic_port", 30906, 1024, 65535)
 
-	// Generate self-signed certificate for QUIC
-	tlsConfig, err := generateTLSConfig()
+	// Load or generate Ed25519-based TLS certificate
+	tlsConfig, err := loadOrGenerateTLSConfig(paths, keyPair, logger)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to generate TLS config: %v", err)
+		return nil, fmt.Errorf("failed to load/generate TLS config: %v", err)
 	}
 
-	return &QUICPeer{
+	q := &QUICPeer{
 		config:      config,
 		logger:      logger,
 		ctx:         ctx,
@@ -65,7 +68,14 @@ func NewQUICPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*QUICP
 		connections: make(map[string]*quic.Conn),
 		tlsConfig:   tlsConfig,
 		port:        port,
-	}, nil
+	}
+
+	// Configure mutual TLS (mTLS) authentication
+	// Both server and client will verify each other's certificates
+	q.tlsConfig.ClientAuth = tls.RequireAnyClientCert
+	q.tlsConfig.VerifyPeerCertificate = q.verifyPeerCertificate
+
+	return q, nil
 }
 
 // SetDependencies sets the DHT peer, database manager, and relay peer references
@@ -90,44 +100,233 @@ func (q *QUICPeer) SetConnectionFailureCallback(callback func(string)) {
 	q.onConnectionFailure = callback
 }
 
-func generateTLSConfig() (*tls.Config, error) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, err
-	}
-
+// generateEd25519Certificate creates a self-signed X.509 certificate using an Ed25519 keypair
+// The certificate embeds the node's Peer ID in the Subject CommonName for easy identification
+func generateEd25519Certificate(keyPair *crypto.KeyPair, peerID string) ([]byte, error) {
+	// Certificate template
 	template := x509.Certificate{
-		SerialNumber: big.NewInt(1),
+		SerialNumber: big.NewInt(time.Now().Unix()),
 		Subject: pkix.Name{
-			Organization:  []string{"Remote Network Node"},
-			Country:       []string{"US"},
-			Province:      []string{""},
-			Locality:      []string{""},
-			StreetAddress: []string{""},
-			PostalCode:    []string{""},
+			Organization: []string{"Remote Network Node"},
+			CommonName:   peerID, // Embed Peer ID in certificate
 		},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(365 * 24 * time.Hour), // Valid for 1 year
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
-		DNSNames:     []string{"localhost"},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().Add(365 * 24 * time.Hour), // Valid for 1 year
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		// Allow any IP/DNS for flexibility in P2P networking
+		IPAddresses: []net.IP{net.IPv4(0, 0, 0, 0), net.IPv6zero},
+		DNSNames:    []string{"*"},
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	// Create self-signed certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, keyPair.PublicKey, keyPair.PrivateKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create certificate: %v", err)
+	}
+
+	return certDER, nil
+}
+
+// saveCertificateToPEM saves a certificate and private key to PEM files
+func saveCertificateToPEM(certDER []byte, keyPair *crypto.KeyPair, certPath, keyPath string) error {
+	// Encode certificate to PEM
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: certDER,
+	})
+	if certPEM == nil {
+		return fmt.Errorf("failed to encode certificate to PEM")
+	}
+
+	// Save certificate file (readable by all)
+	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+		return fmt.Errorf("failed to write certificate file: %v", err)
+	}
+
+	// Encode private key to PEM (PKCS#8 format for Ed25519)
+	privKeyBytes, err := x509.MarshalPKCS8PrivateKey(keyPair.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("failed to marshal private key: %v", err)
+	}
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privKeyBytes,
+	})
+	if keyPEM == nil {
+		return fmt.Errorf("failed to encode private key to PEM")
+	}
+
+	// Save private key file (readable only by owner)
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		return fmt.Errorf("failed to write private key file: %v", err)
+	}
+
+	return nil
+}
+
+// loadCertificateFromPEM loads a certificate and private key from PEM files
+func loadCertificateFromPEM(certPath, keyPath string) (tls.Certificate, error) {
+	// Load certificate
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("failed to read certificate file: %v", err)
+	}
+
+	// Load private key
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("failed to read private key file: %v", err)
+	}
+
+	// Parse PEM blocks
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
+		return tls.Certificate{}, fmt.Errorf("failed to decode certificate PEM")
+	}
+
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil || keyBlock.Type != "PRIVATE KEY" {
+		return tls.Certificate{}, fmt.Errorf("failed to decode private key PEM")
+	}
+
+	// Parse certificate
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("failed to parse certificate: %v", err)
+	}
+
+	// Check if certificate is expired or expiring soon (< 30 days)
+	now := time.Now()
+	if now.After(cert.NotAfter) {
+		return tls.Certificate{}, fmt.Errorf("certificate expired on %v", cert.NotAfter)
+	}
+	if now.Add(30 * 24 * time.Hour).After(cert.NotAfter) {
+		return tls.Certificate{}, fmt.Errorf("certificate expiring soon (expires %v)", cert.NotAfter)
+	}
+
+	// Parse private key
+	privateKey, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("failed to parse private key: %v", err)
+	}
+
+	// Verify it's an Ed25519 key
+	ed25519Key, ok := privateKey.(ed25519.PrivateKey)
+	if !ok {
+		return tls.Certificate{}, fmt.Errorf("private key is not Ed25519")
+	}
+
+	// Construct tls.Certificate
+	tlsCert := tls.Certificate{
+		Certificate: [][]byte{certBlock.Bytes},
+		PrivateKey:  ed25519Key,
+	}
+
+	return tlsCert, nil
+}
+
+// loadOrGenerateTLSConfig loads existing TLS certificate or generates a new one
+// Uses the node's Ed25519 keypair for both TLS and peer identity
+func loadOrGenerateTLSConfig(paths *utils.AppPaths, keyPair *crypto.KeyPair, logger *utils.LogsManager) (*tls.Config, error) {
+	certPath := paths.GetDataPath("tls-cert.pem")
+	keyPath := paths.GetDataPath("tls-key.pem")
+	peerID := keyPair.PeerID()
+
+	// Try to load existing certificate
+	tlsCert, err := loadCertificateFromPEM(certPath, keyPath)
+	if err == nil {
+		logger.Info(fmt.Sprintf("Loaded existing TLS certificate from %s", certPath), "quic")
+		return &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			NextProtos:   []string{"remote-network-p2p"},
+			MinVersion:   tls.VersionTLS13,
+		}, nil
+	}
+
+	// Certificate doesn't exist or is expired, generate new one
+	logger.Info(fmt.Sprintf("Generating new Ed25519 TLS certificate (reason: %v)", err), "quic")
+
+	certDER, err := generateEd25519Certificate(keyPair, peerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate certificate: %v", err)
+	}
+
+	// Save certificate to disk
+	if err := saveCertificateToPEM(certDER, keyPair, certPath, keyPath); err != nil {
+		return nil, fmt.Errorf("failed to save certificate: %v", err)
+	}
+
+	logger.Info(fmt.Sprintf("TLS certificate saved to %s", certPath), "quic")
+
+	// Load the newly created certificate
+	tlsCert, err = loadCertificateFromPEM(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load newly created certificate: %v", err)
 	}
 
 	return &tls.Config{
-		Certificates: []tls.Certificate{
-			{
-				Certificate: [][]byte{certDER},
-				PrivateKey:  key,
-			},
-		},
-		NextProtos: []string{"remote-network-p2p"},
+		Certificates: []tls.Certificate{tlsCert},
+		NextProtos:   []string{"remote-network-p2p"},
+		MinVersion:   tls.VersionTLS13,
 	}, nil
+}
+
+// isBlacklisted checks if a peer is blacklisted
+// Returns true if blacklisted, false otherwise
+// Logs and allows connection if database check fails (fail-open for availability)
+func (q *QUICPeer) isBlacklisted(peerID string) bool {
+	if q.dbManager == nil {
+		// Database not initialized yet, allow connection
+		return false
+	}
+
+	blacklisted, err := q.dbManager.IsBlacklisted(peerID)
+	if err != nil {
+		q.logger.Error(fmt.Sprintf("Failed to check blacklist for peer %s: %v", peerID, err), "quic")
+		// Fail-open: allow connection if database check fails
+		return false
+	}
+
+	return blacklisted
+}
+
+// verifyPeerCertificate verifies the peer's TLS certificate
+// Extracts the Ed25519 public key, computes Peer ID, and checks blacklist
+func (q *QUICPeer) verifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	if len(rawCerts) == 0 {
+		return fmt.Errorf("no certificate presented by peer")
+	}
+
+	// Parse the peer's certificate
+	cert, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return fmt.Errorf("failed to parse peer certificate: %v", err)
+	}
+
+	// Extract Ed25519 public key from certificate
+	pubKey, ok := cert.PublicKey.(ed25519.PublicKey)
+	if !ok {
+		return fmt.Errorf("certificate does not contain Ed25519 public key")
+	}
+
+	// Validate public key size
+	if len(pubKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid Ed25519 public key size: %d", len(pubKey))
+	}
+
+	// Compute Peer ID from public key (same as identity system)
+	peerID := crypto.DerivePeerID(pubKey)
+
+	// Check if peer is blacklisted
+	if q.isBlacklisted(peerID) {
+		q.logger.Info(fmt.Sprintf("Rejected connection from blacklisted peer %s", peerID), "quic")
+		return fmt.Errorf("peer %s is blacklisted", peerID)
+	}
+
+	// Certificate and peer ID are valid, allow connection
+	return nil
 }
 
 func (q *QUICPeer) Start() error {
@@ -455,10 +654,15 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 	}
 	q.connMutex.RUnlock()
 
-	// Create TLS config for client (insecure for now)
+	// Create TLS config for client with custom peer verification
+	// InsecureSkipVerify skips hostname/IP verification (not applicable to P2P),
+	// but VerifyPeerCertificate still validates Ed25519 public key and blacklist
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"remote-network-p2p"},
+		Certificates:          q.tlsConfig.Certificates, // Present client certificate for mutual TLS
+		InsecureSkipVerify:    true,                     // Skip hostname/IP verification, use custom peer verification
+		VerifyPeerCertificate: q.verifyPeerCertificate,
+		NextProtos:            []string{"remote-network-p2p"},
+		MinVersion:            tls.VersionTLS13,
 	}
 
 	idleTimeout := q.config.GetConfigDuration("quic_connection_timeout", 5*time.Minute)

@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/core"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -24,6 +25,15 @@ This will:
 - Begin announcing presence to the network`,
 	Run: func(cmd *cobra.Command, args []string) {
 		logger.Info("Starting Remote Network Node...", "cli")
+
+		// Initialize peer manager with keys loaded from keystore in PersistentPreRun
+		var err error
+		peerManager, err = core.NewPeerManager(config, logger, keyPair)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Failed to initialize peer manager: %v", err), "cli")
+			fmt.Printf("Error initializing peer manager: %v\n", err)
+			os.Exit(1)
+		}
 
 		// Ensure the executable path is absolute for Windows compatibility
 		exePath, err := filepath.Abs(os.Args[0])
@@ -110,13 +120,18 @@ This will:
 			logger.Info(fmt.Sprintf("Subscribed to topics: %v", topics), "cli")
 		}
 
-		// Start API server for web UI
-		apiServer = api.NewAPIServer(config, logger, peerManager, peerManager.GetDBManager())
+		// Start API server for web UI (pass keyPair from keystore)
+		apiServer = api.NewAPIServer(config, logger, peerManager, peerManager.GetDBManager(), keyPair)
 		if err := apiServer.Start(); err != nil {
 			logger.Warn(fmt.Sprintf("Failed to start API server: %v", err), "cli")
 			fmt.Println("⚠ Web UI unavailable - API server failed to start")
 		} else {
-			fmt.Printf("✓ Web UI available at http://localhost:%s\n", apiServer.GetPort())
+			// Determine protocol based on config
+			protocol := "http"
+			if config.GetConfigBool("api_use_https", true) {
+				protocol = "https"
+			}
+			fmt.Printf("✓ Web UI available at %s://localhost:%s\n", protocol, apiServer.GetPort())
 			logger.Info(fmt.Sprintf("API server started on port %s", apiServer.GetPort()), "cli")
 		}
 

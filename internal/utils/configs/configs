@@ -54,6 +54,12 @@ pprof_fallback_ports = 6061,6062
 api_port = 8080
 # Fallback ports for API server if primary is unavailable (comma-separated)
 api_fallback_ports = 8081,8082
+# Use HTTPS for API server (recommended for production)
+api_use_https = true
+# Enable HTTP server on localhost (convenient for local access without SSL warnings)
+api_http_localhost = true
+# Port for HTTP localhost server (only binds to 127.0.0.1)
+api_http_port = 8081
 
 [database]
 # Database configuration
@@ -71,6 +77,12 @@ nat_default_filtering = address-port-dependent
 nat_port_prediction_samples = 3
 nat_port_prediction_max_diff = 10
 nat_hairpinning_timeout = 2s
+
+[keystore]
+# Keystore passphrase (optional - for automated/background startup)
+# Set this to your keystore passphrase to avoid interactive prompts
+# Leave empty to use --passphrase-file flag or interactive prompt
+keystore_passphrase = KEYSTORE_PASSPHRASE
 
 [relay]
 # Relay Service Configuration

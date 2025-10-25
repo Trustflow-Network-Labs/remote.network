@@ -6,6 +6,7 @@ import App from './App.vue'
 import { useAuthStore } from './stores/auth'
 import { useConnectionStore } from './stores/connection'
 import { initializeWebSocket } from './services/websocket'
+import { api } from './services/api'
 
 // PrimeVue imports
 import PrimeVue from 'primevue/config'
@@ -57,6 +58,9 @@ app.use(ToastService)
 // Initialize WebSocket if user is already authenticated (page refresh scenario)
 const authStore = useAuthStore()
 const connectionStore = useConnectionStore()
+
+// Sync API client with stored endpoint (page refresh scenario)
+api.setBaseURL(connectionStore.nodeEndpoint)
 
 if (authStore.isAuthenticated && authStore.token) {
   console.log('[Main] User already authenticated, initializing WebSocket')
