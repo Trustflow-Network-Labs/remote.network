@@ -156,6 +156,22 @@ class APIClient {
     return response.data
   }
 
+  /**
+   * Update service status
+   */
+  async updateServiceStatus(id: number, status: string) {
+    const response = await this.client.put(`/api/services/${id}/status`, { status })
+    return response.data
+  }
+
+  /**
+   * Get service passphrase
+   */
+  async getServicePassphrase(id: number) {
+    const response = await this.client.get(`/api/services/${id}/passphrase`)
+    return response.data
+  }
+
   // ===== Blacklist API =====
 
   /**

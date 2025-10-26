@@ -18,6 +18,15 @@ const (
 	MessageTypeWorkflowsUpdated MessageType = "workflows.updated"
 	MessageTypeBlacklistUpdated MessageType = "blacklist.updated"
 
+	// File upload message types
+	MessageTypeFileUploadStart    MessageType = "file.upload.start"
+	MessageTypeFileUploadChunk    MessageType = "file.upload.chunk"
+	MessageTypeFileUploadPause    MessageType = "file.upload.pause"
+	MessageTypeFileUploadResume   MessageType = "file.upload.resume"
+	MessageTypeFileUploadProgress MessageType = "file.upload.progress"
+	MessageTypeFileUploadComplete MessageType = "file.upload.complete"
+	MessageTypeFileUploadError    MessageType = "file.upload.error"
+
 	// Control message types
 	MessageTypePing            MessageType = "ping"
 	MessageTypePong            MessageType = "pong"
@@ -158,4 +167,51 @@ type ErrorPayload struct {
 type ConnectedPayload struct {
 	Message string `json:"message"`
 	PeerID  string `json:"peer_id"`
+}
+
+// FileUploadStartPayload initiates a file upload session
+type FileUploadStartPayload struct {
+	ServiceID   int64  `json:"service_id"`
+	Filename    string `json:"filename"`
+	TotalSize   int64  `json:"total_size"`
+	TotalChunks int    `json:"total_chunks"`
+	ChunkSize   int    `json:"chunk_size"`
+}
+
+// FileUploadChunkPayload contains a chunk of uploaded file data
+type FileUploadChunkPayload struct {
+	SessionID  string `json:"session_id"`
+	ChunkIndex int    `json:"chunk_index"`
+	Data       string `json:"data"` // base64 encoded chunk data
+}
+
+// FileUploadPausePayload pauses an upload session
+type FileUploadPausePayload struct {
+	SessionID string `json:"session_id"`
+}
+
+// FileUploadResumePayload resumes an upload session
+type FileUploadResumePayload struct {
+	SessionID string `json:"session_id"`
+}
+
+// FileUploadProgressPayload reports upload progress
+type FileUploadProgressPayload struct {
+	SessionID      string  `json:"session_id"`
+	ChunksReceived int     `json:"chunks_received"`
+	BytesUploaded  int64   `json:"bytes_uploaded"`
+	Percentage     float64 `json:"percentage"`
+}
+
+// FileUploadCompletePayload signals successful upload completion
+type FileUploadCompletePayload struct {
+	SessionID string `json:"session_id"`
+	FileHash  string `json:"file_hash"`
+}
+
+// FileUploadErrorPayload reports an upload error
+type FileUploadErrorPayload struct {
+	SessionID string `json:"session_id"`
+	Error     string `json:"error"`
+	Code      string `json:"code,omitempty"`
 }

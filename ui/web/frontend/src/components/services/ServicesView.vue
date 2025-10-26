@@ -1,181 +1,255 @@
 <template>
   <AppLayout>
     <div class="services">
-      <div class="services-header">
-        <div class="header-left">
-          <Button
-            v-if="isPeerView"
-            icon="pi pi-arrow-left"
-            text
-            rounded
-            @click="router.push('/peers')"
-            :title="$t('message.common.back')"
-          />
-          <h1>{{ pageTitle }}</h1>
-        </div>
-        <Button
-          v-if="!isPeerView"
-          :label="$t('message.services.add')"
-          icon="pi pi-plus"
-          @click="showAddServiceDialog = true"
-          severity="success"
-        />
-      </div>
-
       <!-- Peer-specific view -->
-      <div v-if="isPeerView" class="peer-services-section">
-        <div class="peer-info">
-          <i class="pi pi-user"></i>
-          <span>{{ $t('message.peers.peerId') }}: <code class="peer-id">{{ shortenedPeerId }}</code></span>
-          <i class="pi pi-copy copy-icon" @click="copyPeerId" :title="$t('message.common.copy')"></i>
+      <div v-if="isPeerView">
+        <div class="services-header">
+          <div class="header-left">
+            <Button
+              icon="pi pi-arrow-left"
+              text
+              rounded
+              @click="router.push('/peers')"
+              :title="$t('message.common.back')"
+            />
+            <h1>{{ pageTitle }}</h1>
+          </div>
         </div>
 
-        <div class="info-message">
-          <i class="pi pi-info-circle"></i>
-          <p>{{ $t('message.services.peerServicesPlaceholder') }}</p>
+        <div class="peer-services-section">
+          <div class="peer-info">
+            <i class="pi pi-user"></i>
+            <span>{{ $t('message.peers.peerId') }}: <code class="peer-id">{{ shortenedPeerId }}</code></span>
+            <i class="pi pi-copy copy-icon" @click="copyPeerId" :title="$t('message.common.copy')"></i>
+          </div>
+
+          <div class="info-message">
+            <i class="pi pi-info-circle"></i>
+            <p>{{ $t('message.services.peerServicesPlaceholder') }}</p>
+          </div>
         </div>
       </div>
 
-      <!-- Local services view -->
+      <!-- Main services view -->
       <div v-else>
-        <div v-if="servicesStore.loading" class="loading">
-          <ProgressSpinner style="width:50px;height:50px" strokeWidth="4" />
+        <!-- Action buttons -->
+        <div class="services-controls">
+          <div class="services-controls-buttons">
+            <div class="input-box">
+              <button class="btn" @click="router.push('/services/add')">
+                <i class="pi pi-plus-circle"></i> {{ $t('message.services.addLocalService') }}
+              </button>
+            </div>
+            <div class="input-box">
+              <button class="btn light" @click="showSearchRemoteDialog = true">
+                <i class="pi pi-search"></i> {{ $t('message.services.searchRemoteService') }}
+              </button>
+            </div>
+          </div>
         </div>
 
-        <DataTable
-          v-else
-          :value="servicesStore.services"
-          :paginator="true"
-          :rows="10"
-          class="services-table"
-          :rowsPerPageOptions="[5, 10, 25]"
-          responsiveLayout="scroll"
-        >
-        <template #empty>
-          <div class="empty-state">
-            <i class="pi pi-inbox"></i>
-            <p>{{ $t('message.common.noData') }}</p>
+        <!-- Local Services Section -->
+        <div class="services-section">
+          <div class="section-title">
+            <i class="pi pi-box"></i> {{ $t('message.services.localServices') }}
           </div>
-        </template>
 
-        <Column field="name" :header="$t('message.workflows.name')" :sortable="true"></Column>
-        <Column field="type" :header="$t('message.services.type')" :sortable="true">
-          <template #body="slotProps">
-            <Tag :value="$t(`message.services.types.${slotProps.data.type}`)" />
-          </template>
-        </Column>
-        <Column field="endpoint" :header="$t('message.services.endpoint')"></Column>
-        <Column field="status" :header="$t('message.services.status')" :sortable="true">
-          <template #body="slotProps">
-            <Tag
-              :value="$t(`message.services.statuses.${slotProps.data.status}`)"
-              :severity="getStatusSeverity(slotProps.data.status)"
-            />
-          </template>
-        </Column>
-        <Column field="pricing" :header="$t('message.services.pricing')">
-          <template #body="slotProps">
-            {{ slotProps.data.pricing }} tokens
-          </template>
-        </Column>
-        <Column :exportable="false" style="min-width:8rem">
-          <template #body="slotProps">
-            <Button
-              icon="pi pi-pencil"
-              text
-              rounded
-              severity="info"
-              @click="editService(slotProps.data)"
-            />
-            <Button
-              icon="pi pi-trash"
-              text
-              rounded
-              severity="danger"
-              @click="confirmDeleteService(slotProps.data)"
-            />
-          </template>
-        </Column>
-      </DataTable>
+          <div v-if="servicesStore.loading" class="loading">
+            <ProgressSpinner style="width:50px;height:50px" strokeWidth="4" />
+          </div>
+
+          <DataTable
+            v-else
+            :value="servicesStore.services"
+            :paginator="servicesStore.services.length > 10"
+            :rows="10"
+            class="services-table"
+            :rowsPerPageOptions="[10, 20, 50, 100]"
+            responsiveLayout="scroll"
+            sortField="created_at"
+            :sortOrder="-1"
+          >
+            <template #empty>
+              <div class="empty-state">
+                <i class="pi pi-inbox"></i>
+                <p>{{ $t('message.services.noLocalServices') }}</p>
+              </div>
+            </template>
+
+            <Column field="name" :header="$t('message.services.serviceName')" :sortable="true"></Column>
+            <Column field="description" :header="$t('message.services.serviceDescription')">
+              <template #body="slotProps">
+                {{ truncateDescription(slotProps.data.description) }}
+              </template>
+            </Column>
+            <Column field="service_type" :header="$t('message.services.type')" :sortable="true">
+              <template #body="slotProps">
+                <Tag :value="getServiceTypeLabel(slotProps.data.service_type || slotProps.data.type)" />
+              </template>
+            </Column>
+            <Column field="status" :header="$t('message.services.status')" :sortable="true">
+              <template #body="slotProps">
+                <Tag
+                  :value="getStatusLabel(slotProps.data.status)"
+                  :severity="getStatusSeverity(slotProps.data.status)"
+                />
+              </template>
+            </Column>
+            <Column field="pricing" :header="$t('message.services.pricing')">
+              <template #body="slotProps">
+                {{ formatPricing(slotProps.data) }}
+              </template>
+            </Column>
+            <Column :header="$t('message.common.actions')" :exportable="false" style="min-width:10rem">
+              <template #body="slotProps">
+                <Button
+                  :label="$t('message.services.changeStatus')"
+                  icon="pi pi-sync"
+                  text
+                  size="small"
+                  @click="confirmChangeStatus(slotProps.data)"
+                />
+                <Button
+                  :label="$t('message.services.viewPassphrase')"
+                  icon="pi pi-key"
+                  text
+                  size="small"
+                  @click="viewPassphrase(slotProps.data)"
+                  v-if="slotProps.data.service_type === 'DATA'"
+                />
+                <Button
+                  icon="pi pi-trash"
+                  text
+                  rounded
+                  severity="danger"
+                  @click="confirmDeleteService(slotProps.data)"
+                />
+              </template>
+            </Column>
+          </DataTable>
+        </div>
+
+        <!-- Remote Services Section -->
+        <div class="services-section">
+          <div class="section-title">
+            <i class="pi pi-cloud"></i> {{ $t('message.services.remoteServices') }}
+          </div>
+
+          <!-- Search and Filter Panel -->
+          <div class="search-filter-panel">
+            <div class="search-box">
+              <InputText
+                v-model="searchQuery"
+                :placeholder="$t('message.services.searchPlaceholder')"
+                class="search-input"
+              />
+              <Button
+                icon="pi pi-search"
+                @click="performSearch"
+                :loading="servicesStore.remoteLoading"
+                class="search-button"
+              />
+            </div>
+
+            <div class="peer-filter">
+              <MultiSelect
+                v-model="selectedPeers"
+                :options="peerOptions"
+                optionLabel="label"
+                optionValue="value"
+                :placeholder="$t('message.services.selectPeers')"
+                :showToggleAll="true"
+                class="peer-multiselect"
+              />
+            </div>
+          </div>
+
+          <div v-if="servicesStore.remoteLoading" class="loading">
+            <ProgressSpinner style="width:50px;height:50px" strokeWidth="4" />
+          </div>
+
+          <DataTable
+            v-else
+            :value="servicesStore.remoteServices"
+            :paginator="servicesStore.remoteServices.length > 10"
+            :rows="10"
+            class="services-table"
+            :rowsPerPageOptions="[10, 20, 50, 100]"
+            responsiveLayout="scroll"
+          >
+            <template #empty>
+              <div class="empty-state">
+                <i class="pi pi-inbox"></i>
+                <p>{{ $t('message.services.noRemoteServices') }}</p>
+              </div>
+            </template>
+
+            <Column field="name" :header="$t('message.services.serviceName')" :sortable="true"></Column>
+            <Column field="description" :header="$t('message.services.serviceDescription')">
+              <template #body="slotProps">
+                {{ truncateDescription(slotProps.data.description) }}
+              </template>
+            </Column>
+            <Column field="service_type" :header="$t('message.services.type')" :sortable="true">
+              <template #body="slotProps">
+                <Tag :value="getServiceTypeLabel(slotProps.data.service_type || slotProps.data.type)" />
+              </template>
+            </Column>
+            <Column field="pricing" :header="$t('message.services.pricing')">
+              <template #body="slotProps">
+                {{ formatPricing(slotProps.data) }}
+              </template>
+            </Column>
+            <Column field="peer_id" :header="$t('message.peers.peerId')">
+              <template #body="slotProps">
+                <code class="peer-id-code">{{ shorten(slotProps.data.peer_id, 6, 6) }}</code>
+              </template>
+            </Column>
+            <Column :header="$t('message.common.actions')" :exportable="false" style="min-width:8rem">
+              <template #body="slotProps">
+                <Button
+                  :label="$t('message.services.addToWorkflow')"
+                  icon="pi pi-plus"
+                  text
+                  size="small"
+                  @click="addToWorkflow(slotProps.data)"
+                />
+              </template>
+            </Column>
+          </DataTable>
+        </div>
       </div>
 
-      <!-- Add Service Dialog -->
+      <!-- Add Data Service Dialog (Legacy - for DATA only) -->
+      <AddDataServiceDialog
+        :visible="showAddDataServiceDialog"
+        @update:visible="showAddDataServiceDialog = $event"
+        @service-added="onServiceAdded"
+      />
+
+      <!-- Passphrase Dialog -->
       <Dialog
-        v-model:visible="showAddServiceDialog"
-        :header="$t('message.services.add')"
+        v-model:visible="showPassphraseDialog"
+        :header="$t('message.services.viewPassphrase')"
         :modal="true"
-        :style="{ width: '50vw' }"
-        :breakpoints="{ '960px': '75vw', '640px': '100vw' }"
+        :style="{ width: '500px' }"
       >
-        <div class="service-form">
-          <div class="field">
-            <label for="service-name">{{ $t('message.workflows.name') }}</label>
-            <InputText id="service-name" v-model="serviceForm.name" class="w-full" />
-          </div>
-          <div class="field">
-            <label for="service-type">{{ $t('message.services.type') }}</label>
-            <Dropdown
-              id="service-type"
-              v-model="serviceForm.type"
-              :options="serviceTypes"
-              optionLabel="label"
-              optionValue="value"
-              class="w-full"
+        <div class="passphrase-content">
+          <p class="passphrase-label">{{ $t('message.services.serviceName') }}: <strong>{{ selectedService?.name }}</strong></p>
+          <div class="passphrase-box">
+            <code>{{ currentPassphrase }}</code>
+            <Button
+              icon="pi pi-copy"
+              text
+              rounded
+              @click="copyPassphrase"
+              :title="$t('message.common.copy')"
             />
-          </div>
-          <div class="field">
-            <label for="service-endpoint">{{ $t('message.services.endpoint') }}</label>
-            <InputText id="service-endpoint" v-model="serviceForm.endpoint" class="w-full" />
-          </div>
-          <div class="field">
-            <label for="service-pricing">{{ $t('message.services.pricing') }}</label>
-            <InputNumber id="service-pricing" v-model="serviceForm.pricing" class="w-full" />
           </div>
         </div>
 
         <template #footer>
-          <Button :label="$t('message.common.cancel')" icon="pi pi-times" text @click="showAddServiceDialog = false" />
-          <Button :label="$t('message.common.save')" icon="pi pi-check" @click="addService" />
-        </template>
-      </Dialog>
-
-      <!-- Edit Service Dialog -->
-      <Dialog
-        v-model:visible="showEditServiceDialog"
-        :header="$t('message.services.edit')"
-        :modal="true"
-        :style="{ width: '50vw' }"
-        :breakpoints="{ '960px': '75vw', '640px': '100vw' }"
-      >
-        <div class="service-form">
-          <div class="field">
-            <label for="edit-service-name">{{ $t('message.workflows.name') }}</label>
-            <InputText id="edit-service-name" v-model="serviceForm.name" class="w-full" />
-          </div>
-          <div class="field">
-            <label for="edit-service-type">{{ $t('message.services.type') }}</label>
-            <Dropdown
-              id="edit-service-type"
-              v-model="serviceForm.type"
-              :options="serviceTypes"
-              optionLabel="label"
-              optionValue="value"
-              class="w-full"
-            />
-          </div>
-          <div class="field">
-            <label for="edit-service-endpoint">{{ $t('message.services.endpoint') }}</label>
-            <InputText id="edit-service-endpoint" v-model="serviceForm.endpoint" class="w-full" />
-          </div>
-          <div class="field">
-            <label for="edit-service-pricing">{{ $t('message.services.pricing') }}</label>
-            <InputNumber id="edit-service-pricing" v-model="serviceForm.pricing" class="w-full" />
-          </div>
-        </div>
-
-        <template #footer>
-          <Button :label="$t('message.common.cancel')" icon="pi pi-times" text @click="showEditServiceDialog = false" />
-          <Button :label="$t('message.common.save')" icon="pi pi-check" @click="updateService" />
+          <Button :label="$t('message.common.close')" icon="pi pi-times" @click="showPassphraseDialog = false" />
         </template>
       </Dialog>
     </div>
@@ -183,7 +257,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useConfirm } from 'primevue/useconfirm'
@@ -196,11 +270,12 @@ import ProgressSpinner from 'primevue/progressspinner'
 import Tag from 'primevue/tag'
 import Dialog from 'primevue/dialog'
 import InputText from 'primevue/inputtext'
-import InputNumber from 'primevue/inputnumber'
-import Dropdown from 'primevue/dropdown'
+import MultiSelect from 'primevue/multiselect'
 
 import AppLayout from '../layout/AppLayout.vue'
+import AddDataServiceDialog from './AddDataServiceDialog.vue'
 import { useServicesStore } from '../../stores/services'
+import { usePeersStore } from '../../stores/peers'
 import { useClipboard } from '../../composables/useClipboard'
 import { useTextUtils } from '../../composables/useTextUtils'
 
@@ -211,8 +286,21 @@ const confirm = useConfirm()
 const toast = useToast()
 
 const servicesStore = useServicesStore()
+const peersStore = usePeersStore()
 const { copyToClipboard } = useClipboard()
 const { shorten } = useTextUtils()
+
+// Search and filter state
+const searchQuery = ref('')
+const selectedPeers = ref<string[]>([])
+
+// Peer options for MultiSelect
+const peerOptions = computed(() => {
+  return peersStore.peers.map(peer => ({
+    label: `${shorten(peer.peer_id, 6, 6)} ${peer.is_relay ? '(Relay)' : ''}`,
+    value: peer.peer_id
+  }))
+})
 
 // Check if we're viewing a specific peer's services
 const isPeerView = computed(() => !!route.params.peerId)
@@ -226,40 +314,137 @@ const pageTitle = computed(() => {
   return t('message.services.title')
 })
 
-const showAddServiceDialog = ref(false)
-const showEditServiceDialog = ref(false)
+// Dialog states
+const showAddDataServiceDialog = ref(false)
+const showSearchRemoteDialog = ref(false)
+const showPassphraseDialog = ref(false)
+const currentPassphrase = ref('')
+const selectedService = ref<any>(null)
 
-const serviceForm = reactive({
-  id: null as number | null,
-  name: '',
-  type: 'storage',
-  endpoint: '',
-  pricing: 0
-})
+// Helper functions
+function truncateDescription(description: string | undefined): string {
+  if (!description) return '-'
+  const maxLength = 60
+  return description.length > maxLength
+    ? description.substring(0, maxLength) + '...'
+    : description
+}
 
-const serviceTypes = [
-  { label: t('message.services.types.storage'), value: 'storage' },
-  { label: t('message.services.types.docker'), value: 'docker' },
-  { label: t('message.services.types.standalone'), value: 'standalone' },
-  { label: t('message.services.types.relay'), value: 'relay' }
-]
+function getServiceTypeLabel(type: string): string {
+  const typeMap: Record<string, string> = {
+    'DATA': t('message.services.types.data'),
+    'DOCKER': t('message.services.types.docker'),
+    'STANDALONE': t('message.services.types.standalone'),
+    'RELAY': t('message.services.types.relay'),
+    // Legacy types
+    'storage': t('message.services.types.storage'),
+    'docker': t('message.services.types.docker'),
+    'standalone': t('message.services.types.standalone'),
+    'relay': t('message.services.types.relay')
+  }
+  return typeMap[type] || type
+}
+
+function getStatusLabel(status: string): string {
+  const statusMap: Record<string, string> = {
+    'ACTIVE': t('message.services.statuses.active'),
+    'INACTIVE': t('message.services.statuses.inactive'),
+    // Legacy statuses
+    'available': t('message.services.statuses.available'),
+    'busy': t('message.services.statuses.busy'),
+    'offline': t('message.services.statuses.offline')
+  }
+  return statusMap[status] || status
+}
 
 function getStatusSeverity(status: string): string {
-  switch (status) {
-    case 'available': return 'success'
-    case 'busy': return 'warning'
-    case 'offline': return 'danger'
-    default: return 'info'
+  switch (status.toUpperCase()) {
+    case 'ACTIVE':
+    case 'AVAILABLE':
+      return 'success'
+    case 'BUSY':
+      return 'warning'
+    case 'INACTIVE':
+    case 'OFFLINE':
+      return 'danger'
+    default:
+      return 'info'
   }
 }
 
-function editService(service: any) {
-  serviceForm.id = service.id
-  serviceForm.name = service.name
-  serviceForm.type = service.type
-  serviceForm.endpoint = service.endpoint
-  serviceForm.pricing = service.pricing
-  showEditServiceDialog.value = true
+function formatPricing(service: any): string {
+  const amount = service.pricing_amount || service.pricing || 0
+  const type = service.pricing_type || 'ONE_TIME'
+
+  if (type === 'ONE_TIME') {
+    return `${amount} tokens`
+  }
+
+  const interval = service.pricing_interval || 1
+  const unit = service.pricing_unit || 'MONTHS'
+  const unitLabel = t(`message.services.${unit.toLowerCase()}`)
+
+  return `${amount} tokens / ${interval} ${unitLabel}`
+}
+
+// Service actions
+function confirmChangeStatus(service: any) {
+  const newStatus = service.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE'
+  const message = newStatus === 'ACTIVE'
+    ? `Activate service "${service.name}"?`
+    : `Deactivate service "${service.name}"?`
+
+  confirm.require({
+    message,
+    header: t('message.common.confirm'),
+    icon: 'pi pi-question-circle',
+    accept: async () => {
+      try {
+        await servicesStore.changeServiceStatus(service.id, newStatus)
+        toast.add({
+          severity: 'success',
+          summary: t('message.common.success'),
+          detail: t('message.services.statusUpdateSuccess'),
+          life: 3000
+        })
+      } catch (error) {
+        toast.add({
+          severity: 'error',
+          summary: t('message.common.error'),
+          detail: t('message.services.statusUpdateError'),
+          life: 3000
+        })
+      }
+    }
+  })
+}
+
+async function viewPassphrase(service: any) {
+  try {
+    selectedService.value = service
+    const passphrase = await servicesStore.getServicePassphrase(service.id)
+    currentPassphrase.value = passphrase
+    showPassphraseDialog.value = true
+  } catch (error: any) {
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: error.message || 'Failed to retrieve passphrase',
+      life: 3000
+    })
+  }
+}
+
+async function copyPassphrase() {
+  const success = await copyToClipboard(currentPassphrase.value)
+  if (success) {
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.common.copiedToClipboard'),
+      life: 2000
+    })
+  }
 }
 
 function confirmDeleteService(service: any) {
@@ -289,70 +474,25 @@ function confirmDeleteService(service: any) {
   })
 }
 
-async function addService() {
-  try {
-    await servicesStore.addService({
-      name: serviceForm.name,
-      type: serviceForm.type,
-      endpoint: serviceForm.endpoint,
-      pricing: serviceForm.pricing,
-      status: 'available',
-      capabilities: {}
-    })
-    toast.add({
-      severity: 'success',
-      summary: t('message.common.success'),
-      detail: t('message.services.addSuccess'),
-      life: 3000
-    })
-    showAddServiceDialog.value = false
-    resetServiceForm()
-  } catch (error) {
-    toast.add({
-      severity: 'error',
-      summary: t('message.common.error'),
-      detail: t('message.services.addError'),
-      life: 3000
-    })
-  }
+function addToWorkflow(_service: any) {
+  // TODO: Implement add to workflow functionality
+  toast.add({
+    severity: 'info',
+    summary: t('message.common.info'),
+    detail: 'Add to workflow functionality coming soon',
+    life: 3000
+  })
 }
 
-async function updateService() {
-  if (!serviceForm.id) return
-
-  try {
-    await servicesStore.updateService(serviceForm.id, {
-      name: serviceForm.name,
-      type: serviceForm.type,
-      endpoint: serviceForm.endpoint,
-      pricing: serviceForm.pricing,
-      status: 'available',
-      capabilities: {}
-    })
-    toast.add({
-      severity: 'success',
-      summary: t('message.common.success'),
-      detail: t('message.services.updateSuccess'),
-      life: 3000
-    })
-    showEditServiceDialog.value = false
-    resetServiceForm()
-  } catch (error) {
-    toast.add({
-      severity: 'error',
-      summary: t('message.common.error'),
-      detail: t('message.services.updateError'),
-      life: 3000
-    })
-  }
+function onServiceAdded() {
+  // Refresh services list after adding a new one
+  servicesStore.fetchServices()
 }
 
-function resetServiceForm() {
-  serviceForm.id = null
-  serviceForm.name = ''
-  serviceForm.type = 'storage'
-  serviceForm.endpoint = ''
-  serviceForm.pricing = 0
+// Perform remote service search
+function performSearch() {
+  const peerIds = selectedPeers.value.length > 0 ? selectedPeers.value : []
+  servicesStore.searchRemoteServices(searchQuery.value, peerIds)
 }
 
 async function copyPeerId() {
@@ -371,6 +511,8 @@ onMounted(async () => {
   // Only fetch local services if not viewing peer-specific services
   if (!isPeerView.value) {
     await servicesStore.fetchServices()
+    // Fetch peers for the filter
+    await peersStore.fetchPeers()
   }
   // TODO: Fetch peer-specific services when backend API is ready
 })
@@ -380,8 +522,17 @@ onMounted(async () => {
 @use '../../scss/variables' as vars;
 
 .services {
-  min-height: 100vh;
-  padding: vars.$spacing-lg;
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  overflow: auto;
+  padding: 1rem;
+
+  // Badge styling - white background, black text
+  :deep(.p-badge) {
+    background-color: #fff !important;
+    color: #000 !important;
+  }
 }
 
 .services-header {
@@ -400,6 +551,81 @@ onMounted(async () => {
     color: vars.$color-primary;
     font-size: vars.$font-size-xxl;
     margin: 0;
+  }
+}
+
+.services-controls {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  align-content: center;
+  align-items: center;
+  width: 100%;
+  padding-bottom: 1.5rem;
+  border-bottom: 2px solid rgb(49, 64, 92);
+
+  .services-controls-buttons {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    justify-content: flex-end;
+    align-content: center;
+    align-items: center;
+
+    .input-box {
+      .btn {
+        min-width: 60px;
+        height: 30px;
+        line-height: 30px;
+        border-radius: 3px;
+        border: none;
+        margin: 0 5px 0 0;
+        padding: 0 8px;
+        cursor: pointer;
+        background-color: rgb(205, 81, 36);
+        color: #fff;
+        font-size: .9rem;
+
+        i {
+          vertical-align: text-bottom;
+        }
+
+        &.light {
+          background-color: #fff;
+          color: rgb(27, 38, 54);
+
+          &:hover {
+            background-color: #fff;
+            color: rgb(205, 81, 36);
+          }
+        }
+
+        &:hover {
+          background-color: rgb(246, 114, 66);
+        }
+
+        &.disabled {
+          background-color: #333333;
+          cursor: not-allowed;
+        }
+      }
+    }
+  }
+}
+
+.services-section {
+  padding: 1rem 0;
+
+  .section-title {
+    text-align: left;
+    font-size: 1.5rem;
+    padding-top: .5rem;
+    margin-bottom: 1rem;
+
+    i {
+      vertical-align: center;
+    }
   }
 }
 
@@ -426,25 +652,81 @@ onMounted(async () => {
   }
 }
 
-.service-form {
+.search-filter-panel {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background-color: rgb(38, 49, 65);
+  border-radius: 4px;
   display: flex;
   flex-direction: column;
-  gap: vars.$spacing-lg;
+  gap: 1rem;
 
-  .field {
+  .search-box {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+
+    .search-input {
+      flex: 1;
+    }
+
+    .search-button {
+      min-width: 80px;
+    }
+  }
+
+  .peer-filter {
     display: flex;
     flex-direction: column;
-    gap: vars.$spacing-sm;
+    gap: 0.5rem;
 
-    label {
+    .filter-label {
       font-weight: 500;
-      color: vars.$color-text;
+      font-size: 0.9rem;
+    }
+
+    .peer-multiselect {
+      width: 100%;
     }
   }
 }
 
-.w-full {
-  width: 100%;
+.peer-id-code {
+  font-family: 'Courier New', monospace;
+  font-size: vars.$font-size-sm;
+  background: rgba(vars.$color-primary, 0.1);
+  padding: 0.25rem 0.5rem;
+  border-radius: vars.$border-radius-sm;
+  color: vars.$color-primary;
+}
+
+.passphrase-content {
+  display: flex;
+  flex-direction: column;
+  gap: vars.$spacing-lg;
+
+  .passphrase-label {
+    margin: 0;
+    color: vars.$color-text;
+  }
+
+  .passphrase-box {
+    display: flex;
+    align-items: center;
+    gap: vars.$spacing-md;
+    padding: vars.$spacing-md;
+    background-color: rgb(38, 49, 65);
+    border-radius: 4px;
+    border: 1px solid rgba(vars.$color-primary, 0.2);
+
+    code {
+      flex: 1;
+      font-family: 'Courier New', monospace;
+      font-size: vars.$font-size-md;
+      color: vars.$color-primary;
+      word-break: break-all;
+    }
+  }
 }
 
 .peer-services-section {

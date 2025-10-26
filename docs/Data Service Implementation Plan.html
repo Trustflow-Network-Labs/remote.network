@@ -1,0 +1,292 @@
+  1. Database Schema (Fresh Start)
+
+  Services Table Extensions:
+  - Add service_type ENUM: 'DATA', 'DOCKER', 'STANDALONE'
+  - Update pricing model to support:
+    - pricing_amount (REAL)
+    - pricing_type ENUM: 'ONE_TIME', 'RECURRING'
+    - pricing_interval (INTEGER) - number of units
+    - pricing_unit ENUM: 'SECONDS', 'MINUTES', 'HOURS', 'DAYS', 'WEEKS', 'MONTHS', 'YEARS'
+
+  New Tables:
+  - data_service_details: id, service_id, file_path, encrypted_path, hash (BLAKE3), compression_type, encryption_key_id, size_bytes, original_size_bytes, upload_completed (BOOLEAN)
+  - encryption_keys: id, service_id, passphrase_hash, key_data (encrypted), created_at
+  - upload_sessions: id, service_id, session_id, chunk_index, total_chunks, bytes_uploaded, total_bytes, status ('IN_PROGRESS', 'PAUSED', 'COMPLETED', 'FAILED'), created_at, updated_at
+  - docker_service_details: (for future)
+  - standalone_service_details: (for future)
+
+  ---
+  2. Backend Implementation (Go)
+
+  A. WebSocket File Upload (internal/websocket/)
+  - Create file_upload_handler.go:
+    - Chunked file upload protocol
+    - Upload session management (pause/resume)
+    - Chunk validation and reassembly
+    - Progress tracking per session
+    - Memory-efficient buffering (write chunks directly to disk)
+    - Upload resumption by chunk index
+
+  WebSocket Messages:
+  // Client -> Server
+  {
+    "type": "FILE_UPLOAD_START",
+    "payload": {
+      "service_id": 123,
+      "filename": "data.zip",
+      "total_size": 1048576,
+      "total_chunks": 1024,
+      "chunk_size": 1024
+    }
+  }
+
+  {
+    "type": "FILE_UPLOAD_CHUNK",
+    "payload": {
+      "session_id": "uuid",
+      "chunk_index": 0,
+      "data": "base64_encoded_chunk"
+    }
+  }
+
+  {
+    "type": "FILE_UPLOAD_PAUSE",
+    "payload": { "session_id": "uuid" }
+  }
+
+  {
+    "type": "FILE_UPLOAD_RESUME",
+    "payload": { "session_id": "uuid" }
+  }
+
+  // Server -> Client
+  {
+    "type": "FILE_UPLOAD_PROGRESS",
+    "payload": {
+      "session_id": "uuid",
+      "chunks_received": 512,
+      "bytes_uploaded": 524288,
+      "percentage": 50
+    }
+  }
+
+  {
+    "type": "FILE_UPLOAD_COMPLETE",
+    "payload": {
+      "session_id": "uuid",
+      "file_hash": "blake3_hash"
+    }
+  }
+
+  B. File Processing (internal/services/)
+  - Create file_processor.go:
+    - Post-upload compression (tar.gz)
+    - AES-256-GCM encryption
+    - BLAKE3 hash generation
+    - Passphrase generation and secure storage
+    - Move processed file to final storage location
+
+  C. P2P Service Discovery (internal/p2p/)
+  - Create service_query_handler.go:
+    - Remove DHT service announcements
+    - Handle incoming QUIC service search queries
+    - Search local services by name/description
+    - Return matching services via QUIC response
+    - Query format: search phrases, service type filter
+
+  D. API & WebSocket Handlers
+  - Update handlers_services.go:
+    - POST /api/services/data - Create Data service entry (no file upload here)
+    - PUT /api/services/{id}/status - Change service status
+    - WebSocket-based file upload (chunked)
+    - GET /api/services/{id}/passphrase - Get decryption passphrase
+  - Update websocket_events.go:
+    - File upload event handlers
+    - Service search query broadcast
+    - Remote service discovery results
+
+  ---
+  3. Frontend Implementation (Vue.js)
+
+  A. ServicesView.vue Layout
+
+  ┌──────────────────────────────────────────────┐
+  │ [Add Local Service] [Search Remote Service]  │
+  ├──────────────────────────────────────────────┤
+  │ Local Services                                │
+  │ Table: Service Name, Description (truncated), │
+  │        Service Type, Service Status, Pricing, │
+  │        Actions [Change Status] [Delete]       │
+  ├──────────────────────────────────────────────┤
+  │ Remote Services (Search from Peers)           │
+  │ ┌──────────────┬──────────────────────────┐  │
+  │ │ Peer Filter  │ Table: Service Name,     │  │
+  │ │ - Filter by  │        Description,      │  │
+  │ │   peer name  │        Type, Pricing,    │  │
+  │ │ - Broadcast  │        Actions           │  │
+  │ │   to peers   │   [Add to Workflow]      │  │
+  │ └──────────────┴──────────────────────────┘  │
+  └──────────────────────────────────────────────┘
+
+  B. Components to Create:
+
+  1. AddDataServiceDialog.vue
+    - Service name, description inputs
+    - Pricing configuration (one-time vs recurring with intervals)
+    - File picker (multiple files/folders)
+    - Upload progress bar with pause/resume buttons
+    - Show upload speed, ETA, bytes uploaded/total
+  2. RemoteServiceSearch.vue
+    - Search input (name/description)
+    - Service type filter
+    - Results table
+    - "Add to Workflow" action buttons
+  3. PeerFilterPanel.vue
+    - List of known peers with checkboxes
+    - "Broadcast Query" button
+    - Selected peer count
+  4. ServiceStatusToggle.vue
+    - Toggle between Active/Inactive
+    - Confirmation dialog
+
+  C. Composables
+
+  Create composables/useChunkedFileUpload.ts:
+  interface UploadOptions {
+    file: File
+    serviceId: number
+    chunkSize: number
+    onProgress: (progress: UploadProgress) => void
+    onComplete: (hash: string) => void
+    onError: (error: Error) => void
+  }
+
+  interface UploadProgress {
+    sessionId: string
+    chunksUploaded: number
+    totalChunks: number
+    bytesUploaded: number
+    totalBytes: number
+    percentage: number
+    speed: number // bytes per second
+    eta: number // seconds remaining
+  }
+
+  export function useChunkedFileUpload() {
+    const upload = async (options: UploadOptions) => { ... }
+    const pause = (sessionId: string) => { ... }
+    const resume = (sessionId: string) => { ... }
+    const cancel = (sessionId: string) => { ... }
+
+    return { upload, pause, resume, cancel }
+  }
+
+  D. Store Updates (stores/services.ts)
+  interface PricingModel {
+    amount: number
+    type: 'ONE_TIME' | 'RECURRING'
+    interval?: number
+    unit?: 'SECONDS' | 'MINUTES' | 'HOURS' | 'DAYS' | 'WEEKS' | 'MONTHS' | 'YEARS'
+  }
+
+  interface LocalService extends Service {
+    status: 'ACTIVE' | 'INACTIVE'
+    pricing: PricingModel
+  }
+
+  interface RemoteService extends Service {
+    peerId: string
+    peerName?: string
+    pricing: PricingModel
+  }
+
+  // Actions
+  - uploadDataService(file, metadata)
+  - searchRemoteServices(query, peerFilters)
+  - updateServiceStatus(id, status)
+
+  E. WebSocket Integration
+  - File upload message handlers
+  - Progress updates
+  - Service search query broadcasting
+  - Remote service discovery results
+
+  ---
+  4. QUIC Service Discovery Protocol
+
+  Client Query (via QUIC):
+  {
+    "type": "SERVICE_SEARCH_REQUEST",
+    "query": {
+      "phrases": "image processing,ML",
+      "service_type": "DATA,DOCKER",
+      "active_only": true
+    }
+  }
+
+  Server Response (via QUIC):
+  {
+    "type": "SERVICE_SEARCH_RESPONSE",
+    "services": [
+      {
+        "id": 123,
+        "name": "Image Dataset",
+        "description": "Large image dataset for ML training...",
+        "service_type": "DATA",
+        "pricing": {
+          "amount": 100,
+          "type": "RECURRING",
+          "interval": 1,
+          "unit": "MONTHS"
+        },
+        "hash": "blake3_hash",
+        "size_bytes": 10485760
+      }
+    ]
+  }
+
+  ---
+  5. Implementation Order
+
+  1. Database schema (fresh tables with pricing model)
+  2. WebSocket chunked file upload (backend + frontend)
+  3. File processing (compression, encryption, hashing)
+  4. UI components (dialogs, progress bars, tables)
+  5. Service status management (Active/Inactive toggle)
+  6. QUIC service discovery (query handler, no DHT, no caching)
+  7. Remote service search UI (peer filtering, search, results)
+  8. Testing (large files, pause/resume, network failures)
+
+
+  │ │ Data Service Implementation                                                                                                                                                              │ │
+│ │                                                                                                                                                                                          │ │
+│ │ Following the plan in docs/Data Service Implementation Plan.html, I will implement:                                                                                                      │ │
+│ │                                                                                                                                                                                          │ │
+│ │ Phase 1: Database Schema                                                                                                                                                                 │ │
+│ │                                                                                                                                                                                          │ │
+│ │ - Extend services table with service_type and flexible pricing model (one-time/recurring)                                                                                                │ │
+│ │ - Create data_service_details, encryption_keys, upload_sessions tables                                                                                                                   │ │
+│ │ - Add placeholder tables for docker/standalone services                                                                                                                                  │ │
+│ │                                                                                                                                                                                          │ │
+│ │ Phase 2: Backend (Go)                                                                                                                                                                    │ │
+│ │                                                                                                                                                                                          │ │
+│ │ - WebSocket chunked file upload handler with pause/resume                                                                                                                                │ │
+│ │ - File processing: compression, AES-256-GCM encryption, BLAKE3 hashing                                                                                                                   │ │
+│ │ - QUIC service discovery (query handler only, no broadcasting/caching)                                                                                                                   │ │
+│ │ - API endpoints for service management and passphrase retrieval                                                                                                                          │ │
+│ │                                                                                                                                                                                          │ │
+│ │ Phase 3: Frontend (Vue.js)                                                                                                                                                               │ │
+│ │                                                                                                                                                                                          │ │
+│ │ - Update ServicesView with local/remote sections                                                                                                                                         │ │
+│ │ - AddDataServiceDialog with file upload and progress tracking                                                                                                                            │ │
+│ │ - RemoteServiceSearch with peer filtering                                                                                                                                                │ │
+│ │ - Chunked file upload composable                                                                                                                                                         │ │
+│ │ - Store updates for pricing models and remote services                                                                                                                                   │ │
+│ │                                                                                                                                                                                          │ │
+│ │ Phase 4: Integration & Testing                                                                                                                                                           │ │
+│ │                                                                                                                                                                                          │ │
+│ │ - WebSocket event handlers                                                                                                                                                               │ │
+│ │ - QUIC service discovery protocol                                                                                                                                                        │ │
+│ │ - End-to-end testing                                                                                                                                                                     │ │
+│ │                                                                                                                                                                                          │ │
+│ │ Implementation order: Database → WebSocket Upload → File Processing → UI → Status Management → QUIC Discovery → Remote Search → Testing                                                  │ │

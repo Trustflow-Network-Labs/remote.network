@@ -31,6 +31,12 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/services/add',
+    name: 'AddLocalService',
+    component: () => import('../views/AddLocalServicePage.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     path: '/services/peer/:peerId',
     name: 'PeerServices',
     component: () => import('../components/services/ServicesView.vue'),

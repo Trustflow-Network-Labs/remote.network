@@ -139,6 +139,9 @@ export default {
       title: 'Services',
       list: 'Service List',
       add: 'Add Service',
+      addDataService: 'Add Data Service',
+      addLocalService: 'Add Local Service',
+      searchRemoteService: 'Search Remote Service',
       edit: 'Edit Service',
       delete: 'Delete Service',
       type: 'Service Type',
@@ -148,24 +151,128 @@ export default {
       capabilities: 'Capabilities',
       peerServicesTitle: 'Peer Services',
       peerServicesPlaceholder: 'Service discovery for peers is coming soon. This section will display all services hosted by this peer.',
+
+      // Data Service Dialog
+      serviceName: 'Service Name',
+      serviceDescription: 'Service Description',
+      selectFile: 'Select File',
+      chooseFile: 'Choose File',
+      amount: 'Amount',
+      oneTime: 'One-Time',
+      recurring: 'Recurring',
+      seconds: 'Second(s)',
+      minutes: 'Minute(s)',
+      hours: 'Hour(s)',
+      days: 'Day(s)',
+      weeks: 'Week(s)',
+      months: 'Month(s)',
+      years: 'Year(s)',
+      nameRequired: 'Service name is required',
+      fileRequired: 'Please select a file',
+      serviceCreated: 'Service created successfully',
+      createFailed: 'Failed to create service',
+
+      // Upload Progress
+      uploadProgress: 'Upload Progress',
+      uploadComplete: 'Upload Complete',
+      uploadCompleteMessage: 'File uploaded and processed successfully',
+      uploadFailed: 'Upload failed',
+      uploadCancelled: 'Upload cancelled',
+      pause: 'Pause',
+      resume: 'Resume',
+      startUpload: 'Start Upload',
+
+      // Service Types
       types: {
         storage: 'File Storage',
         docker: 'Docker Container',
         standalone: 'Standalone App',
-        relay: 'Relay Service'
+        relay: 'Relay Service',
+        data: 'Data / Files'
       },
+
+      // Service Statuses
       statuses: {
         available: 'Available',
         busy: 'Busy',
-        offline: 'Offline'
+        offline: 'Offline',
+        active: 'Active',
+        inactive: 'Inactive'
       },
+
+      // Actions
+      changeStatus: 'Change Status',
+      viewPassphrase: 'View Passphrase',
+      addToWorkflow: 'Add to Workflow',
+
+      // Messages
       deleteConfirm: 'Are you sure you want to delete this service?',
       deleteSuccess: 'Service deleted successfully',
       deleteError: 'Failed to delete service',
       addSuccess: 'Service added successfully',
       addError: 'Failed to add service',
       updateSuccess: 'Service updated successfully',
-      updateError: 'Failed to update service'
+      updateError: 'Failed to update service',
+      statusUpdateSuccess: 'Service status updated successfully',
+      statusUpdateError: 'Failed to update service status',
+
+      // Sections
+      localServices: 'Local Services',
+      remoteServices: 'Remote Services',
+      noLocalServices: 'No local services yet. Click "Add Local Service" to get started.',
+      noRemoteServices: 'No remote services found. Use the search to discover services from other peers.',
+
+      // Search and Filter
+      searchPlaceholder: 'Search by service name or description...',
+      filterByPeers: 'Filter by Peers',
+      selectPeers: 'Select peers to search...',
+
+      // Wizard
+      wizard: {
+        basicInfo: 'Basic Information',
+        pricing: 'Pricing',
+        serviceType: 'Service Type',
+        configuration: 'Configuration',
+        next: 'Next',
+        previous: 'Previous',
+        finish: 'Finish',
+        selectType: 'Select Service Type',
+        typeRequired: 'Please select a service type',
+
+        // Service type descriptions
+        dataDescription: 'Share files and folders with other peers',
+        dockerDescription: 'Run containerized applications',
+        standaloneDescription: 'Run standalone executables',
+
+        // DATA service
+        dataConfig: 'Data Service Configuration',
+        selectFiles: 'Select Files or Folder',
+        chooseFiles: 'Choose Files',
+        chooseFolder: 'Choose Folder',
+        filesSelected: 'file(s) selected',
+        andMore: 'and {count} more...',
+
+        // DOCKER service
+        dockerConfig: 'Docker Configuration',
+        dockerImage: 'Docker Image',
+        dockerImagePlaceholder: 'e.g., nginx:latest',
+        ports: 'Port Mappings',
+        portsPlaceholder: 'e.g., 8080:80, 443:443',
+        portsHelp: 'Format: host_port:container_port, separated by commas',
+        volumes: 'Volume Mounts',
+        volumesPlaceholder: 'e.g., /host/path:/container/path',
+        environment: 'Environment Variables',
+        envPlaceholder: 'KEY=value, one per line',
+
+        // STANDALONE service
+        standaloneConfig: 'Standalone Configuration',
+        command: 'Command',
+        commandPlaceholder: 'e.g., /usr/bin/python3',
+        arguments: 'Arguments',
+        argsPlaceholder: 'e.g., script.py --port 8080',
+        workingDirectory: 'Working Directory',
+        workdirPlaceholder: 'e.g., /opt/app'
+      }
     },
     peers: {
       title: 'Peers',

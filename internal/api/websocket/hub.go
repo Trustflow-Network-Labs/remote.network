@@ -26,6 +26,9 @@ type Hub struct {
 
 	// Logger
 	logger *logrus.Logger
+
+	// File upload handler
+	fileUploadHandler *FileUploadHandler
 }
 
 // NewHub creates a new Hub instance
@@ -140,4 +143,14 @@ func (h *Hub) RegisterClient(client *Client) {
 // UnregisterClient sends a client to the unregister channel
 func (h *Hub) UnregisterClient(client *Client) {
 	h.unregister <- client
+}
+
+// SetFileUploadHandler sets the file upload handler for the hub
+func (h *Hub) SetFileUploadHandler(handler *FileUploadHandler) {
+	h.fileUploadHandler = handler
+}
+
+// GetFileUploadHandler returns the file upload handler
+func (h *Hub) GetFileUploadHandler() *FileUploadHandler {
+	return h.fileUploadHandler
 }

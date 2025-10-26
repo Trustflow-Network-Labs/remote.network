@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import type { Ref } from 'vue'
 
 // WebSocket connection states
@@ -19,6 +19,15 @@ export enum MessageType {
   SERVICES_UPDATED = 'services.updated',
   WORKFLOWS_UPDATED = 'workflows.updated',
   BLACKLIST_UPDATED = 'blacklist.updated',
+
+  // File upload messages
+  FILE_UPLOAD_START = 'file.upload.start',
+  FILE_UPLOAD_CHUNK = 'file.upload.chunk',
+  FILE_UPLOAD_PAUSE = 'file.upload.pause',
+  FILE_UPLOAD_RESUME = 'file.upload.resume',
+  FILE_UPLOAD_PROGRESS = 'file.upload.progress',
+  FILE_UPLOAD_COMPLETE = 'file.upload.complete',
+  FILE_UPLOAD_ERROR = 'file.upload.error',
 
   // Control messages
   PING = 'ping',
@@ -142,7 +151,7 @@ export class WebSocketService {
   }
 
   // Send message to server
-  private send(message: Partial<WebSocketMessage>): void {
+  public send(message: Partial<WebSocketMessage>): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn('[WebSocket] Cannot send message: not connected')
       return

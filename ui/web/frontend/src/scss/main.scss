@@ -122,6 +122,15 @@ body {
   --p-primary-color: #{vars.$color-primary};
   --p-primary-contrast-color: #{vars.$color-text};
 
+  // Button colors - use blue theme
+  --p-button-primary-background: #4060c3;
+  --p-button-primary-border-color: #4060c3;
+  --p-button-primary-color: #ffffff;
+  --p-button-primary-hover-background: #5070d3;
+  --p-button-primary-hover-border-color: #5070d3;
+  --p-button-primary-active-background: #3050b3;
+  --p-button-primary-active-border-color: #3050b3;
+
   // Surface colors (backgrounds)
   --p-surface-0: #{vars.$color-background};
   --p-surface-50: #{vars.$color-card};
@@ -284,5 +293,235 @@ body {
   &:enabled:focus {
     border-color: vars.$color-primary !important;
     box-shadow: 0 0 0 0.2rem rgba(vars.$color-primary, 0.25) !important;
+  }
+}
+
+// MultiSelect overrides
+.p-multiselect {
+  background: vars.$color-surface !important;
+  color: vars.$color-text !important;
+  border-color: vars.$color-border !important;
+
+  &:hover {
+    border-color: vars.$color-primary !important;
+  }
+
+  .p-multiselect-label-container {
+    background: transparent !important;
+    color: vars.$color-text !important;
+  }
+
+  .p-multiselect-label {
+    color: vars.$color-text !important;
+  }
+
+  .p-multiselect-dropdown-icon {
+    color: vars.$color-text !important;
+  }
+}
+
+.p-multiselect-overlay {
+  background: vars.$color-surface !important;
+  border-color: vars.$color-border !important;
+
+  .p-multiselect-header {
+    background: vars.$color-card !important;
+    border-color: vars.$color-border !important;
+  }
+
+  .p-multiselect-list-container {
+    background: vars.$color-surface !important;
+  }
+
+  .p-multiselect-list {
+    background: vars.$color-surface !important;
+  }
+
+  .p-multiselect-option {
+    color: vars.$color-text !important;
+    background: transparent !important;
+
+    &:hover {
+      background: color.adjust(vars.$color-card, $lightness: 5%) !important;
+    }
+
+    &.p-multiselect-option-selected {
+      background: vars.$color-primary !important;
+      color: #fff !important;
+    }
+  }
+
+  .p-multiselect-option-checkbox {
+    border-color: vars.$color-border !important;
+  }
+
+  .p-checkbox-checked .p-checkbox-box {
+    background: vars.$color-primary !important;
+    border-color: vars.$color-primary !important;
+  }
+}
+
+// Button overrides - use blue theme by default
+.p-button:not(.p-button-secondary):not(.p-button-text):not(.p-button-outlined):not(.p-button-danger):not(.p-button-warning):not(.p-button-success) {
+  background-color: #4060c3 !important;
+  border-color: #4060c3 !important;
+  color: #fff !important;
+
+  &:hover:not(:disabled) {
+    background-color: #5070d3 !important;
+    border-color: #5070d3 !important;
+  }
+
+  &:active:not(:disabled) {
+    background-color: #3050b3 !important;
+    border-color: #3050b3 !important;
+  }
+}
+
+// Danger button styling
+.p-button-danger {
+  background-color: vars.$color-error !important;
+  border-color: vars.$color-error !important;
+  color: #fff !important;
+
+  &:hover:not(:disabled) {
+    background-color: color.adjust(vars.$color-error, $lightness: 10%) !important;
+    border-color: color.adjust(vars.$color-error, $lightness: 10%) !important;
+  }
+}
+
+// Success button styling
+.p-button-success {
+  background-color: vars.$color-success !important;
+  border-color: vars.$color-success !important;
+  color: #fff !important;
+
+  &:hover:not(:disabled) {
+    background-color: color.adjust(vars.$color-success, $lightness: 10%) !important;
+    border-color: color.adjust(vars.$color-success, $lightness: 10%) !important;
+  }
+}
+
+// Warning button styling
+.p-button-warning {
+  background-color: vars.$color-warning !important;
+  border-color: vars.$color-warning !important;
+  color: #fff !important;
+
+  &:hover:not(:disabled) {
+    background-color: color.adjust(vars.$color-warning, $lightness: 10%) !important;
+    border-color: color.adjust(vars.$color-warning, $lightness: 10%) !important;
+  }
+}
+
+// Select overlay styling (portaled to body)
+.p-select-overlay,
+.p-select-overlay.p-component {
+  background-color: rgb(38, 49, 65) !important;
+  border-color: rgb(49, 64, 92) !important;
+  color: rgb(240, 240, 240) !important;
+
+  .p-select-list,
+  .p-select-list-container {
+    background-color: rgb(38, 49, 65) !important;
+  }
+
+  .p-select-option {
+    color: rgb(240, 240, 240) !important;
+    background-color: transparent !important;
+
+    &:hover {
+      background-color: rgb(49, 64, 92) !important;
+    }
+
+    &.p-select-option-selected {
+      background-color: #4060c3 !important;
+      color: #fff !important;
+    }
+  }
+
+  .p-select-header {
+    background-color: rgb(45, 58, 78) !important;
+    border-color: rgb(49, 64, 92) !important;
+  }
+
+  .p-select-filter-container {
+    .p-inputtext {
+      background-color: rgb(38, 49, 65) !important;
+      color: rgb(240, 240, 240) !important;
+      border-color: rgb(49, 64, 92) !important;
+    }
+  }
+}
+
+// MultiSelect overlay styling (portaled to body)
+.p-multiselect-overlay,
+.p-multiselect-overlay.p-component {
+  background-color: rgb(38, 49, 65) !important;
+  border-color: rgb(49, 64, 92) !important;
+
+  .p-multiselect-header {
+    background-color: rgb(45, 58, 78) !important;
+    border-color: rgb(49, 64, 92) !important;
+  }
+
+  .p-multiselect-list-container,
+  .p-multiselect-list {
+    background-color: rgb(38, 49, 65) !important;
+  }
+
+  .p-multiselect-option {
+    color: rgb(240, 240, 240) !important;
+    background-color: transparent !important;
+
+    &:hover {
+      background-color: rgb(49, 64, 92) !important;
+    }
+
+    &.p-multiselect-option-selected {
+      background-color: rgb(205, 81, 36) !important;
+      color: #fff !important;
+    }
+  }
+
+  .p-multiselect-option-checkbox {
+    border-color: rgb(49, 64, 92) !important;
+  }
+
+  .p-checkbox-checked .p-checkbox-box {
+    background-color: rgb(205, 81, 36) !important;
+    border-color: rgb(205, 81, 36) !important;
+  }
+}
+
+// TieredMenu overlay styling (portaled to body)
+.p-tieredmenu,
+.p-tieredmenu.p-component {
+  background-color: rgb(38, 49, 65) !important;
+  border: 1px solid rgb(49, 64, 92) !important;
+  color: rgb(240, 240, 240) !important;
+
+  .p-tieredmenu-item-content {
+    color: rgb(240, 240, 240) !important;
+
+    &:hover {
+      background-color: rgb(49, 64, 92) !important;
+    }
+  }
+
+  .p-tieredmenu-item-link {
+    color: rgb(240, 240, 240) !important;
+
+    &:hover {
+      background-color: rgb(49, 64, 92) !important;
+    }
+  }
+
+  .p-tieredmenu-item-icon {
+    color: rgb(205, 81, 36) !important;
+  }
+
+  .p-tieredmenu-separator {
+    border-color: rgb(49, 64, 92) !important;
   }
 }

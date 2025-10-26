@@ -3,36 +3,59 @@ import { api } from '../services/api'
 import { getWebSocketService, MessageType } from '../services/websocket'
 
 export type ServiceType = 'storage' | 'docker' | 'standalone' | 'relay'
-export type ServiceStatus = 'available' | 'busy' | 'offline'
+export type ServiceStatus = 'available' | 'busy' | 'offline' | 'ACTIVE' | 'INACTIVE'
+export type PricingType = 'ONE_TIME' | 'RECURRING'
+export type PricingUnit = 'SECONDS' | 'MINUTES' | 'HOURS' | 'DAYS' | 'WEEKS' | 'MONTHS' | 'YEARS'
+
+export interface PricingModel {
+  amount: number
+  type: PricingType
+  interval?: number
+  unit?: PricingUnit
+}
 
 export interface Service {
   id?: number
+  service_type?: string  // 'DATA', 'DOCKER', 'STANDALONE'
   type: ServiceType
   endpoint: string
   capabilities: Record<string, any>
   status: ServiceStatus
   name?: string
   description?: string
-  pricing?: number
+  pricing?: number  // Legacy field
+  pricing_amount?: number
+  pricing_type?: PricingType
+  pricing_interval?: number
+  pricing_unit?: PricingUnit
   created_at?: string
   updated_at?: string
 }
 
+export interface RemoteService extends Service {
+  peer_id: string
+  peer_name?: string
+}
+
 export interface ServicesState {
   services: Service[]
+  remoteServices: RemoteService[]
   loading: boolean
+  remoteLoading: boolean
   error: string | null
+  _wsUnsubscribe: (() => void) | null
 }
 
 export const useServicesStore = defineStore('services', {
   state: (): ServicesState => ({
     services: [],
+    remoteServices: [],
     loading: false,
-    error: null
+    remoteLoading: false,
+    error: null,
+    // Track unsubscribe function
+    _wsUnsubscribe: null as (() => void) | null
   }),
-
-  // Track unsubscribe function
-  _wsUnsubscribe: null as (() => void) | null,
 
   getters: {
     totalServices: (state) => state.services.length,
@@ -102,6 +125,45 @@ export const useServicesStore = defineStore('services', {
       const service = this.services.find(s => s.id === id)
       if (service) {
         service.status = status
+      }
+    },
+
+    async changeServiceStatus(id: number, status: 'ACTIVE' | 'INACTIVE') {
+      try {
+        await api.updateServiceStatus(id, status)
+        const index = this.services.findIndex(s => s.id === id)
+        if (index !== -1) {
+          this.services[index].status = status
+        }
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        console.error('Failed to update service status:', error)
+        throw error
+      }
+    },
+
+    async getServicePassphrase(id: number): Promise<string> {
+      try {
+        const response = await api.getServicePassphrase(id)
+        return response.passphrase
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        console.error('Failed to get service passphrase:', error)
+        throw error
+      }
+    },
+
+    async searchRemoteServices(_query: string, _peerIds: string[] = []) {
+      this.remoteLoading = true
+      try {
+        // TODO: Implement remote service search via QUIC
+        // For now, return empty array
+        this.remoteServices = []
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        console.error('Failed to search remote services:', error)
+      } finally {
+        this.remoteLoading = false
       }
     },
 

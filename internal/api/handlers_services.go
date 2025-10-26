@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -232,5 +233,161 @@ func (s *APIServer) handleDeleteService(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "Service deleted successfully",
+	})
+}
+
+// handleUpdateServiceStatus updates a service status
+func (s *APIServer) handleUpdateServiceStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract ID from path (format: /api/services/{id}/status)
+	path := strings.TrimPrefix(r.URL.Path, "/api/services/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	// Parse request body
+	var requestBody struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate status
+	if requestBody.Status != "ACTIVE" && requestBody.Status != "INACTIVE" {
+		http.Error(w, "Invalid status value. Must be ACTIVE or INACTIVE", http.StatusBadRequest)
+		return
+	}
+
+	// Update status in database
+	err = s.dbManager.UpdateServiceStatus(id, requestBody.Status)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to update service status: %v", err), "api")
+		http.Error(w, "Failed to update service status", http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Service status updated successfully",
+		"status":  requestBody.Status,
+	})
+}
+
+// handleGetServicePassphrase retrieves the passphrase for a data service
+func (s *APIServer) handleGetServicePassphrase(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract ID from path (format: /api/services/{id}/passphrase)
+	path := strings.TrimPrefix(r.URL.Path, "/api/services/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	// Get service to verify it exists and is a DATA service
+	service, err := s.dbManager.GetService(id)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get service: %v", err), "api")
+		http.Error(w, "Failed to retrieve service", http.StatusInternalServerError)
+		return
+	}
+
+	if service == nil {
+		http.Error(w, "Service not found", http.StatusNotFound)
+		return
+	}
+
+	if service.ServiceType != "DATA" {
+		http.Error(w, "Passphrase only available for DATA services", http.StatusBadRequest)
+		return
+	}
+
+	// Get passphrase from file processor
+	if s.fileProcessor == nil {
+		http.Error(w, "File processor not available", http.StatusInternalServerError)
+		return
+	}
+
+	passphrase, err := s.fileProcessor.GetPassphrase(id)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get passphrase: %v", err), "api")
+		http.Error(w, "Failed to retrieve passphrase", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"passphrase": passphrase,
+	})
+}
+
+// handleProcessUploadedFile triggers file processing after upload completion
+func (s *APIServer) handleProcessUploadedFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var requestBody struct {
+		SessionID string `json:"session_id"`
+		ServiceID int64  `json:"service_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if requestBody.SessionID == "" || requestBody.ServiceID == 0 {
+		http.Error(w, "Missing required fields: session_id, service_id", http.StatusBadRequest)
+		return
+	}
+
+	// Process file asynchronously
+	if s.fileProcessor == nil {
+		http.Error(w, "File processor not available", http.StatusInternalServerError)
+		return
+	}
+
+	go func() {
+		if err := s.fileProcessor.ProcessUploadedFile(requestBody.SessionID, requestBody.ServiceID); err != nil {
+			s.logger.Error(fmt.Sprintf("Failed to process uploaded file: %v", err), "api")
+		} else {
+			// Broadcast service update after successful processing
+			s.eventEmitter.BroadcastServiceUpdate()
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "File processing started",
 	})
 }

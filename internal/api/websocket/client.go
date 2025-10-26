@@ -18,8 +18,8 @@ const (
 	// Send pings to peer with this period (must be less than pongWait)
 	pingPeriod = (pongWait * 9) / 10
 
-	// Maximum message size allowed from peer
-	maxMessageSize = 512 * 1024 // 512 KB
+	// Maximum message size allowed from peer (increased for file upload chunks)
+	maxMessageSize = 10 * 1024 * 1024 // 10 MB
 )
 
 // Client represents a single WebSocket connection
@@ -155,6 +155,44 @@ func (c *Client) handleIncomingMessage(msg *Message) {
 		}
 		c.send <- pongMsg
 
+	case MessageTypeFileUploadStart:
+		// Handle file upload start
+		if c.hub.fileUploadHandler != nil {
+			if err := c.hub.fileUploadHandler.HandleFileUploadStart(c, msg.Payload); err != nil {
+				c.logger.WithError(err).Error("Failed to handle file upload start")
+				errorMsg, _ := NewMessage(MessageTypeFileUploadError, FileUploadErrorPayload{
+					SessionID: "",
+					Error:     err.Error(),
+					Code:      "UPLOAD_START_FAILED",
+				})
+				c.Send(errorMsg)
+			}
+		}
+
+	case MessageTypeFileUploadChunk:
+		// Handle file upload chunk
+		if c.hub.fileUploadHandler != nil {
+			if err := c.hub.fileUploadHandler.HandleFileUploadChunk(c, msg.Payload); err != nil {
+				c.logger.WithError(err).Error("Failed to handle file upload chunk")
+			}
+		}
+
+	case MessageTypeFileUploadPause:
+		// Handle file upload pause
+		if c.hub.fileUploadHandler != nil {
+			if err := c.hub.fileUploadHandler.HandleFileUploadPause(c, msg.Payload); err != nil {
+				c.logger.WithError(err).Error("Failed to handle file upload pause")
+			}
+		}
+
+	case MessageTypeFileUploadResume:
+		// Handle file upload resume
+		if c.hub.fileUploadHandler != nil {
+			if err := c.hub.fileUploadHandler.HandleFileUploadResume(c, msg.Payload); err != nil {
+				c.logger.WithError(err).Error("Failed to handle file upload resume")
+			}
+		}
+
 	default:
 		c.logger.WithField("type", msg.Type).Debug("Received message from client")
 		// Currently, we don't handle other message types from client
@@ -166,4 +204,22 @@ func (c *Client) handleIncomingMessage(msg *Message) {
 func (c *Client) Start() {
 	go c.writePump()
 	go c.readPump()
+}
+
+// Send sends a message to the client
+func (c *Client) Send(msg *Message) {
+	select {
+	case c.send <- msg:
+	default:
+		c.logger.WithField("peer_id", c.peerID).Warn("Client send channel is full, message dropped")
+	}
+}
+
+// SendRaw sends a raw message to the client
+func (c *Client) SendRaw(data []byte) {
+	select {
+	case c.sendRaw <- data:
+	default:
+		c.logger.WithField("peer_id", c.peerID).Warn("Client sendRaw channel is full, message dropped")
+	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/core"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
@@ -51,6 +52,7 @@ type APIServer struct {
 	wsLogger         *logrus.Logger
 	wsUpgrader       websocket.Upgrader
 	eventEmitter     *events.Emitter
+	fileProcessor    *services.FileProcessor
 	startTime        time.Time
 }
 
@@ -102,6 +104,27 @@ func NewAPIServer(
 	// Initialize event emitter
 	eventEmitter := events.NewEmitter(wsHub, peerManager, dbManager, wsLogger)
 
+	// Initialize file processor
+	fileProcessor := services.NewFileProcessor(dbManager, logger, config)
+
+	// Initialize file upload handler
+	fileUploadHandler := ws.NewFileUploadHandler(dbManager, logger, config)
+
+	// Set file upload handler in hub
+	wsHub.SetFileUploadHandler(fileUploadHandler)
+
+	// Set callback for upload completion to trigger file processing
+	fileUploadHandler.SetOnUploadCompleteCallback(func(sessionID string, serviceID int64) {
+		logger.Info(fmt.Sprintf("Triggering file processing for session %s, service %d", sessionID, serviceID), "api")
+		if err := fileProcessor.ProcessUploadedFile(sessionID, serviceID); err != nil {
+			logger.Error(fmt.Sprintf("Failed to process uploaded file: %v", err), "api")
+		} else {
+			// Broadcast service update after successful processing
+			eventEmitter.BroadcastServiceUpdate()
+			logger.Info(fmt.Sprintf("File processing completed for service %d", serviceID), "api")
+		}
+	})
+
 	return &APIServer{
 		ctx:              ctx,
 		cancel:           cancel,
@@ -117,6 +140,7 @@ func NewAPIServer(
 		wsLogger:         wsLogger,
 		wsUpgrader:       wsUpgrader,
 		eventEmitter:     eventEmitter,
+		fileProcessor:    fileProcessor,
 		startTime:        time.Now(),
 	}
 }
@@ -298,6 +322,17 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		}
 	})))
 	mux.Handle("/api/services/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check for special endpoints
+		if strings.HasSuffix(r.URL.Path, "/status") {
+			s.handleUpdateServiceStatus(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/passphrase") {
+			s.handleGetServicePassphrase(w, r)
+			return
+		}
+
+		// Default service CRUD operations
 		if r.Method == http.MethodGet {
 			s.handleGetService(w, r)
 		} else if r.Method == http.MethodPut {
@@ -308,6 +343,9 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
+
+	// File processing route (protected with JWT authentication)
+	mux.Handle("/api/services/process-upload", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleProcessUploadedFile)))
 
 	// Blacklist routes (protected with JWT authentication)
 	mux.Handle("/api/blacklist", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
