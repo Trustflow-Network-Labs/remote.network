@@ -42,13 +42,21 @@ type uploadSessionHandler struct {
 }
 
 // NewFileUploadHandler creates a new file upload handler
-func NewFileUploadHandler(dbManager *database.SQLiteManager, logger *utils.LogsManager, configMgr *utils.ConfigManager) *FileUploadHandler {
-	uploadDir := configMgr.GetConfigWithDefault("upload_temp_dir", "./uploads/temp")
+func NewFileUploadHandler(dbManager *database.SQLiteManager, logger *utils.LogsManager, configMgr *utils.ConfigManager, appPaths *utils.AppPaths) *FileUploadHandler {
+	// Use proper OS-specific temp directory for uploads
+	uploadDir := filepath.Join(appPaths.TempDir, "remote-network-uploads")
+
+	// Allow config override if specified
+	if customDir := configMgr.GetConfigWithDefault("upload_temp_dir", ""); customDir != "" {
+		uploadDir = customDir
+	}
 
 	// Ensure upload directory exists
 	if err := os.MkdirAll(uploadDir, 0755); err != nil {
 		logger.Error(fmt.Sprintf("Failed to create upload directory: %v", err), "file_upload")
 	}
+
+	logger.Info(fmt.Sprintf("File upload temp directory: %s", uploadDir), "file_upload")
 
 	return &FileUploadHandler{
 		dbManager:        dbManager,

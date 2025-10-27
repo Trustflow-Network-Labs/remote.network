@@ -25,13 +25,21 @@ type FileProcessor struct {
 }
 
 // NewFileProcessor creates a new file processor
-func NewFileProcessor(dbManager *database.SQLiteManager, logger *utils.LogsManager, configMgr *utils.ConfigManager) *FileProcessor {
-	storageDir := configMgr.GetConfigWithDefault("data_service_storage_dir", "./data/services")
+func NewFileProcessor(dbManager *database.SQLiteManager, logger *utils.LogsManager, configMgr *utils.ConfigManager, appPaths *utils.AppPaths) *FileProcessor {
+	// Use proper OS-specific data directory for storage
+	storageDir := filepath.Join(appPaths.DataDir, "services")
+
+	// Allow config override if specified
+	if customDir := configMgr.GetConfigWithDefault("data_service_storage_dir", ""); customDir != "" {
+		storageDir = customDir
+	}
 
 	// Ensure storage directory exists
 	if err := os.MkdirAll(storageDir, 0755); err != nil {
 		logger.Error(fmt.Sprintf("Failed to create storage directory: %v", err), "file_processor")
 	}
+
+	logger.Info(fmt.Sprintf("File processor storage directory: %s", storageDir), "file_processor")
 
 	return &FileProcessor{
 		dbManager:  dbManager,

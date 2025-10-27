@@ -3,6 +3,8 @@ package database
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"os"
 	"time"
 )
 
@@ -370,13 +372,31 @@ func (sm *SQLiteManager) UpdateService(service *OfferedService) error {
 	return nil
 }
 
-// DeleteService deletes a service by ID
+// DeleteService deletes a service by ID and its associated files
 func (sm *SQLiteManager) DeleteService(id int64) error {
+	// First, get the data service details to find encrypted file path
+	dataDetails, err := sm.GetDataServiceDetails(id)
+	if err != nil && err != sql.ErrNoRows {
+		sm.logger.Error(fmt.Sprintf("Failed to get data service details for deletion: %v", err), "database")
+		// Continue with deletion even if we can't get details
+	}
+
+	// Delete physical encrypted file if it exists
+	if dataDetails != nil && dataDetails.EncryptedPath != "" {
+		if err := os.Remove(dataDetails.EncryptedPath); err != nil && !os.IsNotExist(err) {
+			sm.logger.Warn(fmt.Sprintf("Failed to delete encrypted file %s: %v", dataDetails.EncryptedPath, err), "database")
+			// Log warning but don't fail the deletion
+		} else if err == nil {
+			sm.logger.Info(fmt.Sprintf("Deleted encrypted file: %s", dataDetails.EncryptedPath), "database")
+		}
+	}
+
+	// Delete from database (foreign keys will cascade)
 	query := `DELETE FROM services WHERE id = ?`
 
 	result, err := sm.db.Exec(query, id)
 	if err != nil {
-		sm.logger.Error("Failed to delete service", "database")
+		sm.logger.Error("Failed to delete service from database", "database")
 		return err
 	}
 
@@ -389,7 +409,7 @@ func (sm *SQLiteManager) DeleteService(id int64) error {
 		return sql.ErrNoRows
 	}
 
-	sm.logger.Info("Service deleted successfully", "database")
+	sm.logger.Info(fmt.Sprintf("Service %d deleted successfully (including physical files)", id), "database")
 	return nil
 }
 

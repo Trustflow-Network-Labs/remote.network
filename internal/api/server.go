@@ -104,11 +104,14 @@ func NewAPIServer(
 	// Initialize event emitter
 	eventEmitter := events.NewEmitter(wsHub, peerManager, dbManager, wsLogger)
 
+	// Get app paths for proper storage locations
+	appPaths := utils.GetAppPaths("")
+
 	// Initialize file processor
-	fileProcessor := services.NewFileProcessor(dbManager, logger, config)
+	fileProcessor := services.NewFileProcessor(dbManager, logger, config, appPaths)
 
 	// Initialize file upload handler
-	fileUploadHandler := ws.NewFileUploadHandler(dbManager, logger, config)
+	fileUploadHandler := ws.NewFileUploadHandler(dbManager, logger, config, appPaths)
 
 	// Set file upload handler in hub
 	wsHub.SetFileUploadHandler(fileUploadHandler)
