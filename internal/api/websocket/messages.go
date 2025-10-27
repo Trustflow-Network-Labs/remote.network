@@ -171,11 +171,15 @@ type ConnectedPayload struct {
 
 // FileUploadStartPayload initiates a file upload session
 type FileUploadStartPayload struct {
-	ServiceID   int64  `json:"service_id"`
-	Filename    string `json:"filename"`
-	TotalSize   int64  `json:"total_size"`
-	TotalChunks int    `json:"total_chunks"`
-	ChunkSize   int    `json:"chunk_size"`
+	ServiceID     int64  `json:"service_id"`
+	UploadGroupID string `json:"upload_group_id"`
+	Filename      string `json:"filename"`
+	FilePath      string `json:"file_path"`
+	FileIndex     int    `json:"file_index"`
+	TotalFiles    int    `json:"total_files"`
+	TotalSize     int64  `json:"total_size"`
+	TotalChunks   int    `json:"total_chunks"`
+	ChunkSize     int    `json:"chunk_size"`
 }
 
 // FileUploadChunkPayload contains a chunk of uploaded file data

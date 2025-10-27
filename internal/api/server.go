@@ -114,10 +114,10 @@ func NewAPIServer(
 	wsHub.SetFileUploadHandler(fileUploadHandler)
 
 	// Set callback for upload completion to trigger file processing
-	fileUploadHandler.SetOnUploadCompleteCallback(func(sessionID string, serviceID int64) {
-		logger.Info(fmt.Sprintf("Triggering file processing for session %s, service %d", sessionID, serviceID), "api")
-		if err := fileProcessor.ProcessUploadedFile(sessionID, serviceID); err != nil {
-			logger.Error(fmt.Sprintf("Failed to process uploaded file: %v", err), "api")
+	fileUploadHandler.SetOnUploadCompleteCallback(func(uploadGroupID string, serviceID int64) {
+		logger.Info(fmt.Sprintf("Triggering file processing for upload group %s, service %d", uploadGroupID, serviceID), "api")
+		if err := fileProcessor.ProcessUploadedFile(uploadGroupID, serviceID); err != nil {
+			logger.Error(fmt.Sprintf("Failed to process uploaded files: %v", err), "api")
 		} else {
 			// Broadcast service update after successful processing
 			eventEmitter.BroadcastServiceUpdate()

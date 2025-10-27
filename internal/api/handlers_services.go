@@ -79,8 +79,14 @@ func (s *APIServer) handleAddService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate required fields
-	if service.Type == "" || service.Name == "" || service.Endpoint == "" {
-		http.Error(w, "Missing required fields: type, name, endpoint", http.StatusBadRequest)
+	if service.Type == "" || service.Name == "" {
+		http.Error(w, "Missing required fields: type, name", http.StatusBadRequest)
+		return
+	}
+
+	// Endpoint is required for non-DATA services
+	if service.ServiceType != "DATA" && service.Endpoint == "" {
+		http.Error(w, "Missing required field: endpoint", http.StatusBadRequest)
 		return
 	}
 

@@ -88,7 +88,11 @@ func (sm *SQLiteManager) InitServicesTable() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		service_id INTEGER NOT NULL,
 		session_id TEXT NOT NULL UNIQUE,
+		upload_group_id TEXT NOT NULL,
 		filename TEXT NOT NULL,
+		file_path TEXT NOT NULL,
+		file_index INTEGER NOT NULL,
+		total_files INTEGER NOT NULL,
 		chunk_index INTEGER DEFAULT 0,
 		total_chunks INTEGER NOT NULL,
 		bytes_uploaded INTEGER DEFAULT 0,
@@ -103,6 +107,7 @@ func (sm *SQLiteManager) InitServicesTable() error {
 
 	CREATE INDEX IF NOT EXISTS idx_upload_sessions_session_id ON upload_sessions(session_id);
 	CREATE INDEX IF NOT EXISTS idx_upload_sessions_service_id ON upload_sessions(service_id);
+	CREATE INDEX IF NOT EXISTS idx_upload_sessions_upload_group_id ON upload_sessions(upload_group_id);
 	CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON upload_sessions(status);
 
 	-- Placeholder tables for future service types

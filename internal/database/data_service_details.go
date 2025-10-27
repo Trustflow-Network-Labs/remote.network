@@ -31,19 +31,23 @@ type EncryptionKey struct {
 
 // UploadSession represents an active file upload session
 type UploadSession struct {
-	ID           int64     `json:"id"`
-	ServiceID    int64     `json:"service_id"`
-	SessionID    string    `json:"session_id"`
-	Filename     string    `json:"filename"`
-	ChunkIndex   int       `json:"chunk_index"`
-	TotalChunks  int       `json:"total_chunks"`
-	BytesUploaded int64    `json:"bytes_uploaded"`
-	TotalBytes   int64     `json:"total_bytes"`
-	ChunkSize    int       `json:"chunk_size"`
-	TempFilePath string    `json:"temp_file_path"`
-	Status       string    `json:"status"` // IN_PROGRESS, PAUSED, COMPLETED, FAILED
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID            int64     `json:"id"`
+	ServiceID     int64     `json:"service_id"`
+	SessionID     string    `json:"session_id"`
+	UploadGroupID string    `json:"upload_group_id"`
+	Filename      string    `json:"filename"`
+	FilePath      string    `json:"file_path"`
+	FileIndex     int       `json:"file_index"`
+	TotalFiles    int       `json:"total_files"`
+	ChunkIndex    int       `json:"chunk_index"`
+	TotalChunks   int       `json:"total_chunks"`
+	BytesUploaded int64     `json:"bytes_uploaded"`
+	TotalBytes    int64     `json:"total_bytes"`
+	ChunkSize     int       `json:"chunk_size"`
+	TempFilePath  string    `json:"temp_file_path"`
+	Status        string    `json:"status"` // IN_PROGRESS, PAUSED, COMPLETED, FAILED
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // AddDataServiceDetails adds data service details to the database
@@ -221,17 +225,22 @@ func (sm *SQLiteManager) GetEncryptionKey(serviceID int64) (*EncryptionKey, erro
 func (sm *SQLiteManager) CreateUploadSession(session *UploadSession) error {
 	query := `
 		INSERT INTO upload_sessions (
-			service_id, session_id, filename, total_chunks, total_bytes,
+			service_id, session_id, upload_group_id, filename, file_path,
+			file_index, total_files, total_chunks, total_bytes,
 			chunk_size, temp_file_path, status
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	result, err := sm.db.Exec(
 		query,
 		session.ServiceID,
 		session.SessionID,
+		session.UploadGroupID,
 		session.Filename,
+		session.FilePath,
+		session.FileIndex,
+		session.TotalFiles,
 		session.TotalChunks,
 		session.TotalBytes,
 		session.ChunkSize,
@@ -259,7 +268,8 @@ func (sm *SQLiteManager) CreateUploadSession(session *UploadSession) error {
 // GetUploadSession retrieves an upload session by session ID
 func (sm *SQLiteManager) GetUploadSession(sessionID string) (*UploadSession, error) {
 	query := `
-		SELECT id, service_id, session_id, filename, chunk_index, total_chunks,
+		SELECT id, service_id, session_id, upload_group_id, filename, file_path,
+		       file_index, total_files, chunk_index, total_chunks,
 		       bytes_uploaded, total_bytes, chunk_size, temp_file_path, status,
 		       created_at, updated_at
 		FROM upload_sessions
@@ -271,7 +281,11 @@ func (sm *SQLiteManager) GetUploadSession(sessionID string) (*UploadSession, err
 		&session.ID,
 		&session.ServiceID,
 		&session.SessionID,
+		&session.UploadGroupID,
 		&session.Filename,
+		&session.FilePath,
+		&session.FileIndex,
+		&session.TotalFiles,
 		&session.ChunkIndex,
 		&session.TotalChunks,
 		&session.BytesUploaded,
@@ -326,6 +340,78 @@ func (sm *SQLiteManager) UpdateUploadSession(session *UploadSession) error {
 
 	session.UpdatedAt = time.Now()
 	return nil
+}
+
+// GetUploadSessionsByGroup retrieves all upload sessions for an upload group
+func (sm *SQLiteManager) GetUploadSessionsByGroup(uploadGroupID string) ([]*UploadSession, error) {
+	query := `
+		SELECT id, service_id, session_id, upload_group_id, filename, file_path,
+		       file_index, total_files, chunk_index, total_chunks,
+		       bytes_uploaded, total_bytes, chunk_size, temp_file_path, status,
+		       created_at, updated_at
+		FROM upload_sessions
+		WHERE upload_group_id = ?
+		ORDER BY file_index ASC
+	`
+
+	rows, err := sm.db.Query(query, uploadGroupID)
+	if err != nil {
+		sm.logger.Error("Failed to get upload sessions by group", "database")
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []*UploadSession
+	for rows.Next() {
+		var session UploadSession
+		err := rows.Scan(
+			&session.ID,
+			&session.ServiceID,
+			&session.SessionID,
+			&session.UploadGroupID,
+			&session.Filename,
+			&session.FilePath,
+			&session.FileIndex,
+			&session.TotalFiles,
+			&session.ChunkIndex,
+			&session.TotalChunks,
+			&session.BytesUploaded,
+			&session.TotalBytes,
+			&session.ChunkSize,
+			&session.TempFilePath,
+			&session.Status,
+			&session.CreatedAt,
+			&session.UpdatedAt,
+		)
+		if err != nil {
+			sm.logger.Error("Failed to scan upload session", "database")
+			return nil, err
+		}
+		sessions = append(sessions, &session)
+	}
+
+	return sessions, nil
+}
+
+// IsUploadGroupComplete checks if all files in an upload group are completed
+func (sm *SQLiteManager) IsUploadGroupComplete(uploadGroupID string) (bool, error) {
+	query := `
+		SELECT COUNT(*) as total,
+		       SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
+		       MAX(total_files) as expected_total
+		FROM upload_sessions
+		WHERE upload_group_id = ?
+	`
+
+	var total, completed, expectedTotal int
+	err := sm.db.QueryRow(query, uploadGroupID).Scan(&total, &completed, &expectedTotal)
+	if err != nil {
+		sm.logger.Error("Failed to check upload group completion", "database")
+		return false, err
+	}
+
+	// All files must have started uploading (total == expectedTotal) AND all must be completed
+	return total > 0 && total == expectedTotal && total == completed, nil
 }
 
 // DeleteUploadSession deletes an upload session

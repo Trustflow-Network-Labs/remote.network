@@ -15,13 +15,15 @@ import (
 
 // FileUploadHandler manages chunked file uploads via WebSocket
 type FileUploadHandler struct {
-	dbManager       *database.SQLiteManager
-	logger          *utils.LogsManager
-	configMgr       *utils.ConfigManager
-	uploadDir       string
-	mu              sync.RWMutex
-	activeSessions  map[string]*uploadSessionHandler
-	onUploadComplete func(sessionID string, serviceID int64) // Callback when upload completes
+	dbManager         *database.SQLiteManager
+	logger            *utils.LogsManager
+	configMgr         *utils.ConfigManager
+	uploadDir         string
+	mu                sync.RWMutex
+	activeSessions    map[string]*uploadSessionHandler
+	processingGroups  map[string]bool        // Track groups currently being processed
+	processingMu      sync.Mutex             // Lock for processingGroups map
+	onUploadComplete  func(uploadGroupID string, serviceID int64) // Callback when all files in upload group complete
 }
 
 // uploadSessionHandler manages a single upload session
@@ -49,11 +51,12 @@ func NewFileUploadHandler(dbManager *database.SQLiteManager, logger *utils.LogsM
 	}
 
 	return &FileUploadHandler{
-		dbManager:      dbManager,
-		logger:         logger,
-		configMgr:      configMgr,
-		uploadDir:      uploadDir,
-		activeSessions: make(map[string]*uploadSessionHandler),
+		dbManager:        dbManager,
+		logger:           logger,
+		configMgr:        configMgr,
+		uploadDir:        uploadDir,
+		activeSessions:   make(map[string]*uploadSessionHandler),
+		processingGroups: make(map[string]bool),
 	}
 }
 
@@ -68,8 +71,14 @@ func (fuh *FileUploadHandler) HandleFileUploadStart(client *Client, payload json
 	if startPayload.ServiceID == 0 {
 		return fmt.Errorf("service_id is required")
 	}
+	if startPayload.UploadGroupID == "" {
+		return fmt.Errorf("upload_group_id is required")
+	}
 	if startPayload.Filename == "" {
 		return fmt.Errorf("filename is required")
+	}
+	if startPayload.FilePath == "" {
+		return fmt.Errorf("file_path is required")
 	}
 	if startPayload.TotalSize <= 0 {
 		return fmt.Errorf("total_size must be positive")
@@ -84,8 +93,14 @@ func (fuh *FileUploadHandler) HandleFileUploadStart(client *Client, payload json
 	// Generate session ID
 	sessionID := uuid.New().String()
 
-	// Create temp file for upload
-	tempFilePath := filepath.Join(fuh.uploadDir, fmt.Sprintf("%s.tmp", sessionID))
+	// Create temp file directory (preserving path structure within upload group)
+	uploadGroupDir := filepath.Join(fuh.uploadDir, startPayload.UploadGroupID)
+	if err := os.MkdirAll(uploadGroupDir, 0755); err != nil {
+		return fmt.Errorf("failed to create upload group directory: %w", err)
+	}
+
+	// Create temp file for this specific file in the group
+	tempFilePath := filepath.Join(uploadGroupDir, fmt.Sprintf("%s.tmp", sessionID))
 	file, err := os.Create(tempFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -93,14 +108,18 @@ func (fuh *FileUploadHandler) HandleFileUploadStart(client *Client, payload json
 
 	// Create upload session in database
 	session := &database.UploadSession{
-		ServiceID:    startPayload.ServiceID,
-		SessionID:    sessionID,
-		Filename:     startPayload.Filename,
-		TotalChunks:  startPayload.TotalChunks,
-		TotalBytes:   startPayload.TotalSize,
-		ChunkSize:    startPayload.ChunkSize,
-		TempFilePath: tempFilePath,
-		Status:       "IN_PROGRESS",
+		ServiceID:     startPayload.ServiceID,
+		SessionID:     sessionID,
+		UploadGroupID: startPayload.UploadGroupID,
+		Filename:      startPayload.Filename,
+		FilePath:      startPayload.FilePath,
+		FileIndex:     startPayload.FileIndex,
+		TotalFiles:    startPayload.TotalFiles,
+		TotalChunks:   startPayload.TotalChunks,
+		TotalBytes:    startPayload.TotalSize,
+		ChunkSize:     startPayload.ChunkSize,
+		TempFilePath:  tempFilePath,
+		Status:        "IN_PROGRESS",
 	}
 
 	if err := fuh.dbManager.CreateUploadSession(session); err != nil {
@@ -325,25 +344,56 @@ func (fuh *FileUploadHandler) completeUpload(client *Client, sessionID string, s
 	delete(fuh.activeSessions, sessionID)
 	fuh.mu.Unlock()
 
-	// Send completion message
+	// Send completion message for this file
 	completeMsg, _ := NewMessage(MessageTypeFileUploadComplete, FileUploadCompletePayload{
 		SessionID: sessionID,
 		FileHash:  fileHash,
 	})
 	client.Send(completeMsg)
 
-	fuh.logger.Info(fmt.Sprintf("File upload completed: %s (file: %s)", sessionID, sessionHandler.filename), "file_upload")
+	fuh.logger.Info(fmt.Sprintf("File upload completed: %s (file: %s, %d/%d)",
+		sessionID, sessionHandler.filename,
+		dbSession.FileIndex+1, dbSession.TotalFiles), "file_upload")
 
-	// Trigger file processing callback
-	if fuh.onUploadComplete != nil {
-		go fuh.onUploadComplete(sessionID, serviceID)
+	// Check if all files in the upload group are completed
+	uploadGroupID := dbSession.UploadGroupID
+	allComplete, err := fuh.dbManager.IsUploadGroupComplete(uploadGroupID)
+	if err != nil {
+		fuh.logger.Error(fmt.Sprintf("Failed to check upload group completion: %v", err), "file_upload")
+		return nil
+	}
+
+	// Trigger file processing callback only when ALL files in group are completed
+	if allComplete && fuh.onUploadComplete != nil {
+		// Use mutex to prevent duplicate processing
+		fuh.processingMu.Lock()
+		alreadyProcessing := fuh.processingGroups[uploadGroupID]
+		if !alreadyProcessing {
+			fuh.processingGroups[uploadGroupID] = true
+			fuh.processingMu.Unlock()
+
+			fuh.logger.Info(fmt.Sprintf("All files in upload group %s completed. Triggering processing...", uploadGroupID), "file_upload")
+
+			// Process in goroutine and clean up processing flag when done
+			go func() {
+				defer func() {
+					fuh.processingMu.Lock()
+					delete(fuh.processingGroups, uploadGroupID)
+					fuh.processingMu.Unlock()
+				}()
+				fuh.onUploadComplete(uploadGroupID, serviceID)
+			}()
+		} else {
+			fuh.processingMu.Unlock()
+			fuh.logger.Info(fmt.Sprintf("Upload group %s already being processed, skipping duplicate call", uploadGroupID), "file_upload")
+		}
 	}
 
 	return nil
 }
 
-// SetOnUploadCompleteCallback sets the callback to be called when an upload completes
-func (fuh *FileUploadHandler) SetOnUploadCompleteCallback(callback func(sessionID string, serviceID int64)) {
+// SetOnUploadCompleteCallback sets the callback to be called when all files in an upload group complete
+func (fuh *FileUploadHandler) SetOnUploadCompleteCallback(callback func(uploadGroupID string, serviceID int64)) {
 	fuh.onUploadComplete = callback
 }
 

@@ -22,6 +22,15 @@ export interface UploadOptions {
   onError?: (error: Error) => void
 }
 
+export interface MultiFileUploadOptions {
+  files: File[]
+  serviceId: number
+  chunkSize?: number
+  onProgress?: (progress: UploadProgress) => void
+  onComplete?: () => void
+  onError?: (error: Error) => void
+}
+
 interface ChunkUploadState {
   startTime: number
   lastUpdateTime: number
@@ -30,6 +39,8 @@ interface ChunkUploadState {
 
 export function useChunkedFileUpload() {
   const uploadProgress = ref<UploadProgress | null>(null)
+  const currentFileIndex = ref(0)
+  const totalFilesCount = ref(0)
   const isUploading = computed(() => uploadProgress.value?.status === 'uploading')
   const isPaused = computed(() => uploadProgress.value?.status === 'paused')
   const isCompleted = computed(() => uploadProgress.value?.status === 'completed')
@@ -344,13 +355,143 @@ export function useChunkedFileUpload() {
     return `${Math.round(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`
   }
 
+  /**
+   * Upload multiple files sequentially with path preservation
+   */
+  const uploadMultipleFiles = async (options: MultiFileUploadOptions): Promise<void> => {
+    const { files, serviceId, chunkSize = 1024 * 1024, onProgress, onComplete, onError } = options
+
+    // Generate a unique upload group ID
+    const uploadGroupID = `upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+
+    totalFilesCount.value = files.length
+    currentFileIndex.value = 0
+
+    try {
+      // Upload each file sequentially
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        currentFileIndex.value = i + 1
+
+        // Get file path (webkitRelativePath if available, otherwise just filename)
+        const filePath = (file as any).webkitRelativePath || file.name
+
+        // Upload single file with metadata
+        await new Promise<void>((resolve, reject) => {
+          uploadSingleFileWithMetadata({
+            file,
+            filePath,
+            serviceId,
+            uploadGroupID,
+            fileIndex: i,
+            totalFiles: files.length,
+            chunkSize,
+            onProgress,
+            onComplete: () => resolve(),
+            onError: (error) => reject(error)
+          })
+        })
+      }
+
+      // All files uploaded successfully
+      if (onComplete) {
+        onComplete()
+      }
+    } catch (error: any) {
+      if (onError) {
+        onError(error)
+      }
+    }
+  }
+
+  /**
+   * Upload a single file with multi-file metadata
+   */
+  const uploadSingleFileWithMetadata = (options: {
+    file: File
+    filePath: string
+    serviceId: number
+    uploadGroupID: string
+    fileIndex: number
+    totalFiles: number
+    chunkSize: number
+    onProgress?: (progress: UploadProgress) => void
+    onComplete?: () => void
+    onError?: (error: Error) => void
+  }): void => {
+    const { file, filePath, serviceId, uploadGroupID, fileIndex, totalFiles, chunkSize, onProgress, onComplete, onError } = options
+
+    // Reset state for this file
+    currentFile = file
+    currentChunkSize = chunkSize
+    currentChunkIndex = 0
+    currentSessionId = null
+    progressCallback = onProgress || null
+    completeCallback = onComplete ? () => onComplete() : null
+    errorCallback = onError || null
+
+    // Calculate total chunks
+    totalChunks = Math.ceil(file.size / chunkSize)
+
+    // Initialize progress
+    uploadProgress.value = {
+      sessionId: '',
+      chunksUploaded: 0,
+      totalChunks,
+      bytesUploaded: 0,
+      totalBytes: file.size,
+      percentage: 0,
+      speed: 0,
+      eta: 0,
+      status: 'uploading'
+    }
+
+    uploadState = {
+      startTime: Date.now(),
+      lastUpdateTime: Date.now(),
+      lastBytesUploaded: 0
+    }
+
+    // Get WebSocket service
+    const wsService = getWebSocketService()
+    if (!wsService) {
+      const error = new Error('WebSocket service not available')
+      handleError(error)
+      return
+    }
+
+    // Subscribe to WebSocket messages
+    setupWebSocketListeners(wsService)
+
+    // Send upload start message with multi-file metadata
+    wsService.send({
+      type: MessageType.FILE_UPLOAD_START,
+      payload: {
+        service_id: serviceId,
+        upload_group_id: uploadGroupID,
+        filename: file.name,
+        file_path: filePath,
+        file_index: fileIndex,
+        total_files: totalFiles,
+        total_size: file.size,
+        total_chunks: totalChunks,
+        chunk_size: chunkSize
+      }
+    })
+
+    // Note: Chunk upload will be triggered by the FILE_UPLOAD_PROGRESS message with session_id
+  }
+
   return {
     uploadProgress,
+    currentFileIndex,
+    totalFilesCount,
     isUploading,
     isPaused,
     isCompleted,
     hasError,
     upload,
+    uploadMultipleFiles,
     pause,
     resume,
     cancel,

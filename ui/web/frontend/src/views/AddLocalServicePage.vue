@@ -295,7 +295,7 @@
             <div class="wizard-navigation">
               <Button :label="$t('message.services.wizard.previous')" severity="secondary" @click="activeStep = '3'" />
               <Button
-                :label="$t('message.services.wizard.finish')"
+                :label="isCreating ? (currentFileIndex > 0 ? `Uploading file ${currentFileIndex}/${totalFilesCount}...` : 'Creating...') : $t('message.services.wizard.finish')"
                 @click="finishWizard"
                 :loading="isCreating"
               />
@@ -326,11 +326,13 @@ import Button from 'primevue/button'
 import SplitButton from 'primevue/splitbutton'
 
 import { useServicesStore } from '../stores/services'
+import { useChunkedFileUpload } from '../composables/useChunkedFileUpload'
 
 const router = useRouter()
 const { t } = useI18n()
 const toast = useToast()
 const servicesStore = useServicesStore()
+const { uploadMultipleFiles, uploadProgress, currentFileIndex, totalFilesCount } = useChunkedFileUpload()
 
 // Wizard state
 const activeStep = ref('1')
@@ -488,34 +490,70 @@ async function finishWizard() {
   isCreating.value = true
 
   try {
-    // Create the service based on type
-    // For now, we'll use the existing DATA service flow
-    // TODO: Implement DOCKER and STANDALONE service creation
-
     if (serviceData.value.serviceType === 'DATA') {
-      // Create DATA service (reuse existing logic from AddDataServiceDialog)
+      // Create DATA service entry in database
+      const newService = await servicesStore.addService({
+        service_type: 'DATA',
+        type: 'storage',
+        name: serviceData.value.name,
+        description: serviceData.value.description,
+        endpoint: '', // Will be set after file upload
+        capabilities: {},
+        status: 'INACTIVE', // Inactive until upload completes
+        pricing_amount: serviceData.value.pricingAmount,
+        pricing_type: serviceData.value.pricingType,
+        pricing_interval: serviceData.value.pricingInterval,
+        pricing_unit: serviceData.value.pricingUnit
+      })
+
       toast.add({
-        severity: 'info',
-        summary: t('message.common.info'),
-        detail: 'DATA service creation with file upload will be implemented',
+        severity: 'success',
+        summary: t('message.common.success'),
+        detail: t('message.services.serviceCreated'),
         life: 3000
       })
+
+      // Upload files sequentially with path preservation
+      await uploadMultipleFiles({
+        files: selectedFiles.value,
+        serviceId: newService.id!,
+        chunkSize: 1024 * 1024, // 1MB chunks
+        onComplete: () => {
+          toast.add({
+            severity: 'success',
+            summary: t('message.common.success'),
+            detail: t('message.services.uploadCompleteMessage'),
+            life: 5000
+          })
+          // Navigate back to services page
+          setTimeout(() => {
+            router.push('/services')
+          }, 2000)
+        },
+        onError: (error) => {
+          toast.add({
+            severity: 'error',
+            summary: t('message.common.error'),
+            detail: `Upload failed: ${error.message}`,
+            life: 5000
+          })
+        }
+      })
     } else {
+      // DOCKER and STANDALONE service types
       toast.add({
         severity: 'info',
         summary: t('message.common.info'),
         detail: `${serviceData.value.serviceType} service creation coming soon`,
         life: 3000
       })
+      router.push('/services')
     }
-
-    // Navigate back to services page
-    router.push('/services')
   } catch (error: any) {
     toast.add({
       severity: 'error',
       summary: t('message.common.error'),
-      detail: error.message || 'Failed to create service',
+      detail: error.message || t('message.services.createFailed'),
       life: 5000
     })
   } finally {
