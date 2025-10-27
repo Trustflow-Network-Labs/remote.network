@@ -68,6 +68,8 @@
             responsiveLayout="scroll"
             sortField="created_at"
             :sortOrder="-1"
+            @row-click="onRowClick"
+            :rowHover="true"
           >
             <template #empty>
               <div class="empty-state">
@@ -103,18 +105,25 @@
             <Column :header="$t('message.common.actions')" :exportable="false" style="min-width:10rem">
               <template #body="slotProps">
                 <Button
+                  :label="$t('message.services.details')"
+                  icon="pi pi-info-circle"
+                  text
+                  size="small"
+                  @click.stop="viewServiceDetails(slotProps.data)"
+                />
+                <Button
                   :label="$t('message.services.changeStatus')"
                   icon="pi pi-sync"
                   text
                   size="small"
-                  @click="confirmChangeStatus(slotProps.data)"
+                  @click.stop="confirmChangeStatus(slotProps.data)"
                 />
                 <Button
                   :label="$t('message.services.viewPassphrase')"
                   icon="pi pi-key"
                   text
                   size="small"
-                  @click="viewPassphrase(slotProps.data)"
+                  @click.stop="viewPassphrase(slotProps.data)"
                   v-if="slotProps.data.service_type === 'DATA'"
                 />
                 <Button
@@ -122,7 +131,7 @@
                   text
                   rounded
                   severity="danger"
-                  @click="confirmDeleteService(slotProps.data)"
+                  @click.stop="confirmDeleteService(slotProps.data)"
                 />
               </template>
             </Column>
@@ -507,6 +516,18 @@ async function copyPeerId() {
   }
 }
 
+// Navigate to service details page
+function viewServiceDetails(service: any) {
+  router.push(`/services/service/${service.id}`)
+}
+
+// Handle row click event
+function onRowClick(event: any) {
+  if (event.data) {
+    router.push(`/services/service/${event.data.id}`)
+  }
+}
+
 onMounted(async () => {
   // Only fetch local services if not viewing peer-specific services
   if (!isPeerView.value) {
@@ -532,6 +553,11 @@ onMounted(async () => {
   :deep(.p-badge) {
     background-color: #fff !important;
     color: #000 !important;
+  }
+
+  // Make table rows clickable with cursor pointer
+  :deep(.services-table .p-datatable-tbody > tr) {
+    cursor: pointer;
   }
 }
 

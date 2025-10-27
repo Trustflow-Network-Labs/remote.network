@@ -15,11 +15,18 @@ export default {
       info: 'Info',
       loading: 'Loading...',
       noData: 'No data available',
+      noDescription: 'No description provided',
       total: 'Total',
       copy: 'Copy',
+      copied: 'Copied',
       copiedToClipboard: 'Copied to clipboard',
+      copyFailed: 'Failed to copy to clipboard',
       actions: 'Actions',
-      back: 'Back'
+      back: 'Back',
+      show: 'Show',
+      hide: 'Hide',
+      createdAt: 'Created At',
+      updatedAt: 'Updated At'
     },
     auth: {
       login: 'Login',
@@ -201,9 +208,21 @@ export default {
       },
 
       // Actions
+      details: 'Details',
       changeStatus: 'Change Status',
       viewPassphrase: 'View Passphrase',
       addToWorkflow: 'Add to Workflow',
+
+      // Service Details Page
+      serviceDetails: 'Service Details',
+      dataServiceDetails: 'Data Service Details',
+      files: 'Files',
+      originalSize: 'Original Size',
+      compressedSize: 'Compressed Size',
+      compressionType: 'Compression Type',
+      fileHash: 'File Hash',
+      passphrase: 'Passphrase',
+      free: 'Free',
 
       // Messages
       deleteConfirm: 'Are you sure you want to delete this service?',
@@ -215,6 +234,21 @@ export default {
       updateError: 'Failed to update service',
       statusUpdateSuccess: 'Service status updated successfully',
       statusUpdateError: 'Failed to update service status',
+
+      // Confirmation Messages
+      confirmChangeStatusTitle: 'Confirm Status Change',
+      confirmChangeStatusMessage: 'Change service status to {status}?',
+      confirmDeleteTitle: 'Confirm Delete',
+      confirmDeleteMessage: 'Are you sure you want to delete "{name}"?',
+      statusChanged: 'Service status changed successfully',
+      serviceDeleted: 'Service deleted successfully',
+
+      // Error Messages
+      errors: {
+        fetchFailed: 'Failed to fetch service details',
+        statusChangeFailed: 'Failed to change service status',
+        deleteFailed: 'Failed to delete service'
+      },
 
       // Sections
       localServices: 'Local Services',

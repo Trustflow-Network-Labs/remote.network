@@ -570,41 +570,55 @@ function goBack() {
 @use '../scss/variables' as vars;
 
 .add-service-page {
+  display: flex;
+  flex-direction: column;
   height: 100vh;
-  overflow: auto;
-  background-color: vars.$color-background;
+  overflow: hidden;
+  padding: vars.$spacing-lg;
+  max-width: 1200px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 .page-header {
-  padding: 1.5rem;
-  background-color: rgb(49, 64, 92);
-  border-bottom: 2px solid rgba(vars.$color-primary, 0.3);
+  flex-shrink: 0;
+  margin-bottom: vars.$spacing-xl;
 
   .header-content {
     display: flex;
     align-items: center;
-    gap: 1rem;
+    gap: vars.$spacing-md;
 
     h1 {
+      font-size: vars.$font-size-xxl;
+      font-weight: 600;
+      color: vars.$color-text;
       margin: 0;
-      font-size: 1.5rem;
-      color: #fff;
     }
-  }
 
-  .back-button {
-    color: #fff;
-
-    &:hover {
-      background-color: rgba(255, 255, 255, 0.1);
+    .back-button {
+      color: vars.$color-primary;
     }
   }
 }
 
 .wizard-container {
-  max-width: 900px;
-  margin: 2rem auto;
-  padding: 0 1rem;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  width: 100%;
+
+  :deep(.p-stepper) {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  :deep(.p-stepper-panels) {
+    flex: 1;
+    overflow: auto;
+  }
 }
 
 // Override PrimeVue Stepper styling

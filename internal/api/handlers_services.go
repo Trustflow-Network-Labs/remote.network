@@ -348,9 +348,18 @@ func (s *APIServer) handleGetServicePassphrase(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Get data service details
+	dataDetails, err := s.dbManager.GetDataServiceDetails(id)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get data service details: %v", err), "api")
+		http.Error(w, "Failed to retrieve data service details", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"passphrase": passphrase,
+		"passphrase":   passphrase,
+		"data_details": dataDetails,
 	})
 }
 
