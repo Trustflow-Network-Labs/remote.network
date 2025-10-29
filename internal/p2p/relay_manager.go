@@ -53,7 +53,8 @@ type RelayManager struct {
 func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, keyPair *crypto.KeyPair, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher, metadataFetcher *MetadataFetcher) *RelayManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	selector := NewRelaySelector(config, logger, dbManager, quicPeer)
+	// Pass our peer ID to selector so it can check for preferred relay
+	selector := NewRelaySelector(config, logger, dbManager, quicPeer, keyPair.PeerID())
 
 	return &RelayManager{
 		config:            config,

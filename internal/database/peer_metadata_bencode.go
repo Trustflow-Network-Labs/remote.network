@@ -21,10 +21,11 @@ type BencodePeerMetadata struct {
 	// Network Connectivity
 	NetworkInfo BencodeNetworkInfo `bencode:"network_info"`
 
-	// Capabilities & Services
-	Capabilities []string                      `bencode:"capabilities"`
-	Services     map[string]BencodeService     `bencode:"services"`
-	Extensions   map[string]interface{}        `bencode:"extensions,omitempty"`
+	// Capabilities & Service Statistics
+	Capabilities []string                 `bencode:"capabilities"`
+	FilesCount   int                      `bencode:"files_count"` // Count of ACTIVE DATA services
+	AppsCount    int                      `bencode:"apps_count"`  // Count of ACTIVE DOCKER + STANDALONE services
+	Extensions   map[string]interface{}   `bencode:"extensions,omitempty"`
 }
 
 // BencodeNetworkInfo is a bencode-safe version of NetworkInfo
@@ -67,28 +68,9 @@ type BencodeProtocol struct {
 	Meta map[string]interface{} `bencode:"meta,omitempty"`
 }
 
-// BencodeService is a bencode-safe version of Service
-type BencodeService struct {
-	Type         string                 `bencode:"type"`
-	Endpoint     string                 `bencode:"endpoint"`
-	Capabilities map[string]interface{} `bencode:"capabilities"`
-	Status       string                 `bencode:"status"`
-}
-
 // ToBencodeSafe converts PeerMetadata to a bencode-safe format
 // This is used before publishing to DHT to ensure proper signature validation
 func (pm *PeerMetadata) ToBencodeSafe() *BencodePeerMetadata {
-	// Convert services
-	bencServices := make(map[string]BencodeService)
-	for k, v := range pm.Services {
-		bencServices[k] = BencodeService{
-			Type:         v.Type,
-			Endpoint:     v.Endpoint,
-			Capabilities: v.Capabilities,
-			Status:       v.Status,
-		}
-	}
-
 	// Convert protocols
 	bencProtocols := make([]BencodeProtocol, len(pm.NetworkInfo.Protocols))
 	for i, p := range pm.NetworkInfo.Protocols {
@@ -106,7 +88,8 @@ func (pm *PeerMetadata) ToBencodeSafe() *BencodePeerMetadata {
 		Version:      pm.Version,
 		Timestamp:    pm.Timestamp.Unix(), // Convert to Unix timestamp
 		Capabilities: pm.Capabilities,
-		Services:     bencServices,
+		FilesCount:   pm.FilesCount,
+		AppsCount:    pm.AppsCount,
 		Extensions:   pm.Extensions,
 		NetworkInfo: BencodeNetworkInfo{
 			PublicIP:        pm.NetworkInfo.PublicIP,
@@ -134,17 +117,6 @@ func (pm *PeerMetadata) ToBencodeSafe() *BencodePeerMetadata {
 // FromBencodeSafe converts a bencode-safe format back to PeerMetadata
 // This is used after retrieving from DHT to reconstruct the original structure
 func FromBencodeSafe(bpm *BencodePeerMetadata) *PeerMetadata {
-	// Convert services back
-	services := make(map[string]Service)
-	for k, v := range bpm.Services {
-		services[k] = Service{
-			Type:         v.Type,
-			Endpoint:     v.Endpoint,
-			Capabilities: v.Capabilities,
-			Status:       v.Status,
-		}
-	}
-
 	// Convert protocols back
 	protocols := make([]Protocol, len(bpm.NetworkInfo.Protocols))
 	for i, p := range bpm.NetworkInfo.Protocols {
@@ -162,7 +134,8 @@ func FromBencodeSafe(bpm *BencodePeerMetadata) *PeerMetadata {
 		Version:      bpm.Version,
 		Timestamp:    UnixToTime(bpm.Timestamp), // Convert Unix timestamp back to time.Time
 		Capabilities: bpm.Capabilities,
-		Services:     services,
+		FilesCount:   bpm.FilesCount,
+		AppsCount:    bpm.AppsCount,
 		Extensions:   bpm.Extensions,
 		NetworkInfo: NetworkInfo{
 			PublicIP:        bpm.NetworkInfo.PublicIP,

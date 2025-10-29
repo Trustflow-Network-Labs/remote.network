@@ -13,14 +13,15 @@ import (
 
 // IdentityExchanger handles Phase 3 identity and known peers exchange
 type IdentityExchanger struct {
-	keyPair       *crypto.KeyPair
-	dhtNodeID     string // DHT routing node ID
-	dbManager     *database.SQLiteManager
-	logger        *utils.LogsManager
-	config        *utils.ConfigManager
-	ourNodeType   string // "public" or "private"
-	isRelay       bool   // Are we offering relay services?
-	isStore       bool   // Has BEP_44 storage enabled?
+	keyPair          *crypto.KeyPair
+	dhtNodeID        string // DHT routing node ID
+	dbManager        *database.SQLiteManager
+	logger           *utils.LogsManager
+	config           *utils.ConfigManager
+	metadataFetcher  *MetadataFetcher // For fetching service counts from DHT
+	ourNodeType      string           // "public" or "private"
+	isRelay          bool             // Are we offering relay services?
+	isStore          bool             // Has BEP_44 storage enabled?
 }
 
 // NewIdentityExchanger creates a new identity exchanger
@@ -57,6 +58,11 @@ func NewIdentityExchanger(
 		isRelay:     isRelay,
 		isStore:     isStore,
 	}
+}
+
+// SetMetadataFetcher sets the metadata fetcher (called after initialization)
+func (ie *IdentityExchanger) SetMetadataFetcher(fetcher *MetadataFetcher) {
+	ie.metadataFetcher = fetcher
 }
 
 // PerformHandshake performs the complete identity + known peers exchange
@@ -137,22 +143,53 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 		return nil, fmt.Errorf("received our own identity")
 	}
 
-	// Store in known_peers database
+	// Store peer identity in known_peers database
+	// Note: Service counts are set to 0 initially and will be updated separately if DHT fetch succeeds
 	knownPeer := &database.KnownPeer{
-		PeerID:    remoteIdentity.PeerID,
-		DHTNodeID: remoteIdentity.DHTNodeID,
-		PublicKey: remoteIdentity.PublicKey,
-		IsRelay:   remoteIdentity.IsRelay,
-		IsStore:   remoteIdentity.IsStore,
-		Topic:     topic,
-		Source:    "identity_exchange",
+		PeerID:     remoteIdentity.PeerID,
+		DHTNodeID:  remoteIdentity.DHTNodeID,
+		PublicKey:  remoteIdentity.PublicKey,
+		IsRelay:    remoteIdentity.IsRelay,
+		IsStore:    remoteIdentity.IsStore,
+		FilesCount: 0, // Default to 0, will be updated if DHT fetch succeeds
+		AppsCount:  0, // Default to 0, will be updated if DHT fetch succeeds
+		Topic:      topic,
+		Source:     "identity_exchange",
 	}
 
 	if err := ie.dbManager.KnownPeers.StoreKnownPeer(knownPeer); err != nil {
 		return nil, fmt.Errorf("failed to store known peer: %v", err)
 	}
 
-	ie.logger.Info(fmt.Sprintf("Stored peer %s in known_peers database (relay: %v, store: %v)", remoteIdentity.PeerID[:8], remoteIdentity.IsRelay, remoteIdentity.IsStore), "identity-exchange")
+	ie.logger.Info(fmt.Sprintf("Stored peer %s in known_peers database (relay: %v, store: %v)",
+		remoteIdentity.PeerID[:8], remoteIdentity.IsRelay, remoteIdentity.IsStore), "identity-exchange")
+
+	// Try to fetch and update service counts from DHT metadata (best effort)
+	// This is done after storing the peer identity to avoid blocking identity exchange
+	if ie.metadataFetcher != nil {
+		metadata, err := ie.metadataFetcher.GetPeerMetadata(remoteIdentity.PublicKey)
+		if err == nil && metadata != nil {
+			// Successfully fetched metadata, update service counts
+			if err := ie.dbManager.KnownPeers.UpdatePeerServiceCounts(
+				remoteIdentity.PeerID,
+				topic,
+				metadata.FilesCount,
+				metadata.AppsCount,
+			); err != nil {
+				ie.logger.Warn(fmt.Sprintf("Failed to update service counts for peer %s: %v",
+					remoteIdentity.PeerID[:8], err), "identity-exchange")
+			} else {
+				ie.logger.Debug(fmt.Sprintf("Updated service counts from DHT for peer %s (files: %d, apps: %d)",
+					remoteIdentity.PeerID[:8], metadata.FilesCount, metadata.AppsCount), "identity-exchange")
+				// Update the knownPeer struct for return value
+				knownPeer.FilesCount = metadata.FilesCount
+				knownPeer.AppsCount = metadata.AppsCount
+			}
+		} else {
+			ie.logger.Debug(fmt.Sprintf("Could not fetch service counts from DHT for peer %s: %v (will be updated later by PeerValidator)",
+				remoteIdentity.PeerID[:8], err), "identity-exchange")
+		}
+	}
 
 	return knownPeer, nil
 }
@@ -275,20 +312,42 @@ func (ie *IdentityExchanger) storeReceivedPeers(peers []*KnownPeerEntry, topic s
 			continue
 		}
 
-		// Store in database
+		// Store in database (with default 0 service counts)
 		knownPeer := &database.KnownPeer{
-			PeerID:    entry.PeerID,
-			DHTNodeID: entry.DHTNodeID,
-			PublicKey: entry.PublicKey,
-			IsRelay:   entry.IsRelay,
-			IsStore:   entry.IsStore,
-			Topic:     topic,
-			Source:    "peer_exchange",
+			PeerID:     entry.PeerID,
+			DHTNodeID:  entry.DHTNodeID,
+			PublicKey:  entry.PublicKey,
+			IsRelay:    entry.IsRelay,
+			IsStore:    entry.IsStore,
+			FilesCount: 0, // Default to 0, will be updated if DHT fetch succeeds
+			AppsCount:  0, // Default to 0, will be updated if DHT fetch succeeds
+			Topic:      topic,
+			Source:     "peer_exchange",
 		}
 
 		if err := ie.dbManager.KnownPeers.StoreKnownPeer(knownPeer); err != nil {
 			ie.logger.Debug(fmt.Sprintf("Failed to store peer %s: %v", entry.PeerID[:8], err), "identity-exchange")
 			continue
+		}
+
+		// Try to fetch and update service counts from DHT metadata (best effort)
+		if ie.metadataFetcher != nil {
+			metadata, err := ie.metadataFetcher.GetPeerMetadata(entry.PublicKey)
+			if err == nil && metadata != nil {
+				// Successfully fetched metadata, update service counts
+				if err := ie.dbManager.KnownPeers.UpdatePeerServiceCounts(
+					entry.PeerID,
+					topic,
+					metadata.FilesCount,
+					metadata.AppsCount,
+				); err != nil {
+					ie.logger.Debug(fmt.Sprintf("Failed to update service counts for peer %s from peer_exchange: %v",
+						entry.PeerID[:8], err), "identity-exchange")
+				} else {
+					ie.logger.Debug(fmt.Sprintf("Updated service counts from DHT for peer %s via peer_exchange (files: %d, apps: %d)",
+						entry.PeerID[:8], metadata.FilesCount, metadata.AppsCount), "identity-exchange")
+				}
+			}
 		}
 
 		stored++

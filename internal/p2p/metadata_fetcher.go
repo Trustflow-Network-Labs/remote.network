@@ -72,8 +72,8 @@ func (mf *MetadataFetcher) GetPeerMetadata(publicKey []byte) (*database.PeerMeta
 		return nil, fmt.Errorf("failed to decode metadata: %v", err)
 	}
 
-	mf.logger.Info(fmt.Sprintf("✅ Successfully decoded metadata from DHT (node_id: %s, topic: %s, version: %d, is_relay: %v, relay_endpoint: %s)",
-		metadata.NodeID, metadata.Topic, metadata.Version, metadata.NetworkInfo.IsRelay, metadata.NetworkInfo.RelayEndpoint), "metadata-fetcher")
+	mf.logger.Info(fmt.Sprintf("✅ Successfully decoded metadata from DHT (node_id: %s, topic: %s, version: %d, is_relay: %v, relay_endpoint: %s, files=%d, apps=%d)",
+		metadata.NodeID, metadata.Topic, metadata.Version, metadata.NetworkInfo.IsRelay, metadata.NetworkInfo.RelayEndpoint, metadata.FilesCount, metadata.AppsCount), "metadata-fetcher")
 
 	return metadata, nil
 }

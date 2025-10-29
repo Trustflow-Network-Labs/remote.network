@@ -19,8 +19,11 @@ type PeerMetadata struct {
 
 	// Capabilities & Services
 	Capabilities []string               `json:"capabilities"`
-	Services     map[string]Service     `json:"services"`
 	Extensions   map[string]interface{} `json:"extensions"`
+
+	// Service Statistics (lightweight counters for DHT storage)
+	FilesCount int `json:"files_count"` // Count of ACTIVE DATA services
+	AppsCount  int `json:"apps_count"`  // Count of ACTIVE DOCKER + STANDALONE services
 
 	// Metadata (not stored in DHT, used for local tracking)
 	LastSeen time.Time `json:"last_seen,omitempty"`
@@ -65,12 +68,4 @@ type Protocol struct {
 	Name string                 `json:"name"` // "quic", "tcp", "udp"
 	Port int                    `json:"port"`
 	Meta map[string]interface{} `json:"meta,omitempty"`
-}
-
-// Service describes capabilities or services offered by the peer
-type Service struct {
-	Type         string                 `json:"type"`         // "storage", "gpu", "docker", "wasm"
-	Endpoint     string                 `json:"endpoint"`
-	Capabilities map[string]interface{} `json:"capabilities"`
-	Status       string                 `json:"status"`       // "available", "busy", "offline"
 }

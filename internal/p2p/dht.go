@@ -106,7 +106,18 @@ func NewDHTPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*DHTPee
 					return
 				}
 
+				// CRITICAL FIX: Explicitly add announcing peer to discovered peers list
+				// This ensures metadata fetch happens even if peer exchange is throttled
+				// The peer exchange may be skipped due to "recent exchange" throttling,
+				// but we still need to discover this peer and fetch its metadata
+				if dhtPeer.onPeerDiscovered != nil {
+					peerQuicAddr := fmt.Sprintf("%s:%d", ip.String(), port)
+					logger.Debug(fmt.Sprintf("Adding announced peer %s to discovered list for topic '%s'", peerQuicAddr, topic), "dht")
+					go dhtPeer.onPeerDiscovered(peerQuicAddr, topic)
+				}
+
 				// Exchange peers with the announcing peer (with loop prevention)
+				// This gets additional peers from the announcing peer's known peers list
 				go func() {
 					exchangedCount := dhtPeer.exchangeTopicPeersWithPeer(peerAddr, topic)
 					if exchangedCount > 0 {

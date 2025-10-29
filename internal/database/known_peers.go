@@ -18,6 +18,8 @@ type KnownPeer struct {
 	PublicKey  []byte    // Ed25519 public key - 32 bytes
 	IsRelay    bool      // Is this peer a relay? (from identity exchange)
 	IsStore    bool      // Has BEP_44 storage enabled? (from identity exchange)
+	FilesCount int       // Count of ACTIVE DATA services (from peer metadata)
+	AppsCount  int       // Count of ACTIVE DOCKER + STANDALONE services (from peer metadata)
 	LastSeen   time.Time // Last time we saw this peer
 	Topic      string    // Topic this peer is associated with
 	FirstSeen  time.Time // When we first discovered this peer
@@ -70,6 +72,8 @@ CREATE TABLE IF NOT EXISTS known_peers (
 	"public_key" BLOB NOT NULL,
 	"is_relay" INTEGER NOT NULL DEFAULT 0,  -- 0=false, 1=true (from identity exchange)
 	"is_store" INTEGER NOT NULL DEFAULT 0,  -- 0=false, 1=true (has BEP_44 storage enabled)
+	"files_count" INTEGER NOT NULL DEFAULT 0,  -- Count of ACTIVE DATA services
+	"apps_count" INTEGER NOT NULL DEFAULT 0,   -- Count of ACTIVE DOCKER + STANDALONE services
 	"last_seen" INTEGER NOT NULL,  -- Unix timestamp
 	"topic" TEXT NOT NULL,
 	"first_seen" INTEGER NOT NULL, -- Unix timestamp
@@ -103,11 +107,12 @@ func (kpm *KnownPeersManager) prepareStatements() error {
 	var err error
 
 	// Insert new peer only (never overwrite existing entries)
-	// If peer exists, update dht_node_id, last_seen, and is_store
+	// If peer exists, update dht_node_id, last_seen, is_store
 	// Note: dht_node_id must be updated because it changes on peer restart
+	// Note: files_count and apps_count are NOT updated here - use UpdatePeerServiceCounts() for that
 	kpm.insertStmt, err = kpm.db.Prepare(`
-		INSERT INTO known_peers (peer_id, dht_node_id, public_key, is_relay, is_store, last_seen, topic, first_seen, source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO known_peers (peer_id, dht_node_id, public_key, is_relay, is_store, files_count, apps_count, last_seen, topic, first_seen, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(peer_id, topic) DO UPDATE SET
 			dht_node_id = excluded.dht_node_id,
 			last_seen = excluded.last_seen,
@@ -129,7 +134,7 @@ func (kpm *KnownPeersManager) prepareStatements() error {
 
 	// Get single peer
 	kpm.getStmt, err = kpm.db.Prepare(`
-		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, last_seen, topic, first_seen, source
+		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, files_count, apps_count, last_seen, topic, first_seen, source
 		FROM known_peers
 		WHERE peer_id = ? AND topic = ?
 	`)
@@ -139,7 +144,7 @@ func (kpm *KnownPeersManager) prepareStatements() error {
 
 	// Get all peers
 	kpm.getAllStmt, err = kpm.db.Prepare(`
-		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, last_seen, topic, first_seen, source
+		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, files_count, apps_count, last_seen, topic, first_seen, source
 		FROM known_peers
 		ORDER BY last_seen DESC
 	`)
@@ -149,7 +154,7 @@ func (kpm *KnownPeersManager) prepareStatements() error {
 
 	// Get peers by topic
 	kpm.getByTopicStmt, err = kpm.db.Prepare(`
-		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, last_seen, topic, first_seen, source
+		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, files_count, apps_count, last_seen, topic, first_seen, source
 		FROM known_peers
 		WHERE topic = ?
 		ORDER BY last_seen DESC
@@ -210,6 +215,8 @@ func (kpm *KnownPeersManager) StoreKnownPeer(peer *KnownPeer) error {
 		peer.PublicKey,
 		isRelayInt,
 		isStoreInt,
+		peer.FilesCount,
+		peer.AppsCount,
 		peer.LastSeen.Unix(),
 		peer.Topic,
 		peer.FirstSeen.Unix(),
@@ -238,6 +245,35 @@ func (kpm *KnownPeersManager) UpdateLastSeen(peerID, topic string) error {
 	return nil
 }
 
+// UpdatePeerServiceCounts updates only the service counts for a peer
+// This should be called when we have confirmed service counts from DHT metadata
+func (kpm *KnownPeersManager) UpdatePeerServiceCounts(peerID, topic string, filesCount, appsCount int) error {
+	query := `
+		UPDATE known_peers
+		SET files_count = ?, apps_count = ?
+		WHERE peer_id = ? AND topic = ?
+	`
+
+	result, err := kpm.db.Exec(query, filesCount, appsCount, peerID, topic)
+	if err != nil {
+		return fmt.Errorf("failed to update service counts: %v", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %v", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("peer not found: %s (topic: %s)", peerID, topic)
+	}
+
+	kpm.logger.Debug(fmt.Sprintf("Updated service counts for peer %s (files: %d, apps: %d)",
+		peerID[:8], filesCount, appsCount), "database")
+
+	return nil
+}
+
 // GetKnownPeerByNodeID retrieves a known peer by DHT node_id or peer_id
 // This is useful when you have the DHT node_id from peer_metadata and need the public key
 func (kpm *KnownPeersManager) GetKnownPeerByNodeID(nodeID, topic string) (*KnownPeer, error) {
@@ -252,7 +288,7 @@ func (kpm *KnownPeersManager) GetKnownPeerByNodeID(nodeID, topic string) (*Known
 
 	// Try as dht_node_id (DHT routing node_id)
 	query := `
-		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, last_seen, topic, first_seen, source
+		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, files_count, apps_count, last_seen, topic, first_seen, source
 		FROM known_peers
 		WHERE dht_node_id = ? AND topic = ?
 	`
@@ -268,6 +304,8 @@ func (kpm *KnownPeersManager) GetKnownPeerByNodeID(nodeID, topic string) (*Known
 		&foundPeer.PublicKey,
 		&isRelayInt,
 		&isStoreInt,
+		&foundPeer.FilesCount,
+		&foundPeer.AppsCount,
 		&lastSeenUnix,
 		&foundPeer.Topic,
 		&firstSeenUnix,
@@ -356,7 +394,7 @@ func (kpm *KnownPeersManager) GetKnownPeersByTopic(topic string) ([]*KnownPeer, 
 // GetRecentKnownPeers retrieves the N most recently seen peers
 func (kpm *KnownPeersManager) GetRecentKnownPeers(limit int, topic string) ([]*KnownPeer, error) {
 	query := `
-		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, last_seen, topic, first_seen, source
+		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, files_count, apps_count, last_seen, topic, first_seen, source
 		FROM known_peers
 		WHERE topic = ?
 		ORDER BY last_seen DESC
@@ -438,6 +476,8 @@ func (kpm *KnownPeersManager) scanKnownPeers(rows *sql.Rows) ([]*KnownPeer, erro
 			&peer.PublicKey,
 			&isRelayInt,
 			&isStoreInt,
+			&peer.FilesCount,
+			&peer.AppsCount,
 			&lastSeenUnix,
 			&peer.Topic,
 			&firstSeenUnix,
@@ -470,7 +510,7 @@ func (kpm *KnownPeersManager) scanKnownPeers(rows *sql.Rows) ([]*KnownPeer, erro
 // GetRelayPeers returns all relay peers for a topic
 func (kpm *KnownPeersManager) GetRelayPeers(topic string) ([]*KnownPeer, error) {
 	query := `
-		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, last_seen, topic, first_seen, source
+		SELECT peer_id, dht_node_id, public_key, is_relay, is_store, files_count, apps_count, last_seen, topic, first_seen, source
 		FROM known_peers
 		WHERE topic = ? AND is_relay = 1
 		ORDER BY last_seen DESC

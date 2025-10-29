@@ -123,6 +123,9 @@ func (s *APIServer) handleAddService(w http.ResponseWriter, r *http.Request) {
 	// Broadcast service update via WebSocket
 	s.eventEmitter.BroadcastServiceUpdate()
 
+	// Update peer metadata in DHT with new service counts
+	s.updatePeerMetadataAfterServiceChange()
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -236,6 +239,9 @@ func (s *APIServer) handleDeleteService(w http.ResponseWriter, r *http.Request) 
 	// Broadcast service update via WebSocket
 	s.eventEmitter.BroadcastServiceUpdate()
 
+	// Update peer metadata in DHT with new service counts
+	s.updatePeerMetadataAfterServiceChange()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "Service deleted successfully",
@@ -288,6 +294,9 @@ func (s *APIServer) handleUpdateServiceStatus(w http.ResponseWriter, r *http.Req
 
 	// Broadcast service update via WebSocket
 	s.eventEmitter.BroadcastServiceUpdate()
+
+	// Update peer metadata in DHT with new service counts
+	s.updatePeerMetadataAfterServiceChange()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -405,4 +414,26 @@ func (s *APIServer) handleProcessUploadedFile(w http.ResponseWriter, r *http.Req
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "File processing started",
 	})
+}
+
+// updatePeerMetadataAfterServiceChange triggers an update to peer metadata in DHT
+// This should be called after any service addition, deletion, or status change
+func (s *APIServer) updatePeerMetadataAfterServiceChange() {
+	if s.peerManager == nil {
+		return
+	}
+
+	metadataPublisher := s.peerManager.GetMetadataPublisher()
+	if metadataPublisher == nil {
+		return
+	}
+
+	// Run in goroutine to avoid blocking the HTTP response
+	go func() {
+		if err := metadataPublisher.UpdateServiceMetadata(); err != nil {
+			s.logger.Error(fmt.Sprintf("Failed to update peer metadata after service change: %v", err), "api")
+		} else {
+			s.logger.Debug("Successfully updated peer metadata after service change", "api")
+		}
+	}()
 }

@@ -83,14 +83,23 @@ func (pv *PeerValidator) ValidateStalePeers(topic string) error {
 			continue
 		}
 
-		// Peer still exists in DHT - update last_seen timestamp and dht_node_id
+		// Peer still exists in DHT - update last_seen timestamp, dht_node_id, and service counts
 		validatedCount++
 		peer.LastSeen = time.Now()
 		peer.DHTNodeID = metadata.NodeID // Update DHT node ID from fresh metadata
+
+		// Update peer identity (dht_node_id, last_seen)
 		if err := pv.dbManager.KnownPeers.StoreKnownPeer(peer); err != nil {
-			pv.logger.Warn(fmt.Sprintf("Failed to update validated peer %s: %v", peer.PeerID[:8], err), "peer-validator")
+			pv.logger.Warn(fmt.Sprintf("Failed to update validated peer identity %s: %v", peer.PeerID[:8], err), "peer-validator")
+			continue
+		}
+
+		// Update service counts separately from DHT metadata
+		if err := pv.dbManager.KnownPeers.UpdatePeerServiceCounts(peer.PeerID, peer.Topic, metadata.FilesCount, metadata.AppsCount); err != nil {
+			pv.logger.Warn(fmt.Sprintf("Failed to update service counts for validated peer %s: %v", peer.PeerID[:8], err), "peer-validator")
 		} else {
-			pv.logger.Debug(fmt.Sprintf("Validated peer %s (found in DHT, updated last_seen and dht_node_id)", peer.PeerID[:8]), "peer-validator")
+			pv.logger.Debug(fmt.Sprintf("Validated peer %s (found in DHT, updated last_seen, dht_node_id, and service counts: files=%d, apps=%d)",
+				peer.PeerID[:8], metadata.FilesCount, metadata.AppsCount), "peer-validator")
 		}
 	}
 

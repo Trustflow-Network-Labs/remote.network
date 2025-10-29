@@ -11,6 +11,7 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/p2p"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -124,6 +125,9 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 	// Initialize metadata fetcher for DHT-only metadata retrieval with priority routing
 	metadataFetcher := p2p.NewMetadataFetcher(bep44Manager, logger)
 	logger.Info("Metadata fetcher initialized (DHT priority queries)", "core")
+
+	// Set metadata fetcher on identity exchanger for service count preservation
+	identityExchanger.SetMetadataFetcher(metadataFetcher)
 
 	// Initialize metadata retry scheduler for failed metadata fetches
 	metadataRetryScheduler := p2p.NewMetadataRetryScheduler(config, logger, metadataFetcher, dbManager)
@@ -867,6 +871,14 @@ func (pm *PeerManager) publishInitialMetadata() error {
 			networkInfo.RelayEndpoint, relayPricing, networkInfo.RelayCapacity), "core")
 	}
 
+	// Count local services for metadata
+	serviceCounts, err := services.CountLocalServices(pm.dbManager)
+	if err != nil {
+		pm.logger.Warn(fmt.Sprintf("Failed to count local services: %v", err), "core")
+		serviceCounts = &services.ServiceCounts{} // Default to 0
+	}
+	pm.logger.Info(fmt.Sprintf("Counted local services for metadata: files=%d, apps=%d", serviceCounts.FilesCount, serviceCounts.AppsCount), "core")
+
 	metadata := &database.PeerMetadata{
 		PeerID:       pm.keyPair.PeerID(), // Persistent Ed25519-based peer ID
 		NodeID:       pm.dht.NodeID(),     // DHT routing node ID
@@ -874,7 +886,8 @@ func (pm *PeerManager) publishInitialMetadata() error {
 		Version:      1,
 		NetworkInfo:  networkInfo,
 		Capabilities: []string{"metadata_exchange"},
-		Services:     make(map[string]database.Service),
+		FilesCount:   serviceCounts.FilesCount, // Count of ACTIVE DATA services
+		AppsCount:    serviceCounts.AppsCount,  // Count of ACTIVE DOCKER + STANDALONE services
 		Extensions:   make(map[string]interface{}),
 		Timestamp:    time.Now(),
 		LastSeen:     time.Now(),
@@ -1208,4 +1221,9 @@ func (pm *PeerManager) connectWithMetadata(metadata *database.PeerMetadata, peer
 
 	// Connection successful - identity exchange will happen automatically via QUIC handshake
 	_ = conn // Connection is managed by QUIC layer
+}
+
+// GetMetadataPublisher returns the metadata publisher for updating peer metadata
+func (pm *PeerManager) GetMetadataPublisher() *p2p.MetadataPublisher {
+	return pm.metadataPublisher
 }

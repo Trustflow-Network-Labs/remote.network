@@ -233,13 +233,11 @@ async function copyPeerId(peerId: string) {
 }
 
 function getFileServicesCount(peer: any): number {
-  // Placeholder - backend will provide this data
-  return 0
+  return peer.files_count || 0
 }
 
 function getAppServicesCount(peer: any): number {
-  // Placeholder - backend will provide this data
-  return 0
+  return peer.apps_count || 0
 }
 
 function viewPeerServices(peer: any) {

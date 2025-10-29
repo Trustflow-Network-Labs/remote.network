@@ -7,6 +7,7 @@ import (
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -63,8 +64,8 @@ func (mp *MetadataPublisher) PublishMetadata(metadata *database.PeerMetadata) er
 	mp.currentMetadata = metadata
 	mp.currentSequence = 0 // Initial publish starts at sequence 0
 
-	mp.logger.Info(fmt.Sprintf("Metadata publish starting: peer_id=%s, seq=%d",
-		mp.keyPair.PeerID(), mp.currentSequence), "metadata-publisher")
+	mp.logger.Info(fmt.Sprintf("Metadata publish starting: peer_id=%s, seq=%d, files=%d, apps=%d",
+		mp.keyPair.PeerID(), mp.currentSequence, metadata.FilesCount, metadata.AppsCount), "metadata-publisher")
 
 	// Get topic from config
 	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
@@ -271,8 +272,8 @@ func (mp *MetadataPublisher) NotifyRelayConnected(relayNodeID, relaySessionID, r
 		return fmt.Errorf("no metadata initialized")
 	}
 
-	mp.logger.Info(fmt.Sprintf("Updating metadata with relay info (relay: %s, session: %s)",
-		relayNodeID, relaySessionID), "metadata-publisher")
+	mp.logger.Info(fmt.Sprintf("Updating metadata with relay info (relay: %s, session: %s, files=%d, apps=%d)",
+		relayNodeID, relaySessionID, mp.currentMetadata.FilesCount, mp.currentMetadata.AppsCount), "metadata-publisher")
 
 	// Update metadata with relay information
 	mp.currentMetadata.NetworkInfo.UsingRelay = true
@@ -386,5 +387,47 @@ func (mp *MetadataPublisher) NotifyIPChange(newPublicIP, newPrivateIP string) er
 	mp.logger.Info(fmt.Sprintf("Successfully updated metadata with new IPs (seq: %d)", mp.currentSequence), "metadata-publisher")
 
 	// Metadata is now stored only in DHT - no local database storage
+	return nil
+}
+
+// UpdateServiceMetadata updates metadata with current service counts and republishes to DHT
+// This should be called whenever services are added, removed, or their status changes
+func (mp *MetadataPublisher) UpdateServiceMetadata() error {
+	mp.metadataMutex.Lock()
+	defer mp.metadataMutex.Unlock()
+
+	if mp.currentMetadata == nil {
+		return fmt.Errorf("no metadata initialized")
+	}
+
+	// Count current services
+	serviceCounts, err := services.CountLocalServices(mp.dbManager)
+	if err != nil {
+		mp.logger.Error(fmt.Sprintf("Failed to count services: %v", err), "metadata-publisher")
+		return fmt.Errorf("failed to count services: %v", err)
+	}
+
+	mp.logger.Info(fmt.Sprintf("Updating metadata with service counts: files=%d, apps=%d (previous: files=%d, apps=%d)",
+		serviceCounts.FilesCount, serviceCounts.AppsCount, mp.currentMetadata.FilesCount, mp.currentMetadata.AppsCount), "metadata-publisher")
+
+	// Update service counts in metadata
+	mp.currentMetadata.FilesCount = serviceCounts.FilesCount
+	mp.currentMetadata.AppsCount = serviceCounts.AppsCount
+	mp.currentMetadata.Timestamp = time.Now()
+
+	// Increment sequence and publish
+	mp.currentSequence++
+
+	// Get topic from config
+	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+	topic := topics[0]
+
+	err = mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.dbManager, topic)
+	if err != nil {
+		return fmt.Errorf("failed to update metadata with service counts: %v", err)
+	}
+
+	mp.logger.Info(fmt.Sprintf("Successfully updated metadata with service counts (seq: %d)", mp.currentSequence), "metadata-publisher")
+
 	return nil
 }

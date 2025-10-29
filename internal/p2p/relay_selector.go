@@ -30,6 +30,7 @@ type RelaySelector struct {
 	logger     *utils.LogsManager
 	dbManager  *database.SQLiteManager
 	quicPeer   *QUICPeer
+	myPeerID   string // Our persistent peer ID for looking up preferences
 
 	// Relay candidates
 	candidates     map[string]*RelayCandidate
@@ -41,12 +42,13 @@ type RelaySelector struct {
 }
 
 // NewRelaySelector creates a new relay selector
-func NewRelaySelector(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer) *RelaySelector {
+func NewRelaySelector(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, quicPeer *QUICPeer, myPeerID string) *RelaySelector {
 	return &RelaySelector{
 		config:     config,
 		logger:     logger,
 		dbManager:  dbManager,
 		quicPeer:   quicPeer,
+		myPeerID:   myPeerID,
 		candidates: make(map[string]*RelayCandidate),
 	}
 }
@@ -163,7 +165,7 @@ func (rs *RelaySelector) MeasureAllCandidates() {
 	rs.logger.Debug(fmt.Sprintf("Measured latency for %d relay candidates", len(candidateList)), "relay-selector")
 }
 
-// SelectBestRelay selects the best relay based on latency, reputation, and pricing
+// SelectBestRelay selects the best relay based on preferred relay (if set), then latency, reputation, and pricing
 func (rs *RelaySelector) SelectBestRelay() *RelayCandidate {
 	rs.candidatesMutex.RLock()
 	defer rs.candidatesMutex.RUnlock()
@@ -178,6 +180,59 @@ func (rs *RelaySelector) SelectBestRelay() *RelayCandidate {
 	minReputation := rs.config.GetConfigFloat64("relay_min_reputation", 0.3, 0.0, 1.0)
 	maxPricing := rs.config.GetConfigFloat64("relay_max_pricing", 0.01, 0.0, 1.0)
 
+	// STEP 1: Check for preferred relay first
+	relayDB, err := database.NewRelayDB(rs.dbManager.GetDB(), rs.logger)
+	if err == nil {
+		preferredPeerID, err := relayDB.GetPreferredRelay(rs.myPeerID)
+		if err == nil && preferredPeerID != "" {
+			rs.logger.Info(fmt.Sprintf("🎯 Checking for preferred relay: %s", preferredPeerID[:8]), "relay-selector")
+
+			// Find preferred relay in candidates
+			for _, candidate := range rs.candidates {
+				if candidate.PeerID == preferredPeerID {
+					// Check if preferred relay meets minimum criteria
+					if candidate.Latency == 0 {
+						rs.logger.Warn(fmt.Sprintf("Preferred relay %s has no latency measurement, skipping", preferredPeerID[:8]), "relay-selector")
+						break
+					}
+
+					if candidate.Latency > maxLatency {
+						rs.logger.Warn(fmt.Sprintf("Preferred relay %s exceeds max latency (%v > %v), using fallback selection",
+							preferredPeerID[:8], candidate.Latency, maxLatency), "relay-selector")
+						break
+					}
+
+					if candidate.ReputationScore < minReputation {
+						rs.logger.Warn(fmt.Sprintf("Preferred relay %s below min reputation (%.2f < %.2f), using fallback selection",
+							preferredPeerID[:8], candidate.ReputationScore, minReputation), "relay-selector")
+						break
+					}
+
+					if candidate.PricingPerGB > maxPricing {
+						rs.logger.Warn(fmt.Sprintf("Preferred relay %s exceeds max pricing (%.4f > %.4f), using fallback selection",
+							preferredPeerID[:8], candidate.PricingPerGB, maxPricing), "relay-selector")
+						break
+					}
+
+					// Preferred relay meets criteria - use it!
+					rs.logger.Info(fmt.Sprintf("✅ Selected PREFERRED relay: %s (latency: %v, reputation: %.2f, pricing: %.4f)",
+						preferredPeerID[:8], candidate.Latency, candidate.ReputationScore, candidate.PricingPerGB), "relay-selector")
+
+					rs.bestRelayMutex.Lock()
+					rs.bestRelay = candidate
+					rs.bestRelayMutex.Unlock()
+
+					return candidate
+				}
+			}
+
+			if preferredPeerID != "" {
+				rs.logger.Warn(fmt.Sprintf("Preferred relay %s not found in candidates or doesn't meet criteria, falling back to score-based selection", preferredPeerID[:8]), "relay-selector")
+			}
+		}
+	}
+
+	// STEP 2: Fallback to score-based selection
 	var bestCandidate *RelayCandidate
 	var bestScore float64 = -1
 
@@ -254,6 +309,26 @@ func (rs *RelaySelector) ShouldSwitchRelay(currentRelay *RelayCandidate, newRela
 
 	if newRelay == nil {
 		return false
+	}
+
+	// Check if new relay is the preferred relay - always switch to preferred if available
+	relayDB, err := database.NewRelayDB(rs.dbManager.GetDB(), rs.logger)
+	if err == nil {
+		preferredPeerID, err := relayDB.GetPreferredRelay(rs.myPeerID)
+		if err == nil && preferredPeerID != "" {
+			// If new relay is preferred and current is not, ALWAYS switch
+			if newRelay.PeerID == preferredPeerID && currentRelay.PeerID != preferredPeerID {
+				rs.logger.Info(fmt.Sprintf("🔄 Switching to PREFERRED relay %s (from %s)",
+					newRelay.PeerID[:8], currentRelay.PeerID[:8]), "relay-selector")
+				return true
+			}
+
+			// If current relay is already preferred, don't switch unless significantly better
+			if currentRelay.PeerID == preferredPeerID {
+				rs.logger.Debug("Current relay is already preferred, staying connected", "relay-selector")
+				return false
+			}
+		}
 	}
 
 	// Get switch threshold from config (e.g., 20% improvement required)

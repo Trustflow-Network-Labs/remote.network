@@ -590,16 +590,17 @@ func (q *QUICPeer) generateOurMetadata(nodeID, topic string) (*database.PeerMeta
 
 	// Create metadata for our node
 	metadata := &database.PeerMetadata{
-		NodeID:      nodeID,
-		Topic:       topic,
-		Version:     1,
-		Timestamp:   time.Now(),
-		NetworkInfo: networkInfo,
+		NodeID:       nodeID,
+		Topic:        topic,
+		Version:      1,
+		Timestamp:    time.Now(),
+		NetworkInfo:  networkInfo,
 		Capabilities: []string{"metadata_exchange", "ping_pong"},
-		Services:    make(map[string]database.Service),
-		Extensions:  make(map[string]interface{}),
-		LastSeen:    time.Now(),
-		Source:      "quic",
+		FilesCount:   0, // Will be populated by actual service counts
+		AppsCount:    0, // Will be populated by actual service counts
+		Extensions:   make(map[string]interface{}),
+		LastSeen:     time.Now(),
+		Source:       "quic",
 	}
 
 	return metadata, nil
