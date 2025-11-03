@@ -119,12 +119,17 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 	// Set identity exchanger on QUIC peer
 	quic.SetIdentityExchanger(identityExchanger)
 
-	metadataQuery := p2p.NewMetadataQueryService(bep44Manager, dbManager, logger, config)
-	logger.Info("Metadata query service initialized (cache-first DHT queries)", "core")
+	// Initialize service query handler for service discovery
+	serviceQueryHandler := p2p.NewServiceQueryHandler(dbManager, logger)
+	quic.SetServiceQueryHandler(serviceQueryHandler)
+	logger.Info("Service query handler initialized for service discovery", "core")
 
 	// Initialize metadata fetcher for DHT-only metadata retrieval with priority routing
 	metadataFetcher := p2p.NewMetadataFetcher(bep44Manager, logger)
 	logger.Info("Metadata fetcher initialized (DHT priority queries)", "core")
+
+	metadataQuery := p2p.NewMetadataQueryService(bep44Manager, dbManager, logger, config, metadataFetcher)
+	logger.Info("Metadata query service initialized with DHT store priority", "core")
 
 	// Set metadata fetcher on identity exchanger for service count preservation
 	identityExchanger.SetMetadataFetcher(metadataFetcher)
@@ -139,7 +144,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 		logger.Info("Relay mode enabled - node will act as relay", "core")
 	} else {
 		// For NAT peers, initialize relay manager for connecting to relays
-		relayManager = p2p.NewRelayManager(config, logger, dbManager, keyPair, quic, dht, metadataPublisher, metadataFetcher)
+		relayManager = p2p.NewRelayManager(config, logger, dbManager, keyPair, quic, dht, metadataPublisher, metadataFetcher, metadataQuery)
 		logger.Info("Relay manager initialized for NAT peer", "core")
 	}
 
@@ -254,15 +259,6 @@ func (pm *PeerManager) Start() error {
 		return fmt.Errorf("failed to start DHT peer: %v", err)
 	}
 
-	// Start relay manager for NAT peers (after DHT/QUIC are running)
-	if pm.relayManager != nil {
-		if err := pm.relayManager.Start(); err != nil {
-			pm.logger.Warn(fmt.Sprintf("Failed to start relay manager: %v", err), "core")
-		} else {
-			pm.logger.Info("Relay manager started for NAT peer", "core")
-		}
-	}
-
 	// Start hole puncher for NAT traversal (after NAT detection is complete)
 	if pm.holePuncher != nil {
 		if err := pm.holePuncher.Start(); err != nil {
@@ -278,10 +274,23 @@ func (pm *PeerManager) Start() error {
 	pm.connectToBootstrapPeers()
 
 	// Publish initial metadata to DHT (Phase 4: DHT metadata architecture)
+	// For NAT peers, this creates and stores metadata via SetInitialMetadata()
+	// The metadata MUST be ready before relay manager starts
 	pm.logger.Info("Publishing initial metadata to DHT...", "core")
 	if err := pm.publishInitialMetadata(); err != nil {
 		pm.logger.Warn(fmt.Sprintf("Failed to publish initial metadata: %v", err), "core")
 		// Don't fail startup if DHT publishing fails
+	}
+
+	// Start relay manager for NAT peers (after metadata is initialized)
+	// This ensures metadata exists when relay connection is established
+	// and NotifyRelayConnected() can successfully update and publish it
+	if pm.relayManager != nil {
+		if err := pm.relayManager.Start(); err != nil {
+			pm.logger.Warn(fmt.Sprintf("Failed to start relay manager: %v", err), "core")
+		} else {
+			pm.logger.Info("Relay manager started for NAT peer", "core")
+		}
 	}
 
 	// Subscribe to configured topics
@@ -1226,4 +1235,22 @@ func (pm *PeerManager) connectWithMetadata(metadata *database.PeerMetadata, peer
 // GetMetadataPublisher returns the metadata publisher for updating peer metadata
 func (pm *PeerManager) GetMetadataPublisher() *p2p.MetadataPublisher {
 	return pm.metadataPublisher
+}
+
+// GetQUIC returns the QUIC peer for direct QUIC operations
+func (pm *PeerManager) GetQUIC() *p2p.QUICPeer {
+	return pm.quic
+}
+
+func (pm *PeerManager) GetDHT() *p2p.DHTPeer {
+	return pm.dht
+}
+
+func (pm *PeerManager) GetMetadataQuery() *p2p.MetadataQueryService {
+	return pm.metadataQuery
+}
+
+// GetPeerID returns the persistent Ed25519-based peer ID
+func (pm *PeerManager) GetPeerID() string {
+	return pm.keyPair.PeerID()
 }

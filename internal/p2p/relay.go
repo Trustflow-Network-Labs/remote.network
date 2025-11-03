@@ -21,12 +21,21 @@ type RelaySession struct {
 	RelayNodeID       string
 	SessionType       string // "coordination" or "full_relay"
 	Connection        *quic.Conn
+	ReceiveStream     *quic.Stream // Pre-opened stream from NAT peer for receiving forwarded messages
 	StartTime         time.Time
 	LastKeepalive     time.Time
 	KeepaliveInterval time.Duration
 	IngressBytes      int64
 	EgressBytes       int64
 	mutex             sync.RWMutex
+}
+
+// PendingRelayRequest tracks a request waiting for response
+type PendingRelayRequest struct {
+	Stream        *quic.Stream
+	RequestTime   time.Time
+	SourcePeerID  string
+	TargetPeerID  string
 }
 
 // RelayPeer manages relay functionality
@@ -52,6 +61,10 @@ type RelayPeer struct {
 	// Registered clients (NAT peers using this relay)
 	registeredClients map[string]*RelaySession // key: clientNodeID
 	clientsMutex      sync.RWMutex
+
+	// Pending requests awaiting responses (for request-response correlation)
+	pendingRequests map[string]*PendingRelayRequest // key: correlationID (sourcePeerID:targetPeerID:timestamp)
+	pendingMutex    sync.RWMutex
 }
 
 // NewRelayPeer creates a new relay peer
@@ -99,6 +112,7 @@ func NewRelayPeer(config *utils.ConfigManager, logger *utils.LogsManager, dbMana
 		sessions:          make(map[string]*RelaySession),
 		clientSessions:    make(map[string][]*RelaySession),
 		registeredClients: make(map[string]*RelaySession),
+		pendingRequests:   make(map[string]*PendingRelayRequest),
 	}
 
 	if isRelayMode {
@@ -162,11 +176,11 @@ func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remo
 	// Store session
 	rp.sessionsMutex.Lock()
 	rp.sessions[sessionID] = session
-	rp.clientSessions[data.NodeID] = append(rp.clientSessions[data.NodeID], session)
+	rp.clientSessions[data.PeerID] = append(rp.clientSessions[data.PeerID], session)
 	rp.sessionsMutex.Unlock()
 
 	rp.clientsMutex.Lock()
-	rp.registeredClients[data.NodeID] = session
+	rp.registeredClients[data.PeerID] = session  // Index by Peer ID (persistent identity)
 	rp.clientsMutex.Unlock()
 
 	// Note: Session is now stored in-memory only (no database record)
@@ -180,13 +194,59 @@ func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remo
 	return CreateRelayAccept("", data.NodeID, sessionID, keepaliveInterval, rp.pricingPerGB)
 }
 
+// HandleRelayReceiveStreamReady processes receive stream ready notification from NAT peers
+func (rp *RelayPeer) HandleRelayReceiveStreamReady(msg *QUICMessage, stream *quic.Stream) error {
+	var data RelayReceiveStreamReadyData
+	if err := msg.GetDataAs(&data); err != nil {
+		return fmt.Errorf("failed to parse relay receive stream ready: %v", err)
+	}
+
+	rp.logger.Debug(fmt.Sprintf("Receive stream ready from peer %s (session: %s)",
+		data.PeerID, data.SessionID), "relay")
+
+	// Look up session by peer ID
+	rp.clientsMutex.RLock()
+	session, exists := rp.registeredClients[data.PeerID]
+	rp.clientsMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("no session found for peer %s", data.PeerID)
+	}
+
+	// Verify session ID matches
+	if session.SessionID != data.SessionID {
+		return fmt.Errorf("session ID mismatch: expected %s, got %s", session.SessionID, data.SessionID)
+	}
+
+	// Store the receive stream in the session
+	session.mutex.Lock()
+	session.ReceiveStream = stream
+	session.mutex.Unlock()
+
+	rp.logger.Info(fmt.Sprintf("✅ Receive stream registered for peer %s (session: %s)",
+		data.PeerID, data.SessionID), "relay")
+
+	return nil
+}
+
 // HandleRelayForward processes relay forwarding requests
-func (rp *RelayPeer) HandleRelayForward(msg *QUICMessage, remoteAddr string) error {
+func (rp *RelayPeer) HandleRelayForward(msg *QUICMessage, remoteAddr string, stream *quic.Stream) error {
 	var data RelayForwardData
 	if err := msg.GetDataAs(&data); err != nil {
 		return fmt.Errorf("failed to parse relay forward: %v", err)
 	}
 
+	// Check if this is a response (coming back from target to source)
+	if data.MessageType == "service_response" {
+		return rp.handleRelayResponse(&data, stream)
+	}
+
+	// This is a request - handle forwarding and track for response
+	return rp.handleRelayRequest(&data, stream, remoteAddr)
+}
+
+// handleRelayRequest processes a relay forward request from requester to target
+func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Stream, remoteAddr string) error {
 	// Validate session
 	rp.sessionsMutex.RLock()
 	session, exists := rp.sessions[data.SessionID]
@@ -196,21 +256,38 @@ func (rp *RelayPeer) HandleRelayForward(msg *QUICMessage, remoteAddr string) err
 		return fmt.Errorf("session not found: %s", data.SessionID)
 	}
 
+	// Store the stream for response routing (correlation ID: source->target)
+	correlationID := fmt.Sprintf("%s:%s", data.SourcePeerID, data.TargetPeerID)
+	rp.pendingMutex.Lock()
+	rp.pendingRequests[correlationID] = &PendingRelayRequest{
+		Stream:       stream,
+		RequestTime:  time.Now(),
+		SourcePeerID: data.SourcePeerID,
+		TargetPeerID: data.TargetPeerID,
+	}
+	rp.pendingMutex.Unlock()
+
+	rp.logger.Debug(fmt.Sprintf("Stored pending request %s for response routing", correlationID), "relay")
+
 	// Determine if this is coordination (free) or relay (paid) traffic
-	isCoordination := data.MessageType == "hole_punch"
+	// Coordination includes: hole_punch, service_search, service_response
+	isCoordination := data.MessageType == "hole_punch" ||
+		data.MessageType == "service_search" ||
+		data.MessageType == "service_response"
+
 	if isCoordination && rp.freeCoordination {
-		// Free hole punching coordination
+		// Free coordination traffic (hole punching, service discovery)
 		if data.PayloadSize > rp.maxCoordMsgSize {
 			return fmt.Errorf("coordination message too large: %d bytes (max: %d)",
 				data.PayloadSize, rp.maxCoordMsgSize)
 		}
 
-		rp.logger.Debug(fmt.Sprintf("Forwarding coordination message: %s -> %s (%d bytes)",
-			data.SourceNodeID, data.TargetNodeID, data.PayloadSize), "relay")
+		rp.logger.Debug(fmt.Sprintf("Forwarding coordination message (%s): %s -> %s (%d bytes)",
+			data.MessageType, data.SourcePeerID, data.TargetPeerID, data.PayloadSize), "relay")
 	} else {
-		// Paid relay traffic
+		// Paid relay traffic (bulk data transfer)
 		rp.logger.Debug(fmt.Sprintf("Forwarding relay data: %s -> %s (%d bytes, billable)",
-			data.SourceNodeID, data.TargetNodeID, data.PayloadSize), "relay")
+			data.SourcePeerID, data.TargetPeerID, data.PayloadSize), "relay")
 	}
 
 	// Update traffic counters in-memory
@@ -228,7 +305,7 @@ func (rp *RelayPeer) HandleRelayForward(msg *QUICMessage, remoteAddr string) err
 
 		rp.dbManager.Relay.RecordTraffic(
 			data.SessionID,
-			data.SourceNodeID,
+			data.SourcePeerID,
 			session.RelayNodeID,
 			trafficType,
 			data.PayloadSize,
@@ -238,8 +315,76 @@ func (rp *RelayPeer) HandleRelayForward(msg *QUICMessage, remoteAddr string) err
 		)
 	}
 
-	// Forward to target (implementation depends on routing logic)
-	// This will be implemented in the message forwarding section
+	// For service search requests, inject the source peer ID into the payload
+	// so the target peer knows who to respond to
+	forwardPayload := data.Payload
+	if data.MessageType == "service_search" {
+		// Unmarshal the service search request
+		msg, err := UnmarshalQUICMessage(data.Payload)
+		if err == nil && msg.Type == MessageTypeServiceRequest {
+			// Inject source peer ID into the request
+			var request ServiceSearchRequest
+			if err := msg.GetDataAs(&request); err == nil {
+				request.SourcePeerID = data.SourcePeerID
+				// Update the message data
+				msg.Data = request
+				// Re-marshal the message
+				if modifiedPayload, err := msg.Marshal(); err == nil {
+					forwardPayload = modifiedPayload
+					rp.logger.Debug(fmt.Sprintf("Injected source peer ID %s into service search request", data.SourcePeerID[:8]), "relay")
+				}
+			}
+		}
+	}
+
+	// Forward the payload to the target client
+	if err := rp.forwardDataToTarget(data.TargetPeerID, forwardPayload); err != nil {
+		rp.logger.Error(fmt.Sprintf("Failed to forward to target %s: %v", data.TargetPeerID, err), "relay")
+		return fmt.Errorf("failed to forward to target: %v", err)
+	}
+
+	// Update egress counter
+	session.mutex.Lock()
+	session.EgressBytes += data.PayloadSize
+	session.mutex.Unlock()
+
+	return nil
+}
+
+// handleRelayResponse processes a relay forward response from target back to requester
+func (rp *RelayPeer) handleRelayResponse(data *RelayForwardData, responseStream *quic.Stream) error {
+	// Look up the pending request (correlation ID: target->source, reversed from request)
+	correlationID := fmt.Sprintf("%s:%s", data.TargetPeerID, data.SourcePeerID)
+
+	rp.pendingMutex.Lock()
+	pending, exists := rp.pendingRequests[correlationID]
+	if exists {
+		delete(rp.pendingRequests, correlationID)
+	}
+	rp.pendingMutex.Unlock()
+
+	if !exists {
+		rp.logger.Warn(fmt.Sprintf("No pending request found for response %s (may have timed out)", correlationID), "relay")
+		return fmt.Errorf("no pending request for correlation ID: %s", correlationID)
+	}
+
+	rp.logger.Debug(fmt.Sprintf("Found pending request %s, routing response back to requester", correlationID), "relay")
+
+	// Wrap the response in a RelayForward message to send back to requester
+	forwardMsg := NewQUICMessage(MessageTypeRelayForward, data)
+	forwardBytes, err := forwardMsg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal response forward: %v", err)
+	}
+
+	// Write response to the original requester's stream
+	if _, err := (*pending.Stream).Write(forwardBytes); err != nil {
+		rp.logger.Error(fmt.Sprintf("Failed to write response to requester stream: %v", err), "relay")
+		return fmt.Errorf("failed to write response to requester: %v", err)
+	}
+
+	rp.logger.Info(fmt.Sprintf("Successfully routed %s response from %s back to %s (%d bytes)",
+		data.MessageType, data.SourcePeerID[:8], data.TargetPeerID[:8], data.PayloadSize), "relay")
 
 	return nil
 }
@@ -261,7 +406,7 @@ func (rp *RelayPeer) HandleRelayData(msg *QUICMessage, remoteAddr string) error 
 	}
 
 	rp.logger.Debug(fmt.Sprintf("Relay data: %s -> %s (%d bytes, seq: %d)",
-		data.SourceNodeID, data.TargetNodeID, data.DataSize, data.SequenceNum), "relay")
+		data.SourcePeerID, data.TargetPeerID, data.DataSize, data.SequenceNum), "relay")
 
 	// Update traffic counters in-memory (this is paid traffic)
 	session.mutex.Lock()
@@ -273,7 +418,7 @@ func (rp *RelayPeer) HandleRelayData(msg *QUICMessage, remoteAddr string) error 
 	if rp.dbManager != nil && rp.dbManager.Relay != nil {
 		rp.dbManager.Relay.RecordTraffic(
 			data.SessionID,
-			data.SourceNodeID,
+			data.SourcePeerID,
 			session.RelayNodeID,
 			"relay",
 			data.DataSize,
@@ -284,7 +429,7 @@ func (rp *RelayPeer) HandleRelayData(msg *QUICMessage, remoteAddr string) error 
 	}
 
 	// Forward to target
-	return rp.forwardDataToTarget(data.TargetNodeID, data.Data)
+	return rp.forwardDataToTarget(data.TargetPeerID, data.Data)
 }
 
 // HandleRelayHolePunch processes hole punching coordination
@@ -295,7 +440,7 @@ func (rp *RelayPeer) HandleRelayHolePunch(msg *QUICMessage, remoteAddr string) e
 	}
 
 	rp.logger.Info(fmt.Sprintf("Hole punch coordination: %s <-> %s (strategy: %s)",
-		data.InitiatorNodeID, data.TargetNodeID, data.Strategy), "relay")
+		data.InitiatorPeerID, data.TargetPeerID, data.Strategy), "relay")
 
 	// Validate session
 	rp.sessionsMutex.RLock()
@@ -318,7 +463,7 @@ func (rp *RelayPeer) HandleRelayHolePunch(msg *QUICMessage, remoteAddr string) e
 	if rp.dbManager != nil && rp.dbManager.Relay != nil {
 		rp.dbManager.Relay.RecordTraffic(
 			data.SessionID,
-			data.InitiatorNodeID,
+			data.InitiatorPeerID,
 			session.RelayNodeID,
 			"coordination",
 			messageSize,
@@ -423,6 +568,11 @@ func (rp *RelayPeer) monitorSession(session *RelaySession) {
 	ticker := time.NewTicker(session.KeepaliveInterval)
 	defer ticker.Stop()
 
+	// More lenient timeout: 4x keepalive interval instead of 2x
+	// This accounts for network hiccups, QUIC stream delays, and missed keepalives
+	// With default 30s interval: timeout after 120s (2 minutes) instead of 60s
+	const timeoutMultiplier = 4
+
 	for {
 		select {
 		case <-rp.ctx.Done():
@@ -430,16 +580,25 @@ func (rp *RelayPeer) monitorSession(session *RelaySession) {
 		case <-ticker.C:
 			session.mutex.RLock()
 			lastKeepalive := session.LastKeepalive
+			timeSinceLastKeepalive := time.Since(lastKeepalive)
 			session.mutex.RUnlock()
 
+			timeoutThreshold := session.KeepaliveInterval * timeoutMultiplier
+
 			// Check if session is still alive
-			if time.Since(lastKeepalive) > session.KeepaliveInterval*2 {
-				rp.logger.Warn(fmt.Sprintf("Session %s timed out (client: %s)",
-					session.SessionID, session.ClientNodeID), "relay")
+			if timeSinceLastKeepalive > timeoutThreshold {
+				rp.logger.Warn(fmt.Sprintf("Session %s timed out after %v without keepalive (client: %s, threshold: %v)",
+					session.SessionID, timeSinceLastKeepalive, session.ClientNodeID, timeoutThreshold), "relay")
 
 				// Terminate session
 				rp.terminateSession(session.SessionID, "keepalive timeout")
 				return
+			}
+
+			// Log warning if approaching timeout (at 3x interval)
+			if timeSinceLastKeepalive > session.KeepaliveInterval*3 {
+				rp.logger.Debug(fmt.Sprintf("Session %s approaching timeout: %v since last keepalive (client: %s, will timeout at %v)",
+					session.SessionID, timeSinceLastKeepalive, session.ClientNodeID, timeoutThreshold), "relay")
 			}
 		}
 	}
@@ -476,18 +635,73 @@ func (rp *RelayPeer) terminateSession(sessionID, reason string) {
 	rp.logger.Info(fmt.Sprintf("Terminated session %s: %s", sessionID, reason), "relay")
 }
 
-// forwardDataToTarget forwards data to target client (stub for now)
-func (rp *RelayPeer) forwardDataToTarget(targetNodeID string, data []byte) error {
-	// This will be implemented in the message forwarding section
-	// For now, just log
-	rp.logger.Debug(fmt.Sprintf("Forward data to %s (%d bytes)", targetNodeID, len(data)), "relay")
+// forwardDataToTarget forwards data to target client
+// targetPeerID is the persistent Ed25519-based peer ID (not the DHT node ID)
+func (rp *RelayPeer) forwardDataToTarget(targetPeerID string, data []byte) error {
+	// Look up the target client session by Peer ID
+	rp.clientsMutex.RLock()
+	session, exists := rp.registeredClients[targetPeerID]
+	rp.clientsMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("target client not registered: %s", targetPeerID)
+	}
+
+	// Get the pre-opened receive stream
+	session.mutex.RLock()
+	stream := session.ReceiveStream
+	session.mutex.RUnlock()
+
+	if stream == nil {
+		return fmt.Errorf("no receive stream available for target %s (NAT peer must open receive stream after registration)", targetPeerID)
+	}
+
+	// Write length prefix (4 bytes, big-endian) so receiver knows message boundaries
+	lengthPrefix := make([]byte, 4)
+	lengthPrefix[0] = byte(len(data) >> 24)
+	lengthPrefix[1] = byte(len(data) >> 16)
+	lengthPrefix[2] = byte(len(data) >> 8)
+	lengthPrefix[3] = byte(len(data))
+
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+
+	// Write length prefix
+	if _, err := (*stream).Write(lengthPrefix); err != nil {
+		// Stream may be closed, clear it from session
+		session.ReceiveStream = nil
+		return fmt.Errorf("failed to write length prefix to target %s: %v", targetPeerID, err)
+	}
+
+	// Write the data to the stream
+	if _, err := (*stream).Write(data); err != nil {
+		// Stream may be closed, clear it from session
+		session.ReceiveStream = nil
+		return fmt.Errorf("failed to write data to target %s: %v", targetPeerID, err)
+	}
+
+	// Update egress bytes for billing
+	session.EgressBytes += int64(len(data))
+
+	rp.logger.Debug(fmt.Sprintf("Forwarded %d bytes to %s via receive stream", len(data), targetPeerID), "relay")
 	return nil
 }
 
-// forwardHolePunchToTarget forwards hole punch coordination to target (stub for now)
+// forwardHolePunchToTarget forwards hole punch coordination to target
 func (rp *RelayPeer) forwardHolePunchToTarget(data *RelayHolePunchData) error {
-	// This will be implemented in the message forwarding section
-	rp.logger.Debug(fmt.Sprintf("Forward hole punch coordination to %s", data.TargetNodeID), "relay")
+	// Create a QUIC message containing the hole punch data
+	msg := NewQUICMessage(MessageTypeRelayHolePunch, data)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal hole punch message: %v", err)
+	}
+
+	// Forward the marshaled message to the target
+	if err := rp.forwardDataToTarget(data.TargetPeerID, msgBytes); err != nil {
+		return fmt.Errorf("failed to forward hole punch to target: %v", err)
+	}
+
+	rp.logger.Debug(fmt.Sprintf("Forwarded hole punch coordination to %s", data.TargetPeerID), "relay")
 	return nil
 }
 

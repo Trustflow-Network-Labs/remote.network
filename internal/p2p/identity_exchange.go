@@ -68,11 +68,11 @@ func (ie *IdentityExchanger) SetMetadataFetcher(fetcher *MetadataFetcher) {
 // PerformHandshake performs the complete identity + known peers exchange
 // This is called immediately after QUIC connection is established
 //
-func (ie *IdentityExchanger) PerformHandshake(stream *quic.Stream, topic string) (*database.KnownPeer, error) {
+func (ie *IdentityExchanger) PerformHandshake(stream *quic.Stream, topic string, remoteAddr string) (*database.KnownPeer, error) {
 	ie.logger.Debug("Starting Phase 3 handshake (identity + peers exchange)", "identity-exchange")
 
 	// Step 1: Exchange identities
-	remotePeer, err := ie.exchangeIdentities(stream, topic) //nolint:copylocks
+	remotePeer, err := ie.exchangeIdentities(stream, topic, remoteAddr) //nolint:copylocks
 	if err != nil {
 		return nil, fmt.Errorf("identity exchange failed: %v", err)
 	}
@@ -89,7 +89,7 @@ func (ie *IdentityExchanger) PerformHandshake(stream *quic.Stream, topic string)
 	return remotePeer, nil
 }
 
-func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic string) (*database.KnownPeer, error) {
+func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic string, remoteAddr string) (*database.KnownPeer, error) {
 	// Send our identity
 	ourIdentity := CreateIdentityExchange(
 		ie.keyPair.PeerID(),
@@ -189,6 +189,30 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 			ie.logger.Debug(fmt.Sprintf("Could not fetch service counts from DHT for peer %s: %v (will be updated later by PeerValidator)",
 				remoteIdentity.PeerID[:8], err), "identity-exchange")
 		}
+	}
+
+	// Register store node with MetadataFetcher for priority DHT queries
+	if remoteIdentity.IsStore && ie.metadataFetcher != nil {
+		// Extract IP from remoteAddr and construct DHT address
+		// remoteAddr format is "IP:PORT", we need "IP:DHT_PORT"
+		host := remoteAddr
+		if lastColon := len(remoteAddr) - 1; lastColon > 0 {
+			for i := len(remoteAddr) - 1; i >= 0; i-- {
+				if remoteAddr[i] == ':' {
+					host = remoteAddr[:i]
+					break
+				}
+			}
+		}
+
+		// Get DHT port from config
+		dhtPort := ie.config.GetConfigInt("dht_port", 30609, 1024, 65535)
+		peerDHTAddr := fmt.Sprintf("%s:%d", host, dhtPort)
+
+		ie.logger.Info(fmt.Sprintf("Registering DHT store node for priority queries (peer_id: %s, dht_addr: %s)",
+			remoteIdentity.PeerID[:8], peerDHTAddr), "identity-exchange")
+
+		ie.metadataFetcher.AddStoreNode(peerDHTAddr)
 	}
 
 	return knownPeer, nil

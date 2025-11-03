@@ -454,35 +454,52 @@ func (b *BEP44Manager) GetMutableWithPriority(publicKey ed25519.PublicKey, prior
 		}
 	}
 
-	// Phase 2: Fall back to general DHT bootstrap nodes
-	b.logger.Debug("Phase 2: No data from priority nodes, querying general DHT bootstrap nodes", "bep44")
+	// Phase 2: Fall back to general DHT bootstrap nodes with retry logic
+	b.logger.Debug("Phase 2: No data from priority nodes, querying general DHT bootstrap nodes with retry", "bep44")
 
 	bootstrapAddrs, err := getBootstrapAddrs(b.config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bootstrap addresses: %v", err)
 	}
 
-	for _, addr := range bootstrapAddrs {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		data, err := b.sendGetQuery(ctx, addr, storageKey, publicKey)
-		cancel()
+	// Retry logic for bootstrap queries (useful during initial DHT join)
+	const maxRetries = 2
+	const retryDelay = 2 * time.Second
 
-		if err != nil {
-			b.logger.Debug(fmt.Sprintf("Failed to get from bootstrap node %s: %v", addr.String(), err), "bep44")
-			continue
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			b.logger.Debug(fmt.Sprintf("Bootstrap query retry attempt %d/%d after %v delay", attempt, maxRetries, retryDelay), "bep44")
+			time.Sleep(retryDelay)
 		}
 
-		// Keep the data with the highest sequence number
-		if data.Sequence > latestSeq {
-			latestSeq = data.Sequence
-			latestData = data
+		for _, addr := range bootstrapAddrs {
+			// Longer timeout for bootstrap nodes during initial join (15s instead of 10s)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			data, err := b.sendGetQuery(ctx, addr, storageKey, publicKey)
+			cancel()
+
+			if err != nil {
+				b.logger.Debug(fmt.Sprintf("Failed to get from bootstrap node %s (attempt %d/%d): %v", addr.String(), attempt+1, maxRetries+1, err), "bep44")
+				continue
+			}
+
+			// Keep the data with the highest sequence number
+			if data.Sequence > latestSeq {
+				latestSeq = data.Sequence
+				latestData = data
+			}
+
+			b.logger.Debug(fmt.Sprintf("Received mutable data from %s (seq: %d, attempt: %d)", addr.String(), data.Sequence, attempt+1), "bep44")
 		}
 
-		b.logger.Debug(fmt.Sprintf("Received mutable data from %s (seq: %d)", addr.String(), data.Sequence), "bep44")
+		// If we found data, break retry loop
+		if latestData != nil {
+			break
+		}
 	}
 
 	if latestData == nil {
-		return nil, fmt.Errorf("no mutable data found for key %x", storageKey)
+		return nil, fmt.Errorf("no mutable data found for key %x after %d attempts", storageKey, maxRetries+1)
 	}
 
 	// Verify signature

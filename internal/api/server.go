@@ -84,7 +84,14 @@ func NewAPIServer(
 
 	// Initialize WebSocket hub (use separate logrus logger for WebSocket)
 	wsLogger := logrus.New()
-	wsLogger.SetLevel(logrus.InfoLevel)
+	// Use configured log level instead of hardcoded InfoLevel
+	logLevelStr := config.GetConfigWithDefault("log_level", "info")
+	logLevel, err := logrus.ParseLevel(logLevelStr)
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Invalid log level '%s', defaulting to 'info'", logLevelStr), "server")
+		logLevel = logrus.InfoLevel
+	}
+	wsLogger.SetLevel(logLevel)
 	wsLogger.SetFormatter(&logrus.JSONFormatter{})
 	// Write WebSocket logs to the main log file instead of CLI
 	wsLogger.SetOutput(logger.File)
@@ -127,6 +134,11 @@ func NewAPIServer(
 			logger.Info(fmt.Sprintf("File processing completed for service %d", serviceID), "api")
 		}
 	})
+
+	// Initialize service search handler for remote service discovery
+	serviceSearchHandler := ws.NewServiceSearchHandler(wsLogger, dbManager, peerManager.GetQUIC(), peerManager.GetMetadataQuery(), peerManager.GetDHT(), peerManager.GetPeerID())
+	wsHub.SetServiceSearchHandler(serviceSearchHandler)
+	logger.Info("Service search handler initialized for remote service discovery", "api")
 
 	return &APIServer{
 		ctx:              ctx,

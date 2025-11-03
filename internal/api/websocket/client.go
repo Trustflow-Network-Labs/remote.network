@@ -193,6 +193,14 @@ func (c *Client) handleIncomingMessage(msg *Message) {
 			}
 		}
 
+	case MessageTypeServiceSearchRequest:
+		// Handle service search request
+		if c.hub.serviceSearchHandler != nil {
+			if err := c.hub.serviceSearchHandler.HandleServiceSearchRequest(c, msg.Payload); err != nil {
+				c.logger.WithError(err).Error("Failed to handle service search request")
+			}
+		}
+
 	default:
 		c.logger.WithField("type", msg.Type).Debug("Received message from client")
 		// Currently, we don't handle other message types from client

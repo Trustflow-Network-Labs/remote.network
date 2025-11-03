@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -22,14 +23,22 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
+// ConnectionInfo stores metadata about a QUIC connection
+type ConnectionInfo struct {
+	Conn       *quic.Conn
+	PeerID     string // Authenticated peer ID from identity exchange
+	RemoteAddr string // Remote address (IP:Port)
+}
+
 type QUICPeer struct {
-	config      *utils.ConfigManager
-	logger      *utils.LogsManager
-	ctx         context.Context
-	cancel      context.CancelFunc
-	listener    *quic.Listener
-	connections map[string]*quic.Conn
-	connMutex   sync.RWMutex
+	config          *utils.ConfigManager
+	logger          *utils.LogsManager
+	ctx             context.Context
+	cancel          context.CancelFunc
+	listener        *quic.Listener
+	connections     map[string]*ConnectionInfo // remote_addr → connection info
+	peerConnections map[string]string          // peer_id → remote_addr
+	connMutex       sync.RWMutex
 	tlsConfig   *tls.Config
 	port         int
 	// Database manager for peer metadata
@@ -42,6 +51,8 @@ type QUICPeer struct {
 	holePuncher *HolePuncher
 	// Identity exchanger for Phase 3 identity + known peers exchange
 	identityExchanger *IdentityExchanger
+	// Service query handler for service discovery
+	serviceQueryHandler *ServiceQueryHandler
 	// Callback for relay peer discovery
 	onRelayDiscovered func(*database.PeerMetadata)
 	// Callback for connection failures
@@ -61,13 +72,14 @@ func NewQUICPeer(config *utils.ConfigManager, logger *utils.LogsManager, paths *
 	}
 
 	q := &QUICPeer{
-		config:      config,
-		logger:      logger,
-		ctx:         ctx,
-		cancel:      cancel,
-		connections: make(map[string]*quic.Conn),
-		tlsConfig:   tlsConfig,
-		port:        port,
+		config:          config,
+		logger:          logger,
+		ctx:             ctx,
+		cancel:          cancel,
+		connections:     make(map[string]*ConnectionInfo),
+		peerConnections: make(map[string]string),
+		tlsConfig:       tlsConfig,
+		port:            port,
 	}
 
 	// Configure mutual TLS (mTLS) authentication
@@ -333,8 +345,8 @@ func (q *QUICPeer) Start() error {
 	listenAddr := q.config.GetConfigWithDefault("quic_listen_addr", "0.0.0.0")
 	addr := fmt.Sprintf("%s:%d", listenAddr, q.port)
 
-	idleTimeout := q.config.GetConfigDuration("quic_connection_timeout", 5*time.Minute)
-	keepAlivePeriod := q.config.GetConfigDuration("quic_keepalive_period", 15*time.Second)
+	idleTimeout := q.config.GetConfigDuration("quic_connection_timeout", 30*time.Minute)
+	keepAlivePeriod := q.config.GetConfigDuration("quic_keepalive_period", 10*time.Second)
 
 	q.logger.Info(fmt.Sprintf("Starting QUIC peer on %s (MaxIdleTimeout=%v, KeepAlivePeriod=%v)", addr, idleTimeout, keepAlivePeriod), "quic")
 
@@ -360,6 +372,11 @@ func (q *QUICPeer) SetIdentityExchanger(exchanger *IdentityExchanger) {
 	q.identityExchanger = exchanger
 }
 
+// SetServiceQueryHandler sets the service query handler for this QUIC peer
+func (q *QUICPeer) SetServiceQueryHandler(handler *ServiceQueryHandler) {
+	q.serviceQueryHandler = handler
+}
+
 func (q *QUICPeer) acceptConnections() {
 	for {
 		select {
@@ -379,7 +396,12 @@ func (q *QUICPeer) acceptConnections() {
 			q.logger.Info(fmt.Sprintf("Accepted QUIC connection from %s", remoteAddr), "quic")
 
 			q.connMutex.Lock()
-			q.connections[remoteAddr] = conn
+			// Store connection temporarily without peer ID (will be updated after identity exchange)
+			q.connections[remoteAddr] = &ConnectionInfo{
+				Conn:       conn,
+				PeerID:     "", // Will be set during identity exchange
+				RemoteAddr: remoteAddr,
+			}
 			q.connMutex.Unlock()
 
 			// Handle connection in goroutine
@@ -391,6 +413,10 @@ func (q *QUICPeer) acceptConnections() {
 func (q *QUICPeer) handleConnection(conn *quic.Conn, remoteAddr string) {
 	defer func() {
 		q.connMutex.Lock()
+		// Remove peer connection mapping if it exists
+		if connInfo, exists := q.connections[remoteAddr]; exists && connInfo.PeerID != "" {
+			delete(q.peerConnections, connInfo.PeerID)
+		}
 		delete(q.connections, remoteAddr)
 		q.connMutex.Unlock()
 
@@ -409,7 +435,7 @@ func (q *QUICPeer) handleConnection(conn *quic.Conn, remoteAddr string) {
 		// Perform identity handshake
 		// Note: We don't know the topic yet, will use default or extract from identity exchange
 		// Pass pointer as quic.Stream interface (pointer implements interface)
-		remotePeer, err := q.identityExchanger.PerformHandshake(streamPtr, "remote-network-mesh")
+		remotePeer, err := q.identityExchanger.PerformHandshake(streamPtr, "remote-network-mesh", remoteAddr)
 		streamPtr.Close()
 
 		if err != nil {
@@ -420,6 +446,14 @@ func (q *QUICPeer) handleConnection(conn *quic.Conn, remoteAddr string) {
 
 		q.logger.Info(fmt.Sprintf("Server-side identity exchange complete with %s (peer_id: %s, public_key stored)",
 			remoteAddr, remotePeer.PeerID[:8]), "quic")
+
+		// Update connection info with peer ID
+		q.connMutex.Lock()
+		if connInfo, exists := q.connections[remoteAddr]; exists {
+			connInfo.PeerID = remotePeer.PeerID
+			q.peerConnections[remotePeer.PeerID] = remoteAddr
+		}
+		q.connMutex.Unlock()
 	} else {
 		q.logger.Warn(fmt.Sprintf("Identity exchanger not set, skipping identity exchange for %s", remoteAddr), "quic")
 	}
@@ -436,10 +470,20 @@ func (q *QUICPeer) handleConnection(conn *quic.Conn, remoteAddr string) {
 			stream, err := conn.AcceptStream(q.ctx)
 			if err != nil {
 				if q.ctx.Err() != nil {
+					// Context cancelled, shutting down gracefully
 					return
 				}
-				q.logger.Error(fmt.Sprintf("Failed to accept stream from %s: %v", remoteAddr, err), "quic")
-				return
+				// Check if connection is closed
+				select {
+				case <-conn.Context().Done():
+					// Connection closed, exit handler
+					q.logger.Debug(fmt.Sprintf("Connection %s closed, stopping stream handler", remoteAddr), "quic")
+					return
+				default:
+					// Temporary error, log and continue accepting streams
+					q.logger.Warn(fmt.Sprintf("Temporary error accepting stream from %s: %v (continuing)", remoteAddr, err), "quic")
+					continue
+				}
 			}
 
 			go q.handleStream(stream, remoteAddr)
@@ -485,18 +529,39 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		// Peer announce removed in DHT-only architecture
 		q.logger.Warn(fmt.Sprintf("Received legacy peer_announce from %s (no longer supported)", remoteAddr), "quic")
 		// No response needed
+	case MessageTypeServiceRequest:
+		// Service discovery query
+		if q.serviceQueryHandler != nil {
+			response = q.serviceQueryHandler.HandleServiceSearchRequest(msg, remoteAddr)
+		} else {
+			q.logger.Warn(fmt.Sprintf("Received service_request from %s but service query handler not initialized", remoteAddr), "quic")
+			response = CreateServiceSearchResponse(nil, "service discovery not available")
+		}
 	case MessageTypePing:
 		response = q.handlePing(msg, remoteAddr)
 	case MessageTypeEcho:
 		response = q.handleEcho(msg, remoteAddr)
 	case MessageTypeRelayRegister:
 		response = q.handleRelayRegister(msg, remoteAddr)
+	case MessageTypeRelayReceiveStreamReady:
+		// Special handling: NAT peer is setting up receive stream for relay forwarding
+		// Keep stream open so relay can forward messages to this peer
+		if q.relayPeer != nil {
+			if err := q.relayPeer.HandleRelayReceiveStreamReady(msg, stream); err != nil {
+				q.logger.Error(fmt.Sprintf("Failed to handle relay receive stream setup: %v", err), "quic")
+			}
+		} else {
+			q.logger.Warn("Received relay_receive_stream_ready but relay mode is not enabled", "quic")
+		}
+		return // Don't close stream - it will be used for forwarding messages
 	case MessageTypeRelayData:
-		q.handleRelayData(msg, remoteAddr)
-		// Relay data is forwarded, no response to sender
+		q.handleRelayData(msg, remoteAddr, stream)
+		// Relay data is forwarded, stream managed by relay handler
+		return
 	case MessageTypeRelayForward:
-		q.handleRelayData(msg, remoteAddr)
-		// Relay forward is handled same as relay_data
+		q.handleRelayData(msg, remoteAddr, stream)
+		// Relay forward keeps stream open for response routing
+		return
 	case MessageTypeRelaySessionQuery:
 		response = q.handleRelaySessionQuery(msg, remoteAddr)
 	case MessageTypeHolePunchConnect, MessageTypeHolePunchSync:
@@ -520,92 +585,31 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		responseData, err := response.Marshal()
 		if err != nil {
 			q.logger.Error(fmt.Sprintf("Failed to marshal response to %s: %v", remoteAddr, err), "quic")
+			stream.Close()
 			return
 		}
 
 		_, err = stream.Write(responseData)
 		if err != nil {
 			q.logger.Error(fmt.Sprintf("Failed to write response to %s: %v", remoteAddr, err), "quic")
-		} else {
-			q.logger.Debug(fmt.Sprintf("Sent %s response to %s", response.Type, remoteAddr), "quic")
+			stream.Close()
+			return
 		}
+
+		q.logger.Debug(fmt.Sprintf("Sent %s response to %s", response.Type, remoteAddr), "quic")
+
+		// Close stream to flush write buffer and signal response complete (FIN bit)
+		// This is required by quic-go to ensure data is actually transmitted
+		if err := stream.Close(); err != nil {
+			q.logger.Warn(fmt.Sprintf("Failed to close stream to %s: %v", remoteAddr, err), "quic")
+		}
+	} else {
+		// No response to send, close stream anyway to free resources
+		stream.Close()
 	}
 }
 
-// handleMetadataRequest processes metadata requests and returns peer metadata
-// generateOurMetadata creates metadata for our own node
-func (q *QUICPeer) generateOurMetadata(nodeID, topic string) (*database.PeerMetadata, error) {
-	// Get our network information
-	nodeTypeManager := utils.NewNodeTypeManager()
-	externalIP, _ := nodeTypeManager.GetExternalIP()
-	privateIP, _ := nodeTypeManager.GetLocalIP()
-	isPublic, _ := nodeTypeManager.IsPublicNode()
-
-	// Determine node type
-	nodeType := "private"
-	if isPublic {
-		nodeType = "public"
-	}
-
-	// Create network info
-	networkInfo := database.NetworkInfo{
-		PublicIP:    externalIP,
-		PublicPort:  q.port,
-		PrivateIP:   privateIP,
-		PrivatePort: q.port,
-		NodeType:    nodeType,
-		Protocols: []database.Protocol{
-			{Name: "quic", Port: q.port},
-		},
-	}
-
-	// Add relay service information if this node is in relay mode
-	if q.relayPeer != nil && q.relayPeer.IsRelayMode() {
-		q.logger.Debug(fmt.Sprintf("Setting IsRelay=true in metadata for topic %s", topic), "quic")
-		networkInfo.IsRelay = true
-		networkInfo.RelayEndpoint = fmt.Sprintf("%s:%d", externalIP, q.port)
-
-		// Get relay peer stats to populate pricing and capacity
-		relayStats := q.relayPeer.GetStats()
-		if pricing, ok := relayStats["pricing_per_gb"].(float64); ok {
-			networkInfo.RelayPricing = int(pricing * 1000000.0) // Convert to micro-units
-		}
-		if capacity, ok := relayStats["max_connections"].(int); ok {
-			networkInfo.RelayCapacity = capacity
-		}
-
-		// Get reputation score from database if available
-		if q.dbManager != nil && q.dbManager.Relay != nil {
-			stats := q.dbManager.Relay.GetStats()
-			// Simple reputation calculation: starts at 0.5, increases with successful sessions
-			if activeSessions, ok := stats["active_sessions"].(int); ok {
-				reputationFloat := 0.5 + float64(activeSessions)*0.01
-				if reputationFloat > 1.0 {
-					reputationFloat = 1.0
-				}
-				networkInfo.ReputationScore = int(reputationFloat * 10000.0) // Convert to basis points (0-10000)
-			}
-		}
-	}
-
-	// Create metadata for our node
-	metadata := &database.PeerMetadata{
-		NodeID:       nodeID,
-		Topic:        topic,
-		Version:      1,
-		Timestamp:    time.Now(),
-		NetworkInfo:  networkInfo,
-		Capabilities: []string{"metadata_exchange", "ping_pong"},
-		FilesCount:   0, // Will be populated by actual service counts
-		AppsCount:    0, // Will be populated by actual service counts
-		Extensions:   make(map[string]interface{}),
-		LastSeen:     time.Now(),
-		Source:       "quic",
-	}
-
-	return metadata, nil
-}
-
+// Note: handleMetadataRequest and generateOurMetadata removed - DHT-only architecture
 // Note: storePeersFromExchange removed in Phase 5 - peer exchange now handled by identity_exchange.go
 
 // handlePing processes ping messages and returns pong responses
@@ -649,9 +653,9 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 
 	// Check if already connected
 	q.connMutex.RLock()
-	if conn, exists := q.connections[addr]; exists {
+	if connInfo, exists := q.connections[addr]; exists {
 		q.connMutex.RUnlock()
-		return conn, nil
+		return connInfo.Conn, nil
 	}
 	q.connMutex.RUnlock()
 
@@ -666,17 +670,30 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 		MinVersion:            tls.VersionTLS13,
 	}
 
-	idleTimeout := q.config.GetConfigDuration("quic_connection_timeout", 5*time.Minute)
-	keepAlivePeriod := q.config.GetConfigDuration("quic_keepalive_period", 15*time.Second)
+	idleTimeout := q.config.GetConfigDuration("quic_connection_timeout", 30*time.Minute)
+	keepAlivePeriod := q.config.GetConfigDuration("quic_keepalive_period", 10*time.Second)
 
-	q.logger.Debug(fmt.Sprintf("Dialing %s with QUIC config: MaxIdleTimeout=%v, KeepAlivePeriod=%v", addr, idleTimeout, keepAlivePeriod), "quic")
+	// Get dial timeout for connection establishment (prevents hanging on unreachable peers)
+	dialTimeout := q.config.GetConfigDuration("quic_dial_timeout", 10*time.Second)
 
-	conn, err := quic.DialAddr(q.ctx, addr, tlsConfig, &quic.Config{
+	q.logger.Debug(fmt.Sprintf("Dialing %s with QUIC config: DialTimeout=%v, MaxIdleTimeout=%v, KeepAlivePeriod=%v", addr, dialTimeout, idleTimeout, keepAlivePeriod), "quic")
+
+	// Create context with timeout for connection establishment
+	// This prevents blocking for 45+ seconds on unreachable peers
+	dialCtx, dialCancel := context.WithTimeout(q.ctx, dialTimeout)
+	defer dialCancel()
+
+	conn, err := quic.DialAddr(dialCtx, addr, tlsConfig, &quic.Config{
 		MaxIdleTimeout:  idleTimeout,
 		KeepAlivePeriod: keepAlivePeriod,
 	})
 
 	if err != nil {
+		// Check if error was due to timeout
+		if dialCtx.Err() == context.DeadlineExceeded {
+			q.logger.Debug(fmt.Sprintf("Connection to %s timed out after %v (peer likely offline/unreachable)", addr, dialTimeout), "quic")
+		}
+
 		// Notify about connection failure if callback is set
 		if q.onConnectionFailure != nil {
 			go q.onConnectionFailure(addr)
@@ -697,7 +714,7 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 		}
 
 		// Use default topic for identity exchange (connection-level authentication)
-		remotePeer, err := q.identityExchanger.PerformHandshake(identityStream, "remote-network-mesh")
+		remotePeer, err := q.identityExchanger.PerformHandshake(identityStream, "remote-network-mesh", addr)
 		identityStream.Close()
 
 		if err != nil {
@@ -707,14 +724,28 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 
 		q.logger.Info(fmt.Sprintf("Connection to %s authenticated (peer_id: %s, public_key stored)",
 			addr, remotePeer.PeerID[:8]), "quic")
+
+		// Store authenticated connection with peer ID
+		q.connMutex.Lock()
+		q.connections[addr] = &ConnectionInfo{
+			Conn:       conn,
+			PeerID:     remotePeer.PeerID,
+			RemoteAddr: addr,
+		}
+		q.peerConnections[remotePeer.PeerID] = addr
+		q.connMutex.Unlock()
 	} else {
 		q.logger.Warn(fmt.Sprintf("Identity exchanger not set, connection to %s not authenticated", addr), "quic")
-	}
 
-	// Store authenticated connection
-	q.connMutex.Lock()
-	q.connections[addr] = conn
-	q.connMutex.Unlock()
+		// Store connection without peer ID (not authenticated)
+		q.connMutex.Lock()
+		q.connections[addr] = &ConnectionInfo{
+			Conn:       conn,
+			PeerID:     "",
+			RemoteAddr: addr,
+		}
+		q.connMutex.Unlock()
+	}
 
 	// Monitor connection
 	go q.monitorConnection(conn, addr)
@@ -726,6 +757,10 @@ func (q *QUICPeer) monitorConnection(conn *quic.Conn, addr string) {
 	<-conn.Context().Done()
 
 	q.connMutex.Lock()
+	// Remove peer connection mapping if it exists
+	if connInfo, exists := q.connections[addr]; exists && connInfo.PeerID != "" {
+		delete(q.peerConnections, connInfo.PeerID)
+	}
 	delete(q.connections, addr)
 	q.connMutex.Unlock()
 
@@ -798,6 +833,44 @@ func (q *QUICPeer) GetConnectionCount() int {
 	return len(q.connections)
 }
 
+// GetPeerIDByAddress returns the peer ID for a connection address
+func (q *QUICPeer) GetPeerIDByAddress(addr string) (string, bool) {
+	q.connMutex.RLock()
+	defer q.connMutex.RUnlock()
+
+	if connInfo, exists := q.connections[addr]; exists {
+		return connInfo.PeerID, connInfo.PeerID != ""
+	}
+	return "", false
+}
+
+// GetAddressByPeerID returns the connection address for a peer ID
+func (q *QUICPeer) GetAddressByPeerID(peerID string) (string, bool) {
+	q.connMutex.RLock()
+	defer q.connMutex.RUnlock()
+
+	addr, exists := q.peerConnections[peerID]
+	return addr, exists
+}
+
+// GetConnectionByPeerID returns the connection for a peer ID
+func (q *QUICPeer) GetConnectionByPeerID(peerID string) (*quic.Conn, error) {
+	q.connMutex.RLock()
+	defer q.connMutex.RUnlock()
+
+	addr, exists := q.peerConnections[peerID]
+	if !exists {
+		return nil, fmt.Errorf("no connection found for peer ID %s", peerID[:8])
+	}
+
+	connInfo, exists := q.connections[addr]
+	if !exists {
+		return nil, fmt.Errorf("connection metadata missing for peer ID %s", peerID[:8])
+	}
+
+	return connInfo.Conn, nil
+}
+
 // Ping sends a ping message to a peer and waits for pong response
 func (q *QUICPeer) Ping(addr string) error {
 	conn, err := q.ConnectToPeer(addr)
@@ -828,7 +901,8 @@ func (q *QUICPeer) Ping(addr string) error {
 	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buffer := make([]byte, 4096)
 	n, err := stream.Read(buffer)
-	if err != nil {
+	if err != nil && (err != io.EOF || n == 0) {
+		// Only fail if we got an error other than EOF, or EOF with no data
 		return fmt.Errorf("failed to read pong from %s: %v", addr, err)
 	}
 
@@ -876,7 +950,8 @@ func (q *QUICPeer) QueryRelayForSession(relayAddr string, clientNodeID string, q
 	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buffer := make([]byte, 4096)
 	n, err := stream.Read(buffer)
-	if err != nil {
+	if err != nil && (err != io.EOF || n == 0) {
+		// Only fail if we got an error other than EOF, or EOF with no data
 		return false, fmt.Errorf("failed to read session status from %s: %v", relayAddr, err)
 	}
 
@@ -912,7 +987,7 @@ func (q *QUICPeer) handleRelayRegister(msg *QUICMessage, remoteAddr string) *QUI
 
 	// Get connection for this remote address
 	q.connMutex.RLock()
-	conn, exists := q.connections[remoteAddr]
+	connInfo, exists := q.connections[remoteAddr]
 	q.connMutex.RUnlock()
 
 	if !exists {
@@ -921,11 +996,11 @@ func (q *QUICPeer) handleRelayRegister(msg *QUICMessage, remoteAddr string) *QUI
 	}
 
 	// Delegate to relay peer for registration
-	return q.relayPeer.HandleRelayRegister(msg, conn, remoteAddr)
+	return q.relayPeer.HandleRelayRegister(msg, connInfo.Conn, remoteAddr)
 }
 
 // handleRelayData processes relay data forwarding
-func (q *QUICPeer) handleRelayData(msg *QUICMessage, remoteAddr string) {
+func (q *QUICPeer) handleRelayData(msg *QUICMessage, remoteAddr string, stream *quic.Stream) {
 	// Only handle if we have a relay peer (we're in relay mode)
 	if q.relayPeer == nil {
 		q.logger.Warn(fmt.Sprintf("Received relay_data from %s but relay mode is not enabled", remoteAddr), "quic")
@@ -933,7 +1008,7 @@ func (q *QUICPeer) handleRelayData(msg *QUICMessage, remoteAddr string) {
 	}
 
 	// Delegate to relay peer - HandleRelayForward handles both relay_forward and relay_data
-	if err := q.relayPeer.HandleRelayForward(msg, remoteAddr); err != nil {
+	if err := q.relayPeer.HandleRelayForward(msg, remoteAddr, stream); err != nil {
 		q.logger.Error(fmt.Sprintf("Failed to handle relay data from %s: %v", remoteAddr, err), "quic")
 	}
 }
@@ -951,6 +1026,32 @@ func (q *QUICPeer) handleRelaySessionQuery(msg *QUICMessage, remoteAddr string) 
 	return q.relayPeer.HandleRelaySessionQuery(msg, remoteAddr)
 }
 
+// HandleRelayedMessage processes messages received via relay forwarding
+func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage) *QUICMessage {
+	q.logger.Debug(fmt.Sprintf("Handling relayed message: type=%s", msg.Type), "quic")
+
+	// Route based on message type
+	switch msg.Type {
+	case MessageTypeServiceRequest:
+		// Service search request forwarded via relay
+		if q.serviceQueryHandler != nil {
+			return q.serviceQueryHandler.HandleServiceSearchRequest(msg, "relayed")
+		}
+		q.logger.Warn("Received service_request via relay but handler not initialized", "quic")
+		return CreateServiceSearchResponse(nil, "service discovery not available")
+
+	case MessageTypeRelayHolePunch:
+		// Hole punch coordination via relay
+		// TODO: Route to hole puncher
+		q.logger.Warn("Hole punch via relay not yet implemented", "quic")
+		return nil
+
+	default:
+		q.logger.Warn(fmt.Sprintf("Unhandled relayed message type: %s", msg.Type), "quic")
+		return nil
+	}
+}
+
 // openStreamWithTimeout opens a QUIC stream with configurable timeout to prevent blocking
 func (q *QUICPeer) openStreamWithTimeout(conn *quic.Conn) (*quic.Stream, error) {
 	streamOpenTimeout := q.config.GetConfigDuration("quic_stream_open_timeout", 5*time.Second)
@@ -966,11 +1067,12 @@ func (q *QUICPeer) Stop() error {
 
 	// Close all connections
 	q.connMutex.Lock()
-	for addr, conn := range q.connections {
+	for addr, connInfo := range q.connections {
 		q.logger.Debug(fmt.Sprintf("Closing connection to %s", addr), "quic")
-		conn.CloseWithError(0, "shutting down")
+		connInfo.Conn.CloseWithError(0, "shutting down")
 	}
-	q.connections = make(map[string]*quic.Conn)
+	q.connections = make(map[string]*ConnectionInfo)
+	q.peerConnections = make(map[string]string)
 	q.connMutex.Unlock()
 
 	// Close listener

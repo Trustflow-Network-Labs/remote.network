@@ -11,8 +11,8 @@ enable_bep44_store = true
 # QUIC Configuration
 quic_port = 30906
 quic_listen_addr = 0.0.0.0
-quic_connection_timeout = 5m
-quic_keepalive_period = 15s
+quic_connection_timeout = 30m
+quic_keepalive_period = 10s
 quic_stream_open_timeout = 5s
 
 # Peer Discovery

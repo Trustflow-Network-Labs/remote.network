@@ -28,15 +28,16 @@ const (
 	MessageTypeServiceCatalogue MessageType = "service_catalogue"
 
 	// Relay system
-	MessageTypeRelayRegister      MessageType = "relay_register"
-	MessageTypeRelayAccept        MessageType = "relay_accept"
-	MessageTypeRelayReject        MessageType = "relay_reject"
-	MessageTypeRelayForward       MessageType = "relay_forward"
-	MessageTypeRelayData          MessageType = "relay_data"
-	MessageTypeRelayHolePunch     MessageType = "relay_hole_punch"
-	MessageTypeRelayDisconnect    MessageType = "relay_disconnect"
-	MessageTypeRelaySessionQuery  MessageType = "relay_session_query"
-	MessageTypeRelaySessionStatus MessageType = "relay_session_status"
+	MessageTypeRelayRegister           MessageType = "relay_register"
+	MessageTypeRelayAccept             MessageType = "relay_accept"
+	MessageTypeRelayReject             MessageType = "relay_reject"
+	MessageTypeRelayReceiveStreamReady MessageType = "relay_receive_stream_ready"
+	MessageTypeRelayForward            MessageType = "relay_forward"
+	MessageTypeRelayData               MessageType = "relay_data"
+	MessageTypeRelayHolePunch          MessageType = "relay_hole_punch"
+	MessageTypeRelayDisconnect         MessageType = "relay_disconnect"
+	MessageTypeRelaySessionQuery       MessageType = "relay_session_query"
+	MessageTypeRelaySessionStatus      MessageType = "relay_session_status"
 
 	// Hole Punching (DCUtR-style protocol)
 	MessageTypeHolePunchConnect MessageType = "hole_punch_connect"
@@ -363,11 +364,17 @@ type RelayRejectData struct {
 	Reason       string `json:"reason"`
 }
 
+// RelayReceiveStreamReadyData signals that NAT peer has opened receive stream
+type RelayReceiveStreamReadyData struct {
+	SessionID string `json:"session_id"`
+	PeerID    string `json:"peer_id"` // Persistent Ed25519-based peer ID
+}
+
 // RelayForwardData contains relay message forwarding request
 type RelayForwardData struct {
 	SessionID      string `json:"session_id"`
-	SourceNodeID   string `json:"source_node_id"`
-	TargetNodeID   string `json:"target_node_id"`
+	SourcePeerID   string `json:"source_peer_id"`   // Persistent Ed25519-based peer ID
+	TargetPeerID   string `json:"target_peer_id"`   // Persistent Ed25519-based peer ID
 	MessageType    string `json:"message_type"` // "hole_punch", "data"
 	Payload        []byte `json:"payload"`
 	PayloadSize    int64  `json:"payload_size"`
@@ -376,8 +383,8 @@ type RelayForwardData struct {
 // RelayDataData contains actual data being relayed
 type RelayDataData struct {
 	SessionID    string `json:"session_id"`
-	SourceNodeID string `json:"source_node_id"`
-	TargetNodeID string `json:"target_node_id"`
+	SourcePeerID string `json:"source_peer_id"`  // Persistent Ed25519-based peer ID
+	TargetPeerID string `json:"target_peer_id"`  // Persistent Ed25519-based peer ID
 	Data         []byte `json:"data"`
 	DataSize     int64  `json:"data_size"`
 	SequenceNum  int64  `json:"sequence_num,omitempty"`
@@ -385,13 +392,13 @@ type RelayDataData struct {
 
 // RelayHolePunchData contains hole punching coordination data
 type RelayHolePunchData struct {
-	SessionID       string `json:"session_id"`
-	InitiatorNodeID string `json:"initiator_node_id"`
-	TargetNodeID    string `json:"target_node_id"`
+	SessionID         string `json:"session_id"`
+	InitiatorPeerID   string `json:"initiator_peer_id"`   // Persistent Ed25519-based peer ID
+	TargetPeerID      string `json:"target_peer_id"`      // Persistent Ed25519-based peer ID
 	InitiatorEndpoint string `json:"initiator_endpoint"`
 	TargetEndpoint    string `json:"target_endpoint"`
 	CoordinationTime  time.Time `json:"coordination_time"`
-	Strategy        string `json:"strategy"` // "simultaneous", "sequential"
+	Strategy          string `json:"strategy"` // "simultaneous", "sequential"
 }
 
 // RelayDisconnectData contains relay disconnection notification
@@ -480,12 +487,20 @@ func CreateRelayReject(relayNodeID, clientNodeID, reason string) *QUICMessage {
 	})
 }
 
+// CreateRelayReceiveStreamReady creates a receive stream ready notification
+func CreateRelayReceiveStreamReady(sessionID, peerID string) *QUICMessage {
+	return NewQUICMessage(MessageTypeRelayReceiveStreamReady, &RelayReceiveStreamReadyData{
+		SessionID: sessionID,
+		PeerID:    peerID,
+	})
+}
+
 // CreateRelayForward creates a relay forward request
-func CreateRelayForward(sessionID, sourceNodeID, targetNodeID, messageType string, payload []byte) *QUICMessage {
+func CreateRelayForward(sessionID, sourcePeerID, targetPeerID, messageType string, payload []byte) *QUICMessage {
 	return NewQUICMessage(MessageTypeRelayForward, &RelayForwardData{
 		SessionID:    sessionID,
-		SourceNodeID: sourceNodeID,
-		TargetNodeID: targetNodeID,
+		SourcePeerID: sourcePeerID,
+		TargetPeerID: targetPeerID,
 		MessageType:  messageType,
 		Payload:      payload,
 		PayloadSize:  int64(len(payload)),
@@ -493,11 +508,11 @@ func CreateRelayForward(sessionID, sourceNodeID, targetNodeID, messageType strin
 }
 
 // CreateRelayData creates a relay data message
-func CreateRelayData(sessionID, sourceNodeID, targetNodeID string, data []byte, sequenceNum int64) *QUICMessage {
+func CreateRelayData(sessionID, sourcePeerID, targetPeerID string, data []byte, sequenceNum int64) *QUICMessage {
 	return NewQUICMessage(MessageTypeRelayData, &RelayDataData{
 		SessionID:    sessionID,
-		SourceNodeID: sourceNodeID,
-		TargetNodeID: targetNodeID,
+		SourcePeerID: sourcePeerID,
+		TargetPeerID: targetPeerID,
 		Data:         data,
 		DataSize:     int64(len(data)),
 		SequenceNum:  sequenceNum,
@@ -505,11 +520,11 @@ func CreateRelayData(sessionID, sourceNodeID, targetNodeID string, data []byte, 
 }
 
 // CreateRelayHolePunch creates a hole punching coordination message
-func CreateRelayHolePunch(sessionID, initiatorNodeID, targetNodeID, initiatorEndpoint, targetEndpoint, strategy string) *QUICMessage {
+func CreateRelayHolePunch(sessionID, initiatorPeerID, targetPeerID, initiatorEndpoint, targetEndpoint, strategy string) *QUICMessage {
 	return NewQUICMessage(MessageTypeRelayHolePunch, &RelayHolePunchData{
 		SessionID:         sessionID,
-		InitiatorNodeID:   initiatorNodeID,
-		TargetNodeID:      targetNodeID,
+		InitiatorPeerID:   initiatorPeerID,
+		TargetPeerID:      targetPeerID,
 		InitiatorEndpoint: initiatorEndpoint,
 		TargetEndpoint:    targetEndpoint,
 		CoordinationTime:  time.Now(),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -457,8 +458,9 @@ func (hp *HolePuncher) verifyConnection(ctx context.Context, conn *quic.Conn) er
 	// Wait for pong
 	buffer := make([]byte, 4096)
 	stream.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, err = stream.Read(buffer)
-	if err != nil {
+	n, err := stream.Read(buffer)
+	if err != nil && (err != io.EOF || n == 0) {
+		// Only fail if we got an error other than EOF, or EOF with no data
 		return fmt.Errorf("failed to read pong: %v", err)
 	}
 

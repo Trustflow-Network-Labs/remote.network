@@ -160,16 +160,30 @@
               />
             </div>
 
-            <div class="peer-filter">
-              <MultiSelect
-                v-model="selectedPeers"
-                :options="peerOptions"
-                optionLabel="label"
-                optionValue="value"
-                :placeholder="$t('message.services.selectPeers')"
-                :showToggleAll="true"
-                class="peer-multiselect"
-              />
+            <div class="filter-row">
+              <div class="service-type-filter">
+                <MultiSelect
+                  v-model="selectedServiceTypes"
+                  :options="serviceTypeOptions"
+                  optionLabel="label"
+                  optionValue="value"
+                  :placeholder="$t('message.services.selectServiceTypes')"
+                  :showToggleAll="true"
+                  class="service-type-multiselect"
+                />
+              </div>
+
+              <div class="peer-filter">
+                <MultiSelect
+                  v-model="selectedPeers"
+                  :options="peerOptions"
+                  optionLabel="label"
+                  optionValue="value"
+                  :placeholder="$t('message.services.selectPeers')"
+                  :showToggleAll="true"
+                  class="peer-multiselect"
+                />
+              </div>
             </div>
           </div>
 
@@ -301,7 +315,15 @@ const { shorten } = useTextUtils()
 
 // Search and filter state
 const searchQuery = ref('')
+const selectedServiceTypes = ref<string[]>([])
 const selectedPeers = ref<string[]>([])
+
+// Service type options for MultiSelect
+const serviceTypeOptions = computed(() => [
+  { label: t('message.services.types.data'), value: 'DATA' },
+  { label: t('message.services.types.docker'), value: 'DOCKER' },
+  { label: t('message.services.types.standalone'), value: 'STANDALONE' }
+])
 
 // Peer options for MultiSelect
 const peerOptions = computed(() => {
@@ -500,8 +522,9 @@ function onServiceAdded() {
 
 // Perform remote service search
 function performSearch() {
+  const serviceTypes = selectedServiceTypes.value.length > 0 ? selectedServiceTypes.value : []
   const peerIds = selectedPeers.value.length > 0 ? selectedPeers.value : []
-  servicesStore.searchRemoteServices(searchQuery.value, peerIds)
+  servicesStore.searchRemoteServices(searchQuery.value, serviceTypes, peerIds)
 }
 
 async function copyPeerId() {
@@ -701,7 +724,28 @@ onMounted(async () => {
     }
   }
 
+  .filter-row {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+
+    @media (max-width: 768px) {
+      flex-direction: column;
+    }
+  }
+
+  .service-type-filter {
+    flex: 1;
+    min-width: 250px;
+
+    .service-type-multiselect {
+      width: 100%;
+    }
+  }
+
   .peer-filter {
+    flex: 1;
+    min-width: 250px;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;

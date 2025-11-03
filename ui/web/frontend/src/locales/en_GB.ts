@@ -260,6 +260,7 @@ export default {
       searchPlaceholder: 'Search by service name or description...',
       filterByPeers: 'Filter by Peers',
       selectPeers: 'Select peers to search...',
+      selectServiceTypes: 'Filter by service type...',
 
       // Wizard
       wizard: {

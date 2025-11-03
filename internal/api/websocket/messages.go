@@ -27,6 +27,10 @@ const (
 	MessageTypeFileUploadComplete MessageType = "file.upload.complete"
 	MessageTypeFileUploadError    MessageType = "file.upload.error"
 
+	// Service discovery message types
+	MessageTypeServiceSearchRequest  MessageType = "service.search.request"
+	MessageTypeServiceSearchResponse MessageType = "service.search.response"
+
 	// Control message types
 	MessageTypePing            MessageType = "ping"
 	MessageTypePong            MessageType = "pong"
@@ -218,4 +222,38 @@ type FileUploadErrorPayload struct {
 	SessionID string `json:"session_id"`
 	Error     string `json:"error"`
 	Code      string `json:"code,omitempty"`
+}
+
+// ServiceSearchRequestPayload contains service search criteria
+type ServiceSearchRequestPayload struct {
+	Query       string   `json:"query"`        // Search query (phrases)
+	ServiceType string   `json:"service_type"` // Comma-separated service types (empty = all types)
+	PeerIDs     []string `json:"peer_ids"`     // Peer IDs to query (empty = all peers)
+	ActiveOnly  bool     `json:"active_only"`  // Only return active services
+}
+
+// ServiceSearchResponsePayload contains remote service search results
+type ServiceSearchResponsePayload struct {
+	Services []RemoteServiceInfo `json:"services"`
+	Error    string              `json:"error,omitempty"`
+	Complete bool                `json:"complete"` // Indicates if this is the final response
+}
+
+// RemoteServiceInfo represents a service from a remote peer
+type RemoteServiceInfo struct {
+	ID              int64                  `json:"id"`
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description"`
+	ServiceType     string                 `json:"service_type"`
+	Type            string                 `json:"type"`
+	Status          string                 `json:"status"`
+	PricingAmount   float64                `json:"pricing_amount"`
+	PricingType     string                 `json:"pricing_type"`
+	PricingInterval int                    `json:"pricing_interval"`
+	PricingUnit     string                 `json:"pricing_unit"`
+	Capabilities    map[string]interface{} `json:"capabilities,omitempty"`
+	Hash            string                 `json:"hash,omitempty"`
+	SizeBytes       int64                  `json:"size_bytes,omitempty"`
+	PeerID          string                 `json:"peer_id"` // ID of peer offering this service
+	PeerName        string                 `json:"peer_name,omitempty"`
 }

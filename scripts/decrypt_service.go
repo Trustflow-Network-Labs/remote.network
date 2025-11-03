@@ -15,20 +15,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func main() {
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: go run decrypt_service.go <service_id> <output_dir>")
-		fmt.Println("Example: go run decrypt_service.go 1 ./decrypted_output")
+func RunDecryptService(args []string) {
+	if len(args) < 2 {
+		fmt.Println("Usage: go run main.go decrypt-service <service_id> <output_dir>")
+		fmt.Println("Example: go run main.go decrypt-service 1 ./decrypted_output")
 		os.Exit(1)
 	}
 
-	serviceID, err := strconv.ParseInt(os.Args[1], 10, 64)
+	serviceID, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
 		fmt.Printf("Invalid service ID: %v\n", err)
 		os.Exit(1)
 	}
 
-	outputDir := os.Args[2]
+	outputDir := args[1]
 
 	// Get database path
 	homeDir, err := os.UserHomeDir()

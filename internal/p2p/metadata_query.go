@@ -5,22 +5,25 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anacrolix/torrent/bencode"
-
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
 // MetadataQueryService handles on-demand metadata queries from DHT with caching
 type MetadataQueryService struct {
-	bep44Manager  *BEP44Manager
-	dbManager     *database.SQLiteManager
-	logger        *utils.LogsManager
-	config        *utils.ConfigManager
+	bep44Manager    *BEP44Manager
+	dbManager       *database.SQLiteManager
+	logger          *utils.LogsManager
+	config          *utils.ConfigManager
+	metadataFetcher *MetadataFetcher // For accessing priority nodes
 
 	// In-flight query tracking to prevent duplicate queries
 	inflightQueries map[string]*queryResult
 	inflightMutex   sync.RWMutex
+
+	// Callback for relay peer discoveries
+	onRelayDiscovered func(*database.PeerMetadata)
+	callbackMutex     sync.RWMutex
 }
 
 // queryResult tracks an in-flight query
@@ -36,14 +39,23 @@ func NewMetadataQueryService(
 	dbManager *database.SQLiteManager,
 	logger *utils.LogsManager,
 	config *utils.ConfigManager,
+	metadataFetcher *MetadataFetcher,
 ) *MetadataQueryService {
 	return &MetadataQueryService{
 		bep44Manager:    bep44Manager,
 		dbManager:       dbManager,
 		logger:          logger,
 		config:          config,
+		metadataFetcher: metadataFetcher,
 		inflightQueries: make(map[string]*queryResult),
 	}
+}
+
+// SetRelayDiscoveryCallback sets the callback for relay peer discoveries
+func (mqs *MetadataQueryService) SetRelayDiscoveryCallback(callback func(*database.PeerMetadata)) {
+	mqs.callbackMutex.Lock()
+	defer mqs.callbackMutex.Unlock()
+	mqs.onRelayDiscovered = callback
 }
 
 // QueryMetadata queries metadata for a peer from DHT
@@ -106,21 +118,36 @@ func (mqs *MetadataQueryService) executeQuery(peerID string, publicKey []byte) (
 		})
 	}()
 
-	// Query DHT using BEP_44
+	// Query DHT using BEP_44 with priority routing
 	mqs.logger.Info(fmt.Sprintf("Querying DHT for peer %s metadata", peerID[:8]), "metadata-query")
 
-	mutableData, err := mqs.bep44Manager.GetMutable(publicKey)
+	// Use MetadataFetcher if available (provides priority query with store nodes first)
+	var metadata *database.PeerMetadata
+	var err error
+
+	if mqs.metadataFetcher != nil {
+		// Log priority node usage
+		bootstrap, relay, store := mqs.metadataFetcher.GetPriorityNodeCount()
+		mqs.logger.Debug(fmt.Sprintf("Using priority nodes: %d store, %d relay, %d bootstrap",
+			store, relay, bootstrap), "metadata-query")
+
+		// MetadataFetcher handles priority routing internally (store -> relay -> bootstrap)
+		metadata, err = mqs.metadataFetcher.GetPeerMetadata(publicKey)
+	} else {
+		// Fallback to direct BEP44 query without priority
+		mutableData, err := mqs.bep44Manager.GetMutable(publicKey)
+		if err != nil {
+			result.err = fmt.Errorf("DHT query failed: %v", err)
+			mqs.logger.Warn(fmt.Sprintf("DHT query failed for %s: %v", peerID[:8], err), "metadata-query")
+			return nil, result.err
+		}
+
+		metadata, err = mqs.parseMetadata(mutableData.Value)
+	}
+
 	if err != nil {
 		result.err = fmt.Errorf("DHT query failed: %v", err)
 		mqs.logger.Warn(fmt.Sprintf("DHT query failed for %s: %v", peerID[:8], err), "metadata-query")
-		return nil, result.err
-	}
-
-	// Parse metadata from mutable data
-	metadata, err := mqs.parseMetadata(mutableData.Value)
-	if err != nil {
-		result.err = fmt.Errorf("failed to parse metadata: %v", err)
-		mqs.logger.Warn(fmt.Sprintf("Metadata parsing failed for %s: %v", peerID[:8], err), "metadata-query")
 		return nil, result.err
 	}
 
@@ -129,20 +156,27 @@ func (mqs *MetadataQueryService) executeQuery(peerID string, publicKey []byte) (
 		peerID[:8], queryDuration), "metadata-query")
 
 	result.metadata = metadata
+
+	// Notify relay manager if this is a relay peer
+	if metadata.NetworkInfo.IsRelay {
+		mqs.callbackMutex.RLock()
+		callback := mqs.onRelayDiscovered
+		mqs.callbackMutex.RUnlock()
+
+		if callback != nil {
+			// Call in goroutine to avoid blocking the query
+			go callback(metadata)
+		}
+	}
+
 	return metadata, nil
 }
 
 // parseMetadata parses bencoded metadata from DHT into PeerMetadata struct
 func (mqs *MetadataQueryService) parseMetadata(data []byte) (*database.PeerMetadata, error) {
-	// The metadata publisher uses bencode.Marshal to encode the PeerMetadata struct
-	// We use bencode.Unmarshal to decode it back
-
-	var metadata database.PeerMetadata
-	if err := bencode.Unmarshal(data, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to decode bencoded metadata: %v", err)
-	}
-
-	return &metadata, nil
+	// Use the proper bencode decoder that handles struct tag mapping correctly
+	// This ensures all fields (including relay_address, relay_endpoint) are decoded
+	return database.DecodeBencodedMetadata(data)
 }
 
 // BatchQueryMetadata queries metadata for multiple peers in parallel

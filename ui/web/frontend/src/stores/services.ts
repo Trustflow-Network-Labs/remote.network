@@ -153,15 +153,75 @@ export const useServicesStore = defineStore('services', {
       }
     },
 
-    async searchRemoteServices(_query: string, _peerIds: string[] = []) {
+    async searchRemoteServices(query: string, serviceTypes: string[] = [], peerIds: string[] = []) {
       this.remoteLoading = true
+      this.error = null
+      this.remoteServices = [] // Clear previous results
+
       try {
-        // TODO: Implement remote service search via QUIC
-        // For now, return empty array
-        this.remoteServices = []
+        const wsService = getWebSocketService()
+        if (!wsService) {
+          throw new Error('WebSocket service not available')
+        }
+
+        // Subscribe to streaming search responses
+        const responsePromise = new Promise<RemoteService[]>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            unsubscribe()
+            reject(new Error('Service search timeout'))
+          }, 60000) // 60 second timeout (increased for streaming)
+
+          let accumulatedServices: RemoteService[] = []
+
+          const unsubscribe = wsService.subscribe(
+            MessageType.SERVICE_SEARCH_RESPONSE,
+            (payload: any) => {
+              // Check for errors
+              if (payload.error) {
+                clearTimeout(timeout)
+                unsubscribe()
+                reject(new Error(payload.error))
+                return
+              }
+
+              // Accumulate incoming services
+              if (payload.services && payload.services.length > 0) {
+                accumulatedServices = [...accumulatedServices, ...payload.services]
+                // Update UI progressively with partial results
+                this.remoteServices = accumulatedServices
+              }
+
+              // Check if this is the final message
+              if (payload.complete) {
+                clearTimeout(timeout)
+                unsubscribe()
+                resolve(accumulatedServices)
+              }
+            }
+          )
+        })
+
+        // Convert service types array to comma-separated string
+        const serviceTypeStr = serviceTypes.length > 0 ? serviceTypes.join(',') : ''
+
+        // Send search request
+        wsService.send({
+          type: MessageType.SERVICE_SEARCH_REQUEST,
+          payload: {
+            query: query,
+            service_type: serviceTypeStr,
+            peer_ids: peerIds,
+            active_only: true
+          }
+        })
+
+        // Wait for response
+        const services = await responsePromise
+        this.remoteServices = services
       } catch (error: any) {
-        this.error = error.response?.data?.message || error.message
+        this.error = error.message || 'Failed to search remote services'
         console.error('Failed to search remote services:', error)
+        this.remoteServices = []
       } finally {
         this.remoteLoading = false
       }

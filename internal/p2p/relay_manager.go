@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ type RelayManager struct {
 	dhtPeer           *DHTPeer
 	metadataPublisher *MetadataPublisher
 	metadataFetcher   *MetadataFetcher
+	metadataQuery     *MetadataQueryService // For subscribing to relay discoveries
 
 	// Relay selection
 	selector *RelaySelector
@@ -50,7 +52,7 @@ type RelayManager struct {
 }
 
 // NewRelayManager creates a new relay manager for NAT peers
-func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, keyPair *crypto.KeyPair, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher, metadataFetcher *MetadataFetcher) *RelayManager {
+func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, keyPair *crypto.KeyPair, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher, metadataFetcher *MetadataFetcher, metadataQuery *MetadataQueryService) *RelayManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Pass our peer ID to selector so it can check for preferred relay
@@ -65,6 +67,7 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 		dhtPeer:           dhtPeer,
 		metadataPublisher: metadataPublisher,
 		metadataFetcher:   metadataFetcher,
+		metadataQuery:     metadataQuery,
 		selector:          selector,
 		ctx:               ctx,
 		cancel:            cancel,
@@ -76,6 +79,37 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 // Start starts the relay manager
 func (rm *RelayManager) Start() error {
 	rm.logger.Info("Starting relay manager for NAT peer...", "relay-manager")
+
+	// Subscribe to relay discoveries from metadata query service
+	// This allows auto-discovery of relays as their metadata becomes available in DHT
+	if rm.metadataQuery != nil {
+		rm.metadataQuery.SetRelayDiscoveryCallback(func(metadata *database.PeerMetadata) {
+			rm.logger.Debug(fmt.Sprintf("Metadata query service discovered relay: %s", metadata.PeerID[:8]), "relay-manager")
+
+			// Add to relay selector if not already a candidate
+			if !rm.selector.HasCandidate(metadata.PeerID) {
+				if err := rm.selector.AddCandidate(metadata); err == nil {
+					rm.logger.Info(fmt.Sprintf("✅ Auto-added relay from metadata discovery: %s (endpoint: %s)",
+						metadata.PeerID[:8], metadata.NetworkInfo.RelayEndpoint), "relay-manager")
+
+					// If we're not connected to any relay, try connecting to this new discovery
+					if rm.GetCurrentRelay() == nil {
+						rm.logger.Info("No relay connected, attempting to connect to newly discovered relay...", "relay-manager")
+						go func() {
+							if err := rm.SelectAndConnectRelay(); err != nil {
+								rm.logger.Warn(fmt.Sprintf("Failed to connect to newly discovered relay: %v", err), "relay-manager")
+							}
+						}()
+					}
+				} else {
+					rm.logger.Debug(fmt.Sprintf("Failed to add auto-discovered relay %s: %v", metadata.PeerID[:8], err), "relay-manager")
+				}
+			} else {
+				rm.logger.Debug(fmt.Sprintf("Relay %s already in candidates, skipping", metadata.PeerID[:8]), "relay-manager")
+			}
+		})
+		rm.logger.Info("Subscribed to relay discoveries from metadata query service", "relay-manager")
+	}
 
 	// Start periodic relay evaluation
 	evaluationInterval := rm.config.GetConfigDuration("relay_evaluation_interval", 5*time.Minute)
@@ -221,7 +255,8 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 	n, err := stream.Read(buffer)
 	stream.Close()
 
-	if err != nil {
+	if err != nil && (err != io.EOF || n == 0) {
+		// Only fail if we got an error other than EOF, or EOF with no data
 		conn.CloseWithError(0, "no response from relay")
 		return fmt.Errorf("failed to read relay response: %v", err)
 	}
@@ -285,9 +320,206 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 
 	rm.logger.Info(fmt.Sprintf("Successfully connected to relay %s (session: %s)", relay.NodeID, sessionID), "relay-manager")
 
+	// Open receive stream for relay to forward messages to us
+	if err := rm.openReceiveStream(conn, sessionID); err != nil {
+		rm.logger.Error(fmt.Sprintf("Failed to open receive stream: %v", err), "relay-manager")
+		conn.CloseWithError(0, "failed to open receive stream")
+		return fmt.Errorf("failed to open receive stream: %v", err)
+	}
+
 	// Start keepalive
 	go rm.sendKeepalives()
 
+	return nil
+}
+
+// openReceiveStream opens a long-lived stream for receiving forwarded messages from relay
+func (rm *RelayManager) openReceiveStream(conn *quic.Conn, sessionID string) error {
+	rm.logger.Debug("Opening receive stream to relay for incoming message forwarding...", "relay-manager")
+
+	// Open stream with timeout
+	streamOpenTimeout := rm.config.GetConfigDuration("quic_stream_open_timeout", 5*time.Second)
+	streamCtx, cancel := context.WithTimeout(rm.ctx, streamOpenTimeout)
+	stream, err := conn.OpenStreamSync(streamCtx)
+	cancel()
+
+	if err != nil {
+		return fmt.Errorf("failed to open receive stream: %v", err)
+	}
+
+	// Send relay_receive_stream_ready message
+	readyMsg := CreateRelayReceiveStreamReady(sessionID, rm.keyPair.PeerID())
+	msgBytes, err := readyMsg.Marshal()
+	if err != nil {
+		stream.Close()
+		return fmt.Errorf("failed to marshal receive stream ready message: %v", err)
+	}
+
+	if _, err := stream.Write(msgBytes); err != nil {
+		stream.Close()
+		return fmt.Errorf("failed to send receive stream ready message: %v", err)
+	}
+
+	rm.logger.Info(fmt.Sprintf("✅ Receive stream opened and registered with relay (session: %s)", sessionID), "relay-manager")
+
+	// Start listening for incoming messages on this stream
+	go rm.listenForRelayedMessages(stream, sessionID)
+
+	return nil
+}
+
+// listenForRelayedMessages continuously reads messages from the receive stream
+func (rm *RelayManager) listenForRelayedMessages(stream *quic.Stream, sessionID string) {
+	defer (*stream).Close()
+
+	rm.logger.Info(fmt.Sprintf("Started listening for relayed messages (session: %s)", sessionID), "relay-manager")
+
+	for {
+		select {
+		case <-rm.ctx.Done():
+			rm.logger.Debug("Context cancelled, stopping relay message listener", "relay-manager")
+			return
+		default:
+		}
+
+		// Read length prefix (4 bytes)
+		lengthBuf := make([]byte, 4)
+		if _, err := (*stream).Read(lengthBuf); err != nil {
+			rm.logger.Warn(fmt.Sprintf("Failed to read message length from relay receive stream: %v", err), "relay-manager")
+			// Stream closed or error - trigger reconnection
+			go rm.handleRelayConnectionLoss()
+			return
+		}
+
+		// Parse length
+		messageLength := int(lengthBuf[0])<<24 | int(lengthBuf[1])<<16 | int(lengthBuf[2])<<8 | int(lengthBuf[3])
+
+		if messageLength <= 0 || messageLength > 10*1024*1024 { // Max 10MB
+			rm.logger.Warn(fmt.Sprintf("Invalid message length from relay: %d bytes", messageLength), "relay-manager")
+			continue
+		}
+
+		// Read the full message
+		messageBuf := make([]byte, messageLength)
+		totalRead := 0
+		for totalRead < messageLength {
+			n, err := (*stream).Read(messageBuf[totalRead:])
+			if err != nil {
+				rm.logger.Warn(fmt.Sprintf("Failed to read message data from relay: %v", err), "relay-manager")
+				go rm.handleRelayConnectionLoss()
+				return
+			}
+			totalRead += n
+		}
+
+		// Record ingress traffic
+		rm.RecordIngressTraffic(int64(4 + messageLength))
+
+		// Parse and handle the message
+		msg, err := UnmarshalQUICMessage(messageBuf)
+		if err != nil {
+			rm.logger.Warn(fmt.Sprintf("Failed to unmarshal relayed message: %v", err), "relay-manager")
+			continue
+		}
+
+		rm.logger.Debug(fmt.Sprintf("Received relayed message via relay: type=%s", msg.Type), "relay-manager")
+
+		// Route message to appropriate handler based on type
+		if err := rm.handleRelayedMessage(msg); err != nil {
+			rm.logger.Warn(fmt.Sprintf("Failed to handle relayed message (type=%s): %v", msg.Type, err), "relay-manager")
+		}
+	}
+}
+
+// handleRelayedMessage routes relayed messages to appropriate handlers
+func (rm *RelayManager) handleRelayedMessage(msg *QUICMessage) error {
+	rm.logger.Info(fmt.Sprintf("Received message type %s via relay - routing to handlers", msg.Type), "relay-manager")
+
+	// Extract source peer ID from request if available
+	var sourcePeerID string
+	if msg.Type == MessageTypeServiceRequest {
+		var request ServiceSearchRequest
+		if err := msg.GetDataAs(&request); err == nil {
+			sourcePeerID = request.SourcePeerID
+		}
+	}
+
+	// Delegate to QUIC peer to handle the message
+	response := rm.quicPeer.HandleRelayedMessage(msg)
+
+	if response != nil {
+		rm.logger.Debug(fmt.Sprintf("Message handled, response type: %s - routing back via relay", response.Type), "relay-manager")
+
+		// Send response back through relay
+		if sourcePeerID == "" {
+			rm.logger.Warn("Cannot route response - source peer ID not available in request", "relay-manager")
+			return nil
+		}
+
+		if err := rm.sendResponseViaRelay(sourcePeerID, response); err != nil {
+			rm.logger.Error(fmt.Sprintf("Failed to send response via relay: %v", err), "relay-manager")
+			return err
+		}
+
+		rm.logger.Info(fmt.Sprintf("Successfully sent %s response to %s via relay", response.Type, sourcePeerID[:8]), "relay-manager")
+	}
+
+	return nil
+}
+
+// sendResponseViaRelay sends a response message back through the relay to the original requester
+func (rm *RelayManager) sendResponseViaRelay(targetPeerID string, response *QUICMessage) error {
+	// Get current relay connection and session
+	rm.relayMutex.RLock()
+	relayConn := rm.currentRelayConn
+	sessionID := rm.sessionID
+	rm.relayMutex.RUnlock()
+
+	if relayConn == nil {
+		return fmt.Errorf("no active relay connection")
+	}
+
+	if sessionID == "" {
+		return fmt.Errorf("no active relay session")
+	}
+
+	// Marshal the response message
+	responseBytes, err := response.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal response: %v", err)
+	}
+
+	// Create relay forward message
+	forwardMsg := NewQUICMessage(MessageTypeRelayForward, &RelayForwardData{
+		SessionID:    sessionID,
+		SourcePeerID: rm.keyPair.PeerID(),
+		TargetPeerID: targetPeerID,
+		MessageType:  "service_response",
+		Payload:      responseBytes,
+		PayloadSize:  int64(len(responseBytes)),
+	})
+
+	forwardBytes, err := forwardMsg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal relay forward: %v", err)
+	}
+
+	// Open a stream to the relay
+	stream, err := rm.quicPeer.openStreamWithTimeout(relayConn)
+	if err != nil {
+		return fmt.Errorf("failed to open stream to relay: %v", err)
+	}
+	defer stream.Close()
+
+	// Send the message
+	if _, err := stream.Write(forwardBytes); err != nil {
+		return fmt.Errorf("failed to write to relay: %v", err)
+	}
+
+	// Record egress traffic
+	rm.RecordEgressTraffic(int64(len(forwardBytes)))
+
+	rm.logger.Debug(fmt.Sprintf("Sent response (%d bytes) to relay for forwarding to %s", len(forwardBytes), targetPeerID[:8]), "relay-manager")
 	return nil
 }
 
@@ -419,10 +651,11 @@ func (rm *RelayManager) sendKeepalives() {
 			// Wait for response (pong) to ensure message was received
 			buffer := make([]byte, 4096)
 			stream.SetReadDeadline(time.Now().Add(5 * time.Second))
-			_, err = stream.Read(buffer)
+			n, err := stream.Read(buffer)
 			stream.Close()
 
-			if err != nil {
+			if err != nil && (err != io.EOF || n == 0) {
+				// Only fail if we got an error other than EOF, or EOF with no data
 				rm.logger.Warn(fmt.Sprintf("Keepalive response failed from relay %s: %v - triggering reconnection", relayNodeID, err), "relay-manager")
 				go rm.handleRelayConnectionLoss()
 				return
@@ -442,7 +675,7 @@ func (rm *RelayManager) sendKeepalives() {
 
 // handleRelayConnectionLoss handles relay connection failures and attempts reconnection
 func (rm *RelayManager) handleRelayConnectionLoss() {
-	rm.logger.Info("Handling relay connection loss...", "relay-manager")
+	rm.logger.Info("⚠️  Relay connection lost, starting immediate reconnection procedure", "relay-manager")
 
 	// Get the failed relay info before disconnecting
 	rm.relayMutex.RLock()
@@ -453,79 +686,72 @@ func (rm *RelayManager) handleRelayConnectionLoss() {
 	}
 	rm.relayMutex.RUnlock()
 
-	// Step 1: Disconnect from current relay (closes stale QUIC connection)
-	rm.DisconnectRelay()
+	if failedRelay == nil {
+		rm.logger.Warn("No current relay to reconnect", "relay-manager")
+		return
+	}
 
-	// Step 2-4: Try reconnecting to the SAME relay with a NEW QUIC connection
-	// This handles NAT UDP mapping expiration (30-min timeout) where the relay
-	// is still reachable but the old NAT mapping is stale
-	if failedRelay != nil {
-		rm.logger.Info(fmt.Sprintf("Attempting to reconnect to same relay %s with new QUIC connection (may be NAT mapping timeout)...", failedRelayNodeID), "relay-manager")
+	// PHASE 1: Immediate retry to same relay (3 attempts, 2-second intervals)
+	const MAX_RETRIES = 3
+	const RETRY_DELAY = 2 * time.Second
 
-		// Wait briefly to allow old connection cleanup
-		time.Sleep(2 * time.Second)
+	for attempt := 1; attempt <= MAX_RETRIES; attempt++ {
+		rm.logger.Info(fmt.Sprintf("🔄 Attempting to reconnect to same relay (relay: %s, attempt: %d/%d)",
+			failedRelayNodeID[:8], attempt, MAX_RETRIES), "relay-manager")
 
-		// Try connecting to the same relay with a new QUIC connection
-		if err := rm.ConnectToRelay(failedRelay); err != nil {
-			rm.logger.Warn(fmt.Sprintf("Failed to reconnect to same relay %s: %v", failedRelayNodeID, err), "relay-manager")
+		// Step 1: Clean disconnect
+		rm.DisconnectRelay()
 
-			// Increment failure count and update last failure time
-			failedRelay.FailureCount++
-			failedRelay.LastFailure = time.Now()
+		// Step 2: Brief wait
+		time.Sleep(RETRY_DELAY)
 
-			// Only remove after MAX_RELAY_FAILURES consecutive failures
-			const MAX_RELAY_FAILURES = 3
-			if failedRelay.FailureCount >= MAX_RELAY_FAILURES {
-				rm.logger.Info(fmt.Sprintf("Removing failed relay %s from candidates after %d consecutive failures",
-					failedRelayNodeID, failedRelay.FailureCount), "relay-manager")
-				rm.selector.RemoveCandidate(failedRelayNodeID)
-
-				// Log remaining candidates
-				remainingCount := rm.selector.GetCandidateCount()
-				rm.logger.Info(fmt.Sprintf("Remaining relay candidates after removal: %d", remainingCount), "relay-manager")
-			} else {
-				rm.logger.Warn(fmt.Sprintf("Relay %s has %d/%d failures, keeping in candidate list",
-					failedRelayNodeID, failedRelay.FailureCount, MAX_RELAY_FAILURES), "relay-manager")
-			}
-		} else {
-			// Successfully reconnected to same relay with new connection
-			rm.logger.Info(fmt.Sprintf("Successfully reconnected to same relay %s with new QUIC connection", failedRelayNodeID), "relay-manager")
+		// Step 3: Attempt reconnection
+		if err := rm.ConnectToRelay(failedRelay); err == nil {
+			rm.logger.Info(fmt.Sprintf("✅ Successfully reconnected to same relay (relay: %s, attempt: %d)",
+				failedRelayNodeID[:8], attempt), "relay-manager")
 			return
+		} else {
+			rm.logger.Warn(fmt.Sprintf("❌ Reconnection attempt failed (relay: %s, attempt: %d, error: %v)",
+				failedRelayNodeID[:8], attempt, err), "relay-manager")
 		}
 	}
 
-	// Wait a bit before trying a different relay
-	rm.logger.Debug("Waiting 5 seconds before attempting connection to different relay...", "relay-manager")
-	time.Sleep(5 * time.Second)
+	// PHASE 2: Mark relay as problematic
+	rm.logger.Warn(fmt.Sprintf("Failed to reconnect to relay after %d attempts, marking as offline (relay: %s)",
+		MAX_RETRIES, failedRelayNodeID[:8]), "relay-manager")
 
-	// Try to connect to a different relay
-	rm.logger.Info("Attempting to connect to a different relay...", "relay-manager")
+	// Increment failure count
+	failedRelay.FailureCount++
+	failedRelay.LastFailure = time.Now()
+
+	// Remove if too many failures
+	const MAX_FAILURES = 3
+	if failedRelay.FailureCount >= MAX_FAILURES {
+		rm.logger.Info(fmt.Sprintf("Removing failed relay from candidates (relay: %s, failure_count: %d)",
+			failedRelayNodeID[:8], failedRelay.FailureCount), "relay-manager")
+		rm.selector.RemoveCandidate(failedRelay.NodeID)
+	}
+
+	// PHASE 3: Select alternative relay (immediate)
+	rm.logger.Info("🔍 Selecting alternative relay for immediate connection", "relay-manager")
+
 	if err := rm.SelectAndConnectRelay(); err != nil {
-		rm.logger.Error(fmt.Sprintf("Failed to reconnect to relay: %v", err), "relay-manager")
+		rm.logger.Error(fmt.Sprintf("❌ Failed to connect to alternative relay: %v", err), "relay-manager")
 
-		// Check if we have no relay candidates left
+		// PHASE 4: Rediscovery if no candidates
 		if rm.selector.GetCandidateCount() == 0 {
-			rm.logger.Warn("No relay candidates available, attempting to re-discover relays...", "relay-manager")
-			if rediscovered := rm.rediscoverRelayCandidates(); rediscovered > 0 {
-				rm.logger.Info(fmt.Sprintf("Re-discovered %d relay candidates from peer metadata", rediscovered), "relay-manager")
+			rm.logger.Warn("No relay candidates available, triggering immediate rediscovery", "relay-manager")
+			discovered := rm.rediscoverRelayCandidates()
+
+			if discovered > 0 {
+				rm.logger.Info(fmt.Sprintf("Rediscovery completed, retrying connection (discovered: %d)", discovered), "relay-manager")
+				rm.SelectAndConnectRelay()
 			} else {
-				rm.logger.Warn("No relay candidates found in peer metadata, will retry during next periodic evaluation", "relay-manager")
+				rm.logger.Error("No relay candidates found after rediscovery", "relay-manager")
 			}
 		}
-
-		// Schedule retry
-		rm.logger.Info("Waiting 30 seconds before second reconnection attempt...", "relay-manager")
-		time.Sleep(30 * time.Second)
-		rm.logger.Info("Second reconnection attempt starting...", "relay-manager")
-		if err := rm.SelectAndConnectRelay(); err != nil {
-			rm.logger.Error(fmt.Sprintf("Second reconnection attempt failed: %v. Will retry during next periodic evaluation.", err), "relay-manager")
-
-			// Final check - if still no candidates, try rediscovery again
-			if rm.selector.GetCandidateCount() == 0 {
-				rm.logger.Warn("Still no relay candidates after retry, re-attempting discovery...", "relay-manager")
-				rm.rediscoverRelayCandidates()
-			}
-		}
+	} else {
+		rm.logger.Info("✅ Successfully connected to alternative relay", "relay-manager")
 	}
 }
 

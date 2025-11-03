@@ -29,6 +29,10 @@ export enum MessageType {
   FILE_UPLOAD_COMPLETE = 'file.upload.complete',
   FILE_UPLOAD_ERROR = 'file.upload.error',
 
+  // Service discovery messages
+  SERVICE_SEARCH_REQUEST = 'service.search.request',
+  SERVICE_SEARCH_RESPONSE = 'service.search.response',
+
   // Control messages
   PING = 'ping',
   PONG = 'pong',

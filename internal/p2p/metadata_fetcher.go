@@ -17,6 +17,7 @@ type MetadataFetcher struct {
 	// Priority nodes for faster DHT queries
 	bootstrapNodes []string  // Connected bootstrap peer node IDs
 	relayNodes     []string  // Connected relay peer node IDs
+	storeNodes     []string  // Connected DHT store peer node IDs
 	nodesMutex     sync.RWMutex
 }
 
@@ -27,6 +28,7 @@ func NewMetadataFetcher(bep44Manager *BEP44Manager, logger *utils.LogsManager) *
 		logger:         logger,
 		bootstrapNodes: make([]string, 0),
 		relayNodes:     make([]string, 0),
+		storeNodes:     make([]string, 0),
 	}
 }
 
@@ -41,13 +43,15 @@ func (mf *MetadataFetcher) GetPeerMetadata(publicKey []byte) (*database.PeerMeta
 	mf.nodesMutex.RLock()
 	bootstrapNodes := append([]string{}, mf.bootstrapNodes...)
 	relayNodes := append([]string{}, mf.relayNodes...)
+	storeNodes := append([]string{}, mf.storeNodes...)
 	mf.nodesMutex.RUnlock()
 
-	// Combine priority nodes: bootstrap nodes first, then relay nodes
-	priorityNodes := append(bootstrapNodes, relayNodes...)
+	// Combine priority nodes: store nodes FIRST, then relay, then bootstrap
+	priorityNodes := append(storeNodes, relayNodes...)
+	priorityNodes = append(priorityNodes, bootstrapNodes...)
 
-	mf.logger.Debug(fmt.Sprintf("Fetching metadata from DHT (priority: %d bootstrap, %d relay nodes)",
-		len(bootstrapNodes), len(relayNodes)), "metadata-fetcher")
+	mf.logger.Debug(fmt.Sprintf("Fetching metadata from DHT (priority: %d store, %d relay, %d bootstrap nodes)",
+		len(storeNodes), len(relayNodes), len(bootstrapNodes)), "metadata-fetcher")
 
 	// Query DHT via BEP44 with priority routing
 	mutableData, err := mf.bep44Manager.GetMutableWithPriority(publicKey, priorityNodes)
@@ -128,6 +132,22 @@ func (mf *MetadataFetcher) AddRelayNode(nodeID string) {
 	mf.logger.Debug(fmt.Sprintf("Added relay node to DHT priority: %s", nodeID[:8]), "metadata-fetcher")
 }
 
+// AddStoreNode adds a single store node to priority list
+func (mf *MetadataFetcher) AddStoreNode(nodeAddr string) {
+	mf.nodesMutex.Lock()
+	defer mf.nodesMutex.Unlock()
+
+	// Check if already exists
+	for _, existing := range mf.storeNodes {
+		if existing == nodeAddr {
+			return
+		}
+	}
+
+	mf.storeNodes = append(mf.storeNodes, nodeAddr)
+	mf.logger.Debug(fmt.Sprintf("Added store node to DHT priority: %s", nodeAddr[:8]), "metadata-fetcher")
+}
+
 // RemoveBootstrapNode removes a bootstrap node from priority list
 func (mf *MetadataFetcher) RemoveBootstrapNode(nodeID string) {
 	mf.nodesMutex.Lock()
@@ -156,10 +176,33 @@ func (mf *MetadataFetcher) RemoveRelayNode(nodeID string) {
 	}
 }
 
+// RemoveStoreNode removes a store node from priority list
+func (mf *MetadataFetcher) RemoveStoreNode(nodeAddr string) {
+	mf.nodesMutex.Lock()
+	defer mf.nodesMutex.Unlock()
+
+	for i, existing := range mf.storeNodes {
+		if existing == nodeAddr {
+			mf.storeNodes = append(mf.storeNodes[:i], mf.storeNodes[i+1:]...)
+			mf.logger.Debug(fmt.Sprintf("Removed store node from DHT priority: %s", nodeAddr[:8]), "metadata-fetcher")
+			return
+		}
+	}
+}
+
+// UpdateStoreNodes updates the list of store nodes for priority queries
+func (mf *MetadataFetcher) UpdateStoreNodes(nodes []string) {
+	mf.nodesMutex.Lock()
+	defer mf.nodesMutex.Unlock()
+
+	mf.storeNodes = nodes
+	mf.logger.Debug(fmt.Sprintf("Updated store nodes for DHT priority: %d nodes", len(nodes)), "metadata-fetcher")
+}
+
 // GetPriorityNodeCount returns the number of priority nodes configured
-func (mf *MetadataFetcher) GetPriorityNodeCount() (bootstrap int, relay int) {
+func (mf *MetadataFetcher) GetPriorityNodeCount() (bootstrap int, relay int, store int) {
 	mf.nodesMutex.RLock()
 	defer mf.nodesMutex.RUnlock()
 
-	return len(mf.bootstrapNodes), len(mf.relayNodes)
+	return len(mf.bootstrapNodes), len(mf.relayNodes), len(mf.storeNodes)
 }

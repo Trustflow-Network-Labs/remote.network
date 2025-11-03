@@ -344,6 +344,8 @@ func (kpm *KnownPeersManager) GetKnownPeer(peerID, topic string) (*KnownPeer, er
 		&peer.PublicKey,
 		&isRelayInt,
 		&isStoreInt,
+		&peer.FilesCount,
+		&peer.AppsCount,
 		&lastSeenUnix,
 		&peer.Topic,
 		&firstSeenUnix,

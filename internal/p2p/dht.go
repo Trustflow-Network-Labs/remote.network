@@ -2,7 +2,11 @@ package p2p
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"sync"
@@ -12,6 +16,7 @@ import (
 	"github.com/anacrolix/dht/v2/bep44"
 	"github.com/anacrolix/dht/v2/krpc"
 	peer_store "github.com/anacrolix/dht/v2/peer-store"
+	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
@@ -35,6 +40,77 @@ type DHTPeer struct {
 	topicMutex      sync.RWMutex
 	// Callback for QUIC metadata exchange
 	onPeerDiscovered func(peerAddr string, topic string)
+	// Secret for BEP44 write token generation
+	tokenSecret []byte
+}
+
+// generateBEP44WriteToken generates a write token for BEP44 PUT authorization
+// Token format: HMAC-SHA256(secret + IP + time_bucket)
+// Time bucket provides automatic expiry without state storage
+func (d *DHTPeer) generateBEP44WriteToken(addr net.Addr) string {
+	// Extract IP from address
+	var ip net.IP
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		ip = a.IP
+	case *net.TCPAddr:
+		ip = a.IP
+	default:
+		// Fallback: use address string
+		return ""
+	}
+
+	// Create time bucket (10-minute windows)
+	timeBucket := time.Now().Unix() / 600 // 600 seconds = 10 minutes
+
+	// Create HMAC: secret + IP + time_bucket
+	h := hmac.New(sha256.New, d.tokenSecret)
+	h.Write(ip)
+	h.Write([]byte(fmt.Sprintf("%d", timeBucket)))
+	token := h.Sum(nil)
+
+	// Return as hex string
+	return hex.EncodeToString(token)
+}
+
+// validateBEP44WriteToken validates a write token from a PUT request
+// Accepts tokens from current and previous time bucket (20-minute validity window)
+func (d *DHTPeer) validateBEP44WriteToken(token string, addr net.Addr) bool {
+	if token == "" {
+		return false
+	}
+
+	// Generate current and previous time bucket tokens
+	currentToken := d.generateBEP44WriteToken(addr)
+
+	// Check current time bucket
+	if token == currentToken {
+		return true
+	}
+
+	// Check previous time bucket (allows for clock skew and transition periods)
+	// Temporarily adjust time by -10 minutes
+	oldTime := time.Now().Add(-10 * time.Minute)
+	oldTimeBucket := oldTime.Unix() / 600
+
+	// Extract IP from address
+	var ip net.IP
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		ip = a.IP
+	case *net.TCPAddr:
+		ip = a.IP
+	default:
+		return false
+	}
+
+	// Generate old time bucket token
+	h := hmac.New(sha256.New, d.tokenSecret)
+	h.Write(ip)
+	h.Write([]byte(fmt.Sprintf("%d", oldTimeBucket)))
+	oldToken := hex.EncodeToString(h.Sum(nil))
+
+	return token == oldToken
 }
 
 func NewDHTPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*DHTPeer, error) {
@@ -66,6 +142,11 @@ func NewDHTPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*DHTPee
 		nodeID = krpc.RandomNodeID()
 	}
 
+	// Generate random secret for BEP44 write token generation
+	// This secret is unique per node instance and used to create stateless tokens
+	tokenSecret := make([]byte, 32)
+	copy(tokenSecret[:], nodeID[:]) // Use node ID as seed for deterministic tokens
+
 	// Create DHTPeer instance first
 	dhtPeer := &DHTPeer{
 		nodeID:          nodeID,
@@ -77,6 +158,7 @@ func NewDHTPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*DHTPee
 		conn:            conn,
 		recentExchanges: make(map[string]time.Time),
 		infohashToTopic: make(map[string]string),
+		tokenSecret:     tokenSecret,
 	}
 
 	// Configure DHT server with explicit PeerStore and optional BEP_44 Store
@@ -86,6 +168,212 @@ func NewDHTPeer(config *utils.ConfigManager, logger *utils.LogsManager) (*DHTPee
 		PeerStore: &peer_store.InMemory{}, // Explicitly set an in-memory peer store
 		OnQuery: func(query *krpc.Msg, source net.Addr) bool {
 			logger.Debug(fmt.Sprintf("Received DHT query: %s from %s", query.Q, source), "dht")
+
+			// Handle incoming BEP44 mutable GET requests
+			// Serve data from our local BEP44 store (anacrolix/dht only queries public DHT)
+			if query.Q == "get" && dhtPeer.store != nil && query.A != nil {
+				// Extract target from query arguments (Target is krpc.ID which is [20]byte)
+				target := query.A.Target
+				// Check if target is set (not zero value)
+				var zeroID krpc.ID
+				if target != zeroID {
+					// Convert krpc.ID to bep44.Target (both are [20]byte)
+					var bep44Target bep44.Target
+					copy(bep44Target[:], target[:])
+
+					logger.Debug(fmt.Sprintf("BEP44 GET request from %s for target=%x", source, bep44Target[:8]), "dht-bep44")
+
+					// Generate write token for PUT authorization (required by BEP44 spec)
+					// IMPORTANT: Generate token BEFORE checking if item exists, so clients can perform PUTs
+					token := dhtPeer.generateBEP44WriteToken(source)
+					logger.Debug(fmt.Sprintf("Generated BEP44 write token for %s (len=%d)", source, len(token)), "dht-bep44")
+
+					// Look up item in local store
+					item, err := dhtPeer.store.Get(bep44Target)
+					if err == nil && item != nil {
+						// Convert item.V to bencode.Bytes ([]byte)
+						var vBytes bencode.Bytes
+						if b, ok := item.V.([]byte); ok {
+							vBytes = b
+						} else if s, ok := item.V.(string); ok {
+							vBytes = []byte(s)
+						} else {
+							// Fallback: marshal to bencode if unknown type
+							var marshalErr error
+							vBytes, marshalErr = bencode.Marshal(item.V)
+							if marshalErr != nil {
+								logger.Warn(fmt.Sprintf("Failed to marshal item.V: %v", marshalErr), "dht-bep44")
+								return true
+							}
+						}
+
+						logger.Debug(fmt.Sprintf("Found BEP44 item in local store (target=%x, seq=%d, size=%d bytes)",
+							bep44Target[:8], item.Seq, len(vBytes)), "dht-bep44")
+
+						// Construct response message with BEP44 data
+						response := krpc.Msg{
+							T: query.T, // Transaction ID (required for matching request/response)
+							Y: "r",     // Message type: response
+							R: &krpc.Return{
+								ID:    dhtPeer.nodeID, // Our node ID
+							Token: &token,         // Write token for subsequent PUT (REQUIRED by BEP44)
+								// BEP44 fields (must be set via Bep44Return embedded struct)
+								Bep44Return: krpc.Bep44Return{
+									V:   vBytes,    // Value (bencode.Bytes which is []byte)
+									K:   item.K,    // Public key [32]byte
+									Sig: item.Sig,  // Signature [64]byte
+									Seq: &item.Seq, // Sequence number (pointer to int64)
+								},
+							},
+						}
+
+						// Bencode and send response
+						responseBytes, err := bencode.Marshal(response)
+						if err != nil {
+							logger.Warn(fmt.Sprintf("Failed to bencode GET response: %v", err), "dht-bep44")
+							return true
+						}
+
+						// Send response via UDP
+						_, err = dhtPeer.conn.WriteTo(responseBytes, source)
+						if err != nil {
+							logger.Warn(fmt.Sprintf("Failed to send GET response to %s: %v", source, err), "dht-bep44")
+						} else {
+							logger.Info(fmt.Sprintf("✅ Served BEP44 GET response to %s (target=%x, seq=%d, size=%d bytes)",
+								source, bep44Target[:8], item.Seq, len(vBytes)), "dht-bep44")
+						}
+
+						// Return false to prevent default handler (we already responded)
+						return false
+					} else {
+						// Item not found - still respond with token so client can perform PUT
+						logger.Debug(fmt.Sprintf("BEP44 item not found in local store (target=%x)", bep44Target[:8]), "dht-bep44")
+
+						// Construct response message with token but no BEP44 data
+						response := krpc.Msg{
+							T: query.T, // Transaction ID (required for matching request/response)
+							Y: "r",     // Message type: response
+							R: &krpc.Return{
+								ID:    dhtPeer.nodeID, // Our node ID
+								Token: &token,         // Write token for subsequent PUT (REQUIRED by BEP44)
+								// No BEP44 fields - indicates item not found
+							},
+						}
+
+						// Bencode and send response
+						responseBytes, err := bencode.Marshal(response)
+						if err != nil {
+							logger.Warn(fmt.Sprintf("Failed to bencode GET response (not found): %v", err), "dht-bep44")
+							return true
+						}
+
+						// Send response via UDP
+						_, err = dhtPeer.conn.WriteTo(responseBytes, source)
+						if err != nil {
+							logger.Warn(fmt.Sprintf("Failed to send GET response (not found) to %s: %v", source, err), "dht-bep44")
+						} else {
+							logger.Info(fmt.Sprintf("✅ Served BEP44 GET response to %s (target=%x, not found, token provided)",
+								source, bep44Target[:8]), "dht-bep44")
+						}
+
+						// Return false to prevent default handler (we already responded)
+						return false
+					}
+				}
+			}
+
+			// Handle incoming BEP44 mutable PUT requests
+			// This is critical for relay nodes to store metadata from NAT peers
+			if query.Q == "put" && dhtPeer.store != nil && query.A != nil {
+				// Extract BEP44 mutable data fields from query arguments
+				// Check if all required fields are present
+				if query.A.V != nil && query.A.Seq != nil && query.A.K != [32]byte{} && query.A.Sig != [64]byte{} {
+					seq := *query.A.Seq
+
+					// Convert V to bytes
+					vBytes, ok := query.A.V.([]byte)
+					if !ok {
+						// V might be in other formats, try to bencode it
+						var err error
+						vBytes, err = bencode.Marshal(query.A.V)
+						if err != nil {
+							logger.Warn(fmt.Sprintf("Failed to marshal V from incoming PUT: %v", err), "dht-bep44")
+							return true
+						}
+					}
+
+					// Build signature payload using BEP44 format: "3:seqi" + seq + "e1:v" + value
+					signPayload := []byte(fmt.Sprintf("3:seqi%de1:v", seq))
+					signPayload = append(signPayload, vBytes...)
+
+						// Validate write token (BEP44 spec requires tokens to prevent unauthorized PUTs)
+					if query.A.Token == "" {
+						logger.Warn(fmt.Sprintf("❌ BEP44 PUT rejected from %s: no token provided", source), "dht-bep44")
+						return true // Reject PUT without token
+					}
+
+					tokenValid := dhtPeer.validateBEP44WriteToken(query.A.Token, source)
+					if !tokenValid {
+						logger.Warn(fmt.Sprintf("❌ BEP44 PUT rejected from %s: invalid token", source), "dht-bep44")
+						return true // Reject PUT with invalid token
+					}
+
+					logger.Debug(fmt.Sprintf("✅ BEP44 PUT token validated for %s", source), "dht-bep44")
+
+					// Verify Ed25519 signature
+					if ed25519.Verify(query.A.K[:], signPayload, query.A.Sig[:]) {
+						// Signature valid - store in local BEP44 store
+						item := bep44.Item{
+							V:   vBytes,
+							K:   query.A.K,
+							Sig: query.A.Sig,
+							Seq: seq,
+						}
+
+						// Compute the target key (SHA1 of public key K) - this is what GET operations will search for
+						target := item.Target()
+						logger.Debug(fmt.Sprintf("Storing incoming PUT: target=%x, K=%x, seq=%d, size=%d bytes",
+							target[:], query.A.K[:8], seq, len(vBytes)), "dht-bep44")
+
+						err := dhtPeer.store.Put(&item)
+						if err != nil {
+							logger.Warn(fmt.Sprintf("Failed to store incoming BEP44 PUT from %s: %v", source, err), "dht-bep44")
+						} else {
+							logger.Info(fmt.Sprintf("✅ Stored incoming BEP44 PUT from %s (target=%x, K=%x, seq=%d, size=%d bytes)",
+								source, target[:8], query.A.K[:8], seq, len(vBytes)), "dht-bep44")
+
+							// Send success response back to sender (CRITICAL: prevents timeout)
+							response := krpc.Msg{
+								T: query.T, // Transaction ID (required for matching request/response)
+								Y: "r",     // Message type: response
+								R: &krpc.Return{
+									ID: dhtPeer.nodeID, // Our node ID
+								},
+							}
+
+							// Bencode and send response
+							responseBytes, err := bencode.Marshal(response)
+							if err != nil {
+								logger.Warn(fmt.Sprintf("Failed to bencode PUT response: %v", err), "dht-bep44")
+							} else {
+								// Send response via UDP
+								_, err = dhtPeer.conn.WriteTo(responseBytes, source)
+								if err != nil {
+									logger.Warn(fmt.Sprintf("Failed to send PUT response to %s: %v", source, err), "dht-bep44")
+								} else {
+									logger.Debug(fmt.Sprintf("✅ Sent PUT success response to %s", source), "dht-bep44")
+								}
+							}
+
+							// Return false to prevent default handler from also sending a response
+							return false
+						}
+					} else {
+						logger.Warn(fmt.Sprintf("❌ Invalid signature on incoming BEP44 PUT from %s", source), "dht-bep44")
+					}
+				}
+			}
+
 			return true
 		},
 		OnAnnouncePeer: func(infoHash metainfo.Hash, ip net.IP, port int, portOk bool) {

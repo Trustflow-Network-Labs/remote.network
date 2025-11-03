@@ -117,6 +117,21 @@ func (rs *RelaySelector) GetCandidateCount() int {
 	return len(rs.candidates)
 }
 
+// HasCandidate checks if a relay candidate already exists by PeerID or NodeID
+// This prevents duplicate additions from metadata discovery callbacks
+func (rs *RelaySelector) HasCandidate(peerID string) bool {
+	rs.candidatesMutex.RLock()
+	defer rs.candidatesMutex.RUnlock()
+
+	// Check by PeerID or DHTNodeID
+	for _, candidate := range rs.candidates {
+		if candidate.PeerID == peerID || candidate.NodeID == peerID {
+			return true
+		}
+	}
+	return false
+}
+
 // MeasureLatency measures latency to a relay candidate using QUIC ping
 func (rs *RelaySelector) MeasureLatency(candidate *RelayCandidate) (time.Duration, error) {
 	startTime := time.Now()
@@ -141,6 +156,9 @@ func (rs *RelaySelector) MeasureLatency(candidate *RelayCandidate) (time.Duratio
 }
 
 // MeasureAllCandidates measures latency to all relay candidates
+// Uses a two-phase approach to avoid measuring connection establishment time as latency:
+// Phase 1: Pre-establish connections to all candidates concurrently
+// Phase 2: Measure latency over existing connections
 func (rs *RelaySelector) MeasureAllCandidates() {
 	rs.candidatesMutex.RLock()
 	candidateList := make([]*RelayCandidate, 0, len(rs.candidates))
@@ -149,8 +167,29 @@ func (rs *RelaySelector) MeasureAllCandidates() {
 	}
 	rs.candidatesMutex.RUnlock()
 
-	// Measure latency concurrently
+	// PHASE 1: Pre-establish connections to all candidates
+	// This prevents measuring connection establishment time (43-45s) as latency
+	rs.logger.Debug(fmt.Sprintf("Pre-establishing connections to %d relay candidates...", len(candidateList)), "relay-selector")
+
 	var wg sync.WaitGroup
+	for _, candidate := range candidateList {
+		wg.Add(1)
+		go func(c *RelayCandidate) {
+			defer wg.Done()
+			_, err := rs.quicPeer.ConnectToPeer(c.Endpoint)
+			if err != nil {
+				rs.logger.Debug(fmt.Sprintf("Failed to pre-establish connection to relay %s: %v", c.NodeID, err), "relay-selector")
+			} else {
+				rs.logger.Debug(fmt.Sprintf("Pre-established connection to relay %s", c.NodeID), "relay-selector")
+			}
+		}(candidate)
+	}
+	wg.Wait()
+
+	rs.logger.Debug(fmt.Sprintf("Connection pre-establishment complete, now measuring latency to %d candidates", len(candidateList)), "relay-selector")
+
+	// PHASE 2: Measure latency over existing connections
+	// Now that connections exist, ping will measure actual network latency (~30-150ms)
 	for _, candidate := range candidateList {
 		wg.Add(1)
 		go func(c *RelayCandidate) {

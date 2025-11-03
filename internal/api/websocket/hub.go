@@ -29,6 +29,9 @@ type Hub struct {
 
 	// File upload handler
 	fileUploadHandler *FileUploadHandler
+
+	// Service search handler
+	serviceSearchHandler *ServiceSearchHandler
 }
 
 // NewHub creates a new Hub instance
@@ -153,4 +156,14 @@ func (h *Hub) SetFileUploadHandler(handler *FileUploadHandler) {
 // GetFileUploadHandler returns the file upload handler
 func (h *Hub) GetFileUploadHandler() *FileUploadHandler {
 	return h.fileUploadHandler
+}
+
+// SetServiceSearchHandler sets the service search handler for the hub
+func (h *Hub) SetServiceSearchHandler(handler *ServiceSearchHandler) {
+	h.serviceSearchHandler = handler
+}
+
+// GetServiceSearchHandler returns the service search handler
+func (h *Hub) GetServiceSearchHandler() *ServiceSearchHandler {
+	return h.serviceSearchHandler
 }
