@@ -497,7 +497,8 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 	// Read message with buffer - don't wait for EOF
 	buffer := make([]byte, q.config.GetConfigInt("buffer_size", 65536, 1024, 1048576))
 	n, err := stream.Read(buffer)
-	if err != nil {
+	if err != nil && (err != io.EOF || n == 0) {
+		// Only fail if we got an error other than EOF, or EOF with no data
 		q.logger.Error(fmt.Sprintf("Failed to read from stream %s: %v", remoteAddr, err), "quic")
 		return
 	}

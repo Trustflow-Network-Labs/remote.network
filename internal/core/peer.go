@@ -682,8 +682,10 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 		stats["topology"] = pm.topologyMgr.GetTopologyStats()
 	}
 
-	// Add relay info
+	// Add node type and relay info
 	if pm.relayPeer != nil {
+		// Node is acting as a relay server
+		stats["node_type"] = "public"
 		stats["relay_mode"] = true
 		relayStats := pm.relayPeer.GetStats()
 		stats["relay_stats"] = relayStats
@@ -701,7 +703,16 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 		if totalBytes, ok := relayStats["total_bytes"].(int64); ok {
 			stats["total_bytes"] = totalBytes
 		}
+	} else if pm.relayManager != nil {
+		// Node is a NAT peer using relays (client mode)
+		stats["node_type"] = "private"
+		stats["relay_mode"] = false
+	} else {
+		// Node is a public peer (no relay server, no relay manager)
+		stats["node_type"] = "public"
+		stats["relay_mode"] = false
 	}
+
 	if pm.relayManager != nil {
 		relayManagerStats := pm.relayManager.GetStats()
 		stats["relay_manager_stats"] = relayManagerStats

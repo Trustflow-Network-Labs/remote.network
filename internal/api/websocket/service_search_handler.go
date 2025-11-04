@@ -22,6 +22,7 @@ type ServiceSearchHandler struct {
 	quicPeer      *p2p.QUICPeer
 	metadataQuery *p2p.MetadataQueryService
 	dhtPeer       *p2p.DHTPeer
+	relayPeer     *p2p.RelayPeer
 	ourPeerID     string // Our persistent Ed25519-based peer ID
 }
 
@@ -32,6 +33,7 @@ func NewServiceSearchHandler(
 	quicPeer *p2p.QUICPeer,
 	metadataQuery *p2p.MetadataQueryService,
 	dhtPeer *p2p.DHTPeer,
+	relayPeer *p2p.RelayPeer,
 	ourPeerID string,
 ) *ServiceSearchHandler {
 	return &ServiceSearchHandler{
@@ -40,6 +42,7 @@ func NewServiceSearchHandler(
 		quicPeer:      quicPeer,
 		metadataQuery: metadataQuery,
 		dhtPeer:       dhtPeer,
+		relayPeer:     relayPeer,
 		ourPeerID:     ourPeerID,
 	}
 }
@@ -100,11 +103,12 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 
 	// Build integrated query list: direct connections + relay-accessible NAT peers
 	type queryTarget struct {
-		peerAddr  string // For direct queries
-		peerID    string // For relay queries
-		useRelay  bool
-		relayAddr string // Relay address if using relay
-		sessionID string // Relay session ID if using relay
+		peerAddr      string // For direct queries
+		peerID        string // For relay queries
+		useRelay      bool
+		useLocalRelay bool   // True if NAT peer is connected to our own relay
+		relayAddr     string // Relay address if using relay
+		sessionID     string // Relay session ID if using relay
 	}
 
 	queryTargets := make([]queryTarget, 0)
@@ -252,16 +256,35 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 					continue
 				}
 
+				// Check if this NAT peer is connected to our own relay
+				// Compare the relay peer ID (ConnectedRelay) with our own peer ID
+				if metadata.NetworkInfo.ConnectedRelay == ssh.ourPeerID {
+					ssh.logger.WithFields(logrus.Fields{
+						"peer_id":       peerID,
+						"relay_peer_id": metadata.NetworkInfo.ConnectedRelay,
+						"our_peer_id":   ssh.ourPeerID,
+					}).Debug("NAT peer connected to our own relay - will query via local relay session")
+
+					queryTargets = append(queryTargets, queryTarget{
+						peerID:        peerID,
+						useRelay:      true,
+						useLocalRelay: true, // Flag for local relay forwarding
+						sessionID:     metadata.NetworkInfo.RelaySessionID,
+					})
+					continue
+				}
+
 				ssh.logger.WithFields(logrus.Fields{
 					"peer_id":    peerID,
 					"relay_addr": metadata.NetworkInfo.RelayAddress,
 				}).Debug("Adding relay-accessible NAT peer to query list")
 
 				queryTargets = append(queryTargets, queryTarget{
-					peerID:    peerID,
-					useRelay:  true,
-					relayAddr: metadata.NetworkInfo.RelayAddress,
-					sessionID: metadata.NetworkInfo.RelaySessionID,
+					peerID:        peerID,
+					useRelay:      true,
+					useLocalRelay: false,
+					relayAddr:     metadata.NetworkInfo.RelayAddress,
+					sessionID:     metadata.NetworkInfo.RelaySessionID,
 				})
 			} else if metadata.NetworkInfo.PublicIP != "" {
 				// Public peer - use direct connection
@@ -339,16 +362,27 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 			var usedFallback bool
 
 			if t.useRelay {
-				// Query via relay forwarding (already specified to use relay)
-				services, err = ssh.queryPeerViaRelay(
-					queryCtx,
-					t.peerID,
-					t.relayAddr,
-					t.sessionID,
-					request.Query,
-					request.ServiceType,
-					request.ActiveOnly,
-				)
+				if t.useLocalRelay {
+					// Query NAT peer connected to our own relay via local session
+					services, err = ssh.queryPeerViaLocalRelay(
+						queryCtx,
+						t.peerID,
+						request.Query,
+						request.ServiceType,
+						request.ActiveOnly,
+					)
+				} else {
+					// Query via remote relay forwarding
+					services, err = ssh.queryPeerViaRelay(
+						queryCtx,
+						t.peerID,
+						t.relayAddr,
+						t.sessionID,
+						request.Query,
+						request.ServiceType,
+						request.ActiveOnly,
+					)
+				}
 			} else {
 				// Try direct QUIC query first
 				services, err = ssh.queryPeerServices(
@@ -934,19 +968,35 @@ func (ssh *ServiceSearchHandler) queryPeerViaRelay(ctx context.Context, targetPe
 	return services, nil
 }
 
-// sendSearchResponse sends a service search response to the client
-func (ssh *ServiceSearchHandler) sendSearchResponse(client *Client, services []RemoteServiceInfo) error {
-	responseMsg, err := NewMessage(MessageTypeServiceSearchResponse, ServiceSearchResponsePayload{
-		Services: services,
-		Complete: true, // Legacy method sends complete results
-	})
-	if err != nil {
-		ssh.logger.WithError(err).Error("Failed to create search response message")
-		return err
+// queryPeerViaLocalRelay queries a NAT peer connected to our own relay via the existing relay session
+// This avoids the relay trying to connect to itself
+func (ssh *ServiceSearchHandler) queryPeerViaLocalRelay(ctx context.Context, targetPeerID string, query string, serviceType string, activeOnly bool) ([]RemoteServiceInfo, error) {
+	ssh.logger.WithFields(logrus.Fields{
+		"target_peer_id": targetPeerID[:8],
+		"query":          query,
+		"service_type":   serviceType,
+		"active_only":    activeOnly,
+	}).Debug("Starting local relay query to connected NAT peer")
+
+	// Check if relay is available
+	if ssh.relayPeer == nil {
+		return nil, fmt.Errorf("relay peer not available")
 	}
 
-	client.Send(responseMsg)
-	return nil
+	// Get the connection address for this NAT peer from the relay
+	peerAddr := ssh.relayPeer.GetClientAddress(targetPeerID)
+	if peerAddr == "" {
+		return nil, fmt.Errorf("NAT peer %s not connected to our relay or no active connection found", targetPeerID[:8])
+	}
+
+	ssh.logger.WithFields(logrus.Fields{
+		"target_peer_id": targetPeerID[:8],
+		"peer_address":   peerAddr,
+	}).Debug("Querying locally-connected NAT peer via existing QUIC connection")
+
+	// Use the direct query method since we have an existing connection
+	// The QUIC peer will reuse the existing connection
+	return ssh.queryPeerServices(ctx, peerAddr, targetPeerID, query, serviceType, activeOnly)
 }
 
 // sendPartialSearchResponse sends partial or final search results

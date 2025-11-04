@@ -750,6 +750,34 @@ func (rp *RelayPeer) Stop() error {
 	return nil
 }
 
+// GetClientAddress returns the QUIC connection address for a connected client peer
+// Returns empty string if the client is not connected
+func (rp *RelayPeer) GetClientAddress(clientPeerID string) string {
+	rp.clientsMutex.RLock()
+	session, exists := rp.registeredClients[clientPeerID]
+	rp.clientsMutex.RUnlock()
+
+	if !exists || session == nil {
+		return ""
+	}
+
+	session.mutex.RLock()
+	conn := session.Connection
+	session.mutex.RUnlock()
+
+	if conn == nil {
+		return ""
+	}
+
+	// Get the remote address from the connection
+	remoteAddr := (*conn).RemoteAddr()
+	if remoteAddr == nil {
+		return ""
+	}
+
+	return remoteAddr.String()
+}
+
 // GetSessionDetails returns detailed information about all active sessions
 func (rp *RelayPeer) GetSessionDetails() []map[string]interface{} {
 	rp.sessionsMutex.RLock()

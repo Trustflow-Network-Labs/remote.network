@@ -279,8 +279,9 @@ const uptimeFormatted = computed(() => {
 })
 
 const showRelaySection = computed(() => {
-  // Show if node is acting as a relay OR if node requires a relay (NAT mode)
-  return nodeStore.stats.relay_mode === true || nodeStore.stats.requires_relay === true
+  // Show relay section for relay mode OR any NAT node (private node type)
+  // All NAT nodes (Port Restricted, Symmetric, etc.) have relay managers and can use relays
+  return nodeStore.stats.relay_mode === true || nodeStore.stats.node_type === 'private'
 })
 
 async function copyPeerId() {

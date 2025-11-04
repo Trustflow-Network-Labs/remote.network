@@ -559,7 +559,8 @@ func (hp *HolePuncher) initiateHolePunch(peerID string, metadata *database.PeerM
 	stream.SetReadDeadline(time.Now().Add(10 * time.Second))
 	buffer := make([]byte, 8192)
 	n, err := stream.Read(buffer)
-	if err != nil {
+	if err != nil && (err != io.EOF || n == 0) {
+		// Only fail if we got an error other than EOF, or EOF with no data
 		return fmt.Errorf("failed to receive CONNECT: %v", err)
 	}
 	t3 := time.Now()
@@ -705,7 +706,8 @@ func (hp *HolePuncher) HandleHolePunchStream(stream *quic.Stream) error {
 	(*stream).SetReadDeadline(time.Now().Add(10 * time.Second))
 	buffer := make([]byte, 8192)
 	n, err := stream.Read(buffer)
-	if err != nil {
+	if err != nil && (err != io.EOF || n == 0) {
+		// Only fail if we got an error other than EOF, or EOF with no data
 		return fmt.Errorf("failed to receive CONNECT: %v", err)
 	}
 
@@ -762,7 +764,8 @@ func (hp *HolePuncher) HandleHolePunchStream(stream *quic.Stream) error {
 	// Step 5: Receive SYNC from initiator
 	(*stream).SetReadDeadline(time.Now().Add(10 * time.Second))
 	n, err = stream.Read(buffer)
-	if err != nil {
+	if err != nil && (err != io.EOF || n == 0) {
+		// Only fail if we got an error other than EOF, or EOF with no data
 		return fmt.Errorf("failed to receive SYNC: %v", err)
 	}
 

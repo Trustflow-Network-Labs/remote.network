@@ -136,7 +136,7 @@ func NewAPIServer(
 	})
 
 	// Initialize service search handler for remote service discovery
-	serviceSearchHandler := ws.NewServiceSearchHandler(wsLogger, dbManager, peerManager.GetQUIC(), peerManager.GetMetadataQuery(), peerManager.GetDHT(), peerManager.GetPeerID())
+	serviceSearchHandler := ws.NewServiceSearchHandler(wsLogger, dbManager, peerManager.GetQUIC(), peerManager.GetMetadataQuery(), peerManager.GetDHT(), peerManager.GetRelayPeer(), peerManager.GetPeerID())
 	wsHub.SetServiceSearchHandler(serviceSearchHandler)
 	logger.Info("Service search handler initialized for remote service discovery", "api")
 
