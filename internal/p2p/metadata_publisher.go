@@ -264,7 +264,8 @@ func (mp *MetadataPublisher) SetNATMetadataPublishedCallback(callback func()) {
 
 // NotifyRelayConnected is a helper function to update metadata when relay connection is established
 // This is specifically for NAT peers that connect to a relay (Phase 3, Step 12)
-func (mp *MetadataPublisher) NotifyRelayConnected(relayNodeID, relaySessionID, relayAddress string) error {
+// relayPeerID should be the persistent Ed25519-based peer ID (not the DHT NodeID)
+func (mp *MetadataPublisher) NotifyRelayConnected(relayPeerID, relaySessionID, relayAddress string) error {
 	mp.metadataMutex.Lock()
 	defer mp.metadataMutex.Unlock()
 
@@ -272,12 +273,13 @@ func (mp *MetadataPublisher) NotifyRelayConnected(relayNodeID, relaySessionID, r
 		return fmt.Errorf("no metadata initialized")
 	}
 
-	mp.logger.Info(fmt.Sprintf("Updating metadata with relay info (relay: %s, session: %s, files=%d, apps=%d)",
-		relayNodeID, relaySessionID, mp.currentMetadata.FilesCount, mp.currentMetadata.AppsCount), "metadata-publisher")
+	mp.logger.Info(fmt.Sprintf("Updating metadata with relay info (relay_peer_id: %s, session: %s, files=%d, apps=%d)",
+		relayPeerID, relaySessionID, mp.currentMetadata.FilesCount, mp.currentMetadata.AppsCount), "metadata-publisher")
 
 	// Update metadata with relay information
+	// Store the persistent PeerID (not the DHT NodeID which can change on restart)
 	mp.currentMetadata.NetworkInfo.UsingRelay = true
-	mp.currentMetadata.NetworkInfo.ConnectedRelay = relayNodeID
+	mp.currentMetadata.NetworkInfo.ConnectedRelay = relayPeerID
 	mp.currentMetadata.NetworkInfo.RelaySessionID = relaySessionID
 	mp.currentMetadata.NetworkInfo.RelayAddress = relayAddress
 	mp.currentMetadata.Timestamp = time.Now()

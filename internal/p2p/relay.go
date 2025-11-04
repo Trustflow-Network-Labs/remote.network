@@ -778,6 +778,28 @@ func (rp *RelayPeer) GetClientAddress(clientPeerID string) string {
 	return remoteAddr.String()
 }
 
+// GetClientConnection returns the QUIC connection for a registered relay client
+// This allows the relay to open new streams on the existing inbound connection
+func (rp *RelayPeer) GetClientConnection(clientPeerID string) (*quic.Conn, error) {
+	rp.clientsMutex.RLock()
+	session, exists := rp.registeredClients[clientPeerID]
+	rp.clientsMutex.RUnlock()
+
+	if !exists || session == nil {
+		return nil, fmt.Errorf("client not registered")
+	}
+
+	session.mutex.RLock()
+	conn := session.Connection
+	session.mutex.RUnlock()
+
+	if conn == nil {
+		return nil, fmt.Errorf("no active connection")
+	}
+
+	return conn, nil
+}
+
 // GetSessionDetails returns detailed information about all active sessions
 func (rp *RelayPeer) GetSessionDetails() []map[string]interface{} {
 	rp.sessionsMutex.RLock()

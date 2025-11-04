@@ -55,7 +55,7 @@ type NetworkInfo struct {
 
 	// NAT peer relay connection info (if using relay)
 	UsingRelay     bool   `json:"using_relay,omitempty"`
-	ConnectedRelay string `json:"connected_relay,omitempty"`  // Relay NodeID
+	ConnectedRelay string `json:"connected_relay,omitempty"`  // Relay PeerID (persistent Ed25519-based identifier)
 	RelaySessionID string `json:"relay_session_id,omitempty"` // Session ID for routing
 	RelayAddress   string `json:"relay_address,omitempty"`    // How to reach this peer via relay
 

@@ -214,8 +214,19 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 					}).Debug("Reached max relay query limit, skipping remaining peers")
 					break
 				}
-				peersToCheckForRelay = append(peersToCheckForRelay, kp.PeerID)
-				addedCount++
+
+				// Skip if already in list (avoid duplicates)
+				alreadyInList := false
+				for _, existing := range peersToCheckForRelay {
+					if existing == kp.PeerID {
+						alreadyInList = true
+						break
+					}
+				}
+				if !alreadyInList {
+					peersToCheckForRelay = append(peersToCheckForRelay, kp.PeerID)
+					addedCount++
+				}
 			}
 			ssh.logger.WithField("known_peers_count", len(peersToCheckForRelay)).Debug("Checking known NAT peers for relay accessibility")
 		}
@@ -224,16 +235,25 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 	// Process peers to check for relay accessibility or direct public connectivity
 	for _, peerID := range peersToCheckForRelay {
 		// Check if this peer is already in the query target list
-		alreadyConnected := false
-		for _, target := range queryTargets {
+		existingTargetIndex := -1
+		for i, target := range queryTargets {
 			// Compare peer IDs directly (both are hex strings)
 			if target.peerID == peerID {
-				alreadyConnected = true
+				existingTargetIndex = i
 				break
 			}
 		}
 
-		if !alreadyConnected {
+		// If peer already in queryTargets, we may need to update it to use relay
+		// This handles cases where NAT peer was initially misidentified as direct connection
+		if existingTargetIndex >= 0 {
+			ssh.logger.WithFields(logrus.Fields{
+				"peer_id": peerID[:8],
+			}).Debug("Peer already in query targets, checking if relay info needs updating")
+		}
+
+		// Always check DHT metadata to determine correct connectivity (even if already in list)
+		{
 			// Get peer from database to query metadata
 			peer, err := ssh.dbManager.KnownPeers.GetKnownPeer(peerID, "remote-network-mesh")
 			if err != nil || peer == nil || len(peer.PublicKey) == 0 {
@@ -265,12 +285,23 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 						"our_peer_id":   ssh.ourPeerID,
 					}).Debug("NAT peer connected to our own relay - will query via local relay session")
 
-					queryTargets = append(queryTargets, queryTarget{
+					newTarget := queryTarget{
 						peerID:        peerID,
 						useRelay:      true,
 						useLocalRelay: true, // Flag for local relay forwarding
 						sessionID:     metadata.NetworkInfo.RelaySessionID,
-					})
+					}
+
+					if existingTargetIndex >= 0 {
+						// Update existing entry
+						ssh.logger.WithFields(logrus.Fields{
+							"peer_id": peerID[:8],
+						}).Debug("Updating existing query target to use local relay")
+						queryTargets[existingTargetIndex] = newTarget
+					} else {
+						// Add new entry
+						queryTargets = append(queryTargets, newTarget)
+					}
 					continue
 				}
 
@@ -279,13 +310,24 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 					"relay_addr": metadata.NetworkInfo.RelayAddress,
 				}).Debug("Adding relay-accessible NAT peer to query list")
 
-				queryTargets = append(queryTargets, queryTarget{
+				newTarget := queryTarget{
 					peerID:        peerID,
 					useRelay:      true,
 					useLocalRelay: false,
 					relayAddr:     metadata.NetworkInfo.RelayAddress,
 					sessionID:     metadata.NetworkInfo.RelaySessionID,
-				})
+				}
+
+				if existingTargetIndex >= 0 {
+					// Update existing entry
+					ssh.logger.WithFields(logrus.Fields{
+						"peer_id": peerID[:8],
+					}).Debug("Updating existing query target to use remote relay")
+					queryTargets[existingTargetIndex] = newTarget
+				} else {
+					// Add new entry
+					queryTargets = append(queryTargets, newTarget)
+				}
 			} else if metadata.NetworkInfo.PublicIP != "" {
 				// Public peer - use direct connection
 				peerAddr := fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, metadata.NetworkInfo.PublicPort)
@@ -295,11 +337,22 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 					"peer_addr": peerAddr,
 				}).Debug("Adding direct-accessible public peer to query list")
 
-				queryTargets = append(queryTargets, queryTarget{
+				newTarget := queryTarget{
 					peerAddr: peerAddr,
 					peerID:   peerID,
 					useRelay: false,
-				})
+				}
+
+				if existingTargetIndex >= 0 {
+					// Update existing entry
+					ssh.logger.WithFields(logrus.Fields{
+						"peer_id": peerID[:8],
+					}).Debug("Updating existing query target to use direct connection")
+					queryTargets[existingTargetIndex] = newTarget
+				} else {
+					// Add new entry
+					queryTargets = append(queryTargets, newTarget)
+				}
 			} else {
 				ssh.logger.WithField("peer_id", peerID).Debug("Peer has no relay info and no public IP, skipping")
 			}
@@ -325,10 +378,10 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 
 	// Query all targets in parallel using goroutines for better performance
 	type queryResult struct {
-		services      []RemoteServiceInfo
-		target        queryTarget
-		err           error
-		usedFallback  bool
+		services     []RemoteServiceInfo
+		target       queryTarget
+		err          error
+		usedFallback bool
 	}
 
 	results := make(chan queryResult, len(queryTargets))
@@ -781,17 +834,17 @@ func (ssh *ServiceSearchHandler) getPeerRelayInfo(peerID string, topic string) (
 
 	if metadata.NetworkInfo.RelayAddress == "" || metadata.NetworkInfo.RelaySessionID == "" {
 		ssh.logger.WithFields(logrus.Fields{
-			"peer_id":        peerID[:8],
-			"relay_address":  metadata.NetworkInfo.RelayAddress,
-			"session_id":     metadata.NetworkInfo.RelaySessionID,
+			"peer_id":       peerID[:8],
+			"relay_address": metadata.NetworkInfo.RelayAddress,
+			"session_id":    metadata.NetworkInfo.RelaySessionID,
 		}).Warn("Peer metadata missing relay connection details")
 		return "", "", fmt.Errorf("peer metadata missing relay info")
 	}
 
 	ssh.logger.WithFields(logrus.Fields{
-		"peer_id":        peerID[:8],
-		"relay_address":  metadata.NetworkInfo.RelayAddress,
-		"session_id":     metadata.NetworkInfo.RelaySessionID[:8],
+		"peer_id":       peerID[:8],
+		"relay_address": metadata.NetworkInfo.RelayAddress,
+		"session_id":    metadata.NetworkInfo.RelaySessionID[:8],
 	}).Debug("Successfully retrieved relay info for peer")
 
 	return metadata.NetworkInfo.RelayAddress, metadata.NetworkInfo.RelaySessionID, nil
@@ -822,8 +875,8 @@ func (ssh *ServiceSearchHandler) queryPeerViaRelay(ctx context.Context, targetPe
 	// Use persistent peer IDs for relay forwarding (relay indexes by peer ID, not node ID)
 	forwardMsg := p2p.NewQUICMessage(p2p.MessageTypeRelayForward, &p2p.RelayForwardData{
 		SessionID:    sessionID,
-		SourcePeerID: ssh.ourPeerID,      // Our persistent peer ID
-		TargetPeerID: targetPeerID,        // Target's persistent peer ID
+		SourcePeerID: ssh.ourPeerID, // Our persistent peer ID
+		TargetPeerID: targetPeerID,  // Target's persistent peer ID
 		MessageType:  "service_search",
 		Payload:      searchMsgBytes,
 		PayloadSize:  int64(len(searchMsgBytes)),
@@ -983,20 +1036,135 @@ func (ssh *ServiceSearchHandler) queryPeerViaLocalRelay(ctx context.Context, tar
 		return nil, fmt.Errorf("relay peer not available")
 	}
 
-	// Get the connection address for this NAT peer from the relay
-	peerAddr := ssh.relayPeer.GetClientAddress(targetPeerID)
-	if peerAddr == "" {
-		return nil, fmt.Errorf("NAT peer %s not connected to our relay or no active connection found", targetPeerID[:8])
+	// Get the relay session connection for this NAT peer
+	conn, err := ssh.relayPeer.GetClientConnection(targetPeerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get relay session for NAT peer %s: %v", targetPeerID[:8], err)
 	}
 
 	ssh.logger.WithFields(logrus.Fields{
 		"target_peer_id": targetPeerID[:8],
-		"peer_address":   peerAddr,
-	}).Debug("Querying locally-connected NAT peer via existing QUIC connection")
+	}).Debug("Querying NAT peer via relay session connection")
 
-	// Use the direct query method since we have an existing connection
-	// The QUIC peer will reuse the existing connection
-	return ssh.queryPeerServices(ctx, peerAddr, targetPeerID, query, serviceType, activeOnly)
+	// Use the existing relay session connection to send the query
+	return ssh.queryPeerViaConnection(ctx, conn, targetPeerID, query, serviceType, activeOnly)
+}
+
+// queryPeerViaConnection queries a peer using an existing QUIC connection
+// This is used when the relay wants to query a NAT peer connected to it via relay session
+func (ssh *ServiceSearchHandler) queryPeerViaConnection(ctx context.Context, quicConn *quic.Conn, peerID string, query string, serviceType string, activeOnly bool) ([]RemoteServiceInfo, error) {
+	ssh.logger.WithFields(logrus.Fields{
+		"peer_id":      peerID[:8],
+		"query":        query,
+		"service_type": serviceType,
+		"active_only":  activeOnly,
+	}).Debug("Starting service query via existing connection")
+
+	// Create service search request message
+	if serviceType == "" {
+		serviceType = "DATA,DOCKER,STANDALONE"
+	}
+	searchMsg := p2p.CreateServiceSearchRequest(query, serviceType, activeOnly)
+	msgBytes, err := searchMsg.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal search request: %v", err)
+	}
+
+	// Check context before attempting stream open
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("context cancelled before opening stream: %v", ctx.Err())
+	default:
+	}
+
+	// Open a new bidirectional stream on the existing connection
+	ssh.logger.WithFields(logrus.Fields{
+		"peer_id": peerID[:8],
+	}).Debug("Opening stream on relay session connection")
+
+	stream, err := quicConn.OpenStreamSync(ctx)
+	if err != nil {
+		ssh.logger.WithFields(logrus.Fields{
+			"peer_id": peerID[:8],
+			"error":   err.Error(),
+		}).Warn("Failed to open stream on relay session connection")
+		return nil, fmt.Errorf("failed to open stream: %v", err)
+	}
+	defer stream.Close()
+
+	ssh.logger.WithFields(logrus.Fields{
+		"peer_id": peerID[:8],
+	}).Debug("Stream opened successfully, sending service query message")
+
+	// Send search request
+	if _, err := stream.Write(msgBytes); err != nil {
+		return nil, fmt.Errorf("failed to send search request: %v", err)
+	}
+
+	ssh.logger.WithFields(logrus.Fields{
+		"peer_id":      peerID[:8],
+		"message_size": len(msgBytes),
+	}).Debug("Service query message sent successfully via relay session")
+
+	// Read response with deadline
+	stream.SetReadDeadline(time.Now().Add(15 * time.Second))
+	buffer := make([]byte, 1024*1024) // 1MB buffer for response
+	n, err := stream.Read(buffer)
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("failed to read search response: %v", err)
+	}
+	if n == 0 {
+		return nil, fmt.Errorf("failed to read search response: no data received (EOF)")
+	}
+
+	ssh.logger.WithFields(logrus.Fields{
+		"peer_id":    peerID[:8],
+		"bytes_read": n,
+	}).Debug("Received service query response via relay session")
+
+	// Parse response
+	responseMsg, err := p2p.UnmarshalQUICMessage(buffer[:n])
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %v", err)
+	}
+
+	// Extract service search response
+	var searchResponse p2p.ServiceSearchResponse
+	if err := responseMsg.GetDataAs(&searchResponse); err != nil {
+		return nil, fmt.Errorf("failed to parse search response: %v", err)
+	}
+
+	if searchResponse.Error != "" {
+		return nil, fmt.Errorf("peer returned error: %s", searchResponse.Error)
+	}
+
+	ssh.logger.WithFields(logrus.Fields{
+		"peer_id":        peerID[:8],
+		"services_count": len(searchResponse.Services),
+	}).Debug("Service query response parsed successfully from relay session")
+
+	// Convert to RemoteServiceInfo
+	services := make([]RemoteServiceInfo, 0, len(searchResponse.Services))
+	for _, svc := range searchResponse.Services {
+		services = append(services, RemoteServiceInfo{
+			ID:              svc.ID,
+			Name:            svc.Name,
+			Description:     svc.Description,
+			ServiceType:     svc.ServiceType,
+			Type:            svc.Type,
+			Status:          svc.Status,
+			PricingAmount:   svc.PricingAmount,
+			PricingType:     svc.PricingType,
+			PricingInterval: svc.PricingInterval,
+			PricingUnit:     svc.PricingUnit,
+			Capabilities:    svc.Capabilities,
+			Hash:            svc.Hash,
+			SizeBytes:       svc.SizeBytes,
+			PeerID:          peerID, // Use peer ID for relay session queries
+		})
+	}
+
+	return services, nil
 }
 
 // sendPartialSearchResponse sends partial or final search results

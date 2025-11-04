@@ -751,7 +751,51 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 	// Monitor connection
 	go q.monitorConnection(conn, addr)
 
+	// Handle incoming streams from server (bidirectional support)
+	// This allows the server to initiate streams back to the client
+	// Essential for relay-to-NAT-peer communication
+	go q.handleClientStreams(conn, addr)
+
 	return conn, nil
+}
+
+// handleClientStreams handles incoming streams on client-side (outbound) connections
+// This enables bidirectional communication where the server can initiate streams back to the client
+// Critical for relay servers to query NAT peers that connect to them
+func (q *QUICPeer) handleClientStreams(conn *quic.Conn, remoteAddr string) {
+	q.logger.Debug(fmt.Sprintf("Starting stream handler for client connection to %s", remoteAddr), "quic")
+
+	for {
+		select {
+		case <-q.ctx.Done():
+			return
+		case <-conn.Context().Done():
+			q.logger.Debug(fmt.Sprintf("Client connection to %s closed, stopping stream handler", remoteAddr), "quic")
+			return
+		default:
+			stream, err := conn.AcceptStream(q.ctx)
+			if err != nil {
+				if q.ctx.Err() != nil {
+					// Context cancelled, shutting down gracefully
+					return
+				}
+				// Check if connection is closed
+				select {
+				case <-conn.Context().Done():
+					// Connection closed, exit handler
+					q.logger.Debug(fmt.Sprintf("Client connection to %s closed, stopping stream handler", remoteAddr), "quic")
+					return
+				default:
+					// Temporary error, log and continue accepting streams
+					q.logger.Warn(fmt.Sprintf("Temporary error accepting stream from %s: %v (continuing)", remoteAddr, err), "quic")
+					continue
+				}
+			}
+
+			// Handle stream in goroutine (same handler as server-side streams)
+			go q.handleStream(stream, remoteAddr)
+		}
+	}
 }
 
 func (q *QUICPeer) monitorConnection(conn *quic.Conn, addr string) {

@@ -847,14 +847,15 @@ func (rm *RelayManager) periodicRelayEvaluation() {
 // updateOurMetadataWithRelay updates our peer metadata to include relay connection info
 // In DHT-only architecture, this directly publishes to DHT without local database storage
 func (rm *RelayManager) updateOurMetadataWithRelay(relay *RelayCandidate, sessionID string) error {
-	rm.logger.Debug(fmt.Sprintf("Publishing relay connection to DHT: relay=%s, session=%s", relay.NodeID, sessionID), "relay-manager")
+	rm.logger.Debug(fmt.Sprintf("Publishing relay connection to DHT: relay=%s (peer_id=%s), session=%s", relay.NodeID, relay.PeerID, sessionID), "relay-manager")
 
 	// Publish updated metadata to DHT with relay connection info
+	// Use PeerID (persistent identifier) instead of NodeID (which can change on restart)
 	if rm.metadataPublisher != nil {
-		if err := rm.metadataPublisher.NotifyRelayConnected(relay.NodeID, sessionID, relay.Endpoint); err != nil {
+		if err := rm.metadataPublisher.NotifyRelayConnected(relay.PeerID, sessionID, relay.Endpoint); err != nil {
 			return fmt.Errorf("failed to publish relay metadata to DHT: %v", err)
 		}
-		rm.logger.Info(fmt.Sprintf("Published relay metadata to DHT: relay=%s, session=%s", relay.NodeID, sessionID), "relay-manager")
+		rm.logger.Info(fmt.Sprintf("Published relay metadata to DHT: relay_peer_id=%s, session=%s", relay.PeerID, sessionID), "relay-manager")
 	} else {
 		return fmt.Errorf("metadata publisher not available")
 	}
