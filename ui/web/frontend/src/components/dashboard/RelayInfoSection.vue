@@ -758,6 +758,10 @@ onUnmounted(() => {
       &.info-item-action {
         grid-column: 1 / -1;
         margin-top: 0.5rem;
+
+        .p-button {
+          max-width: 200px;
+        }
       }
     }
   }
