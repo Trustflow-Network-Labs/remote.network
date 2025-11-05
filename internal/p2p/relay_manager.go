@@ -745,10 +745,19 @@ func (rm *RelayManager) handleRelayConnectionLoss() {
 
 			if discovered > 0 {
 				rm.logger.Info(fmt.Sprintf("Rediscovery completed, retrying connection (discovered: %d)", discovered), "relay-manager")
-				rm.SelectAndConnectRelay()
+				if err := rm.SelectAndConnectRelay(); err != nil {
+					rm.logger.Error(fmt.Sprintf("❌ Failed to connect after rediscovery: %v", err), "relay-manager")
+					// Ensure DHT is updated to reflect no relay connection
+					rm.ensureDHTDisconnected()
+				}
 			} else {
 				rm.logger.Error("No relay candidates found after rediscovery", "relay-manager")
+				// Ensure DHT is updated to reflect no relay connection
+				rm.ensureDHTDisconnected()
 			}
+		} else {
+			// Had candidates but SelectAndConnectRelay failed - ensure DHT reflects disconnected state
+			rm.ensureDHTDisconnected()
 		}
 	} else {
 		rm.logger.Info("✅ Successfully connected to alternative relay", "relay-manager")
@@ -861,6 +870,18 @@ func (rm *RelayManager) updateOurMetadataWithRelay(relay *RelayCandidate, sessio
 	}
 
 	return nil
+}
+
+// ensureDHTDisconnected ensures DHT metadata is updated to reflect no relay connection
+// This is called when all reconnection attempts fail to guarantee DHT consistency
+func (rm *RelayManager) ensureDHTDisconnected() {
+	if rm.metadataPublisher != nil {
+		if err := rm.metadataPublisher.NotifyRelayDisconnected(); err != nil {
+			rm.logger.Warn(fmt.Sprintf("Failed to publish relay disconnection to DHT: %v", err), "relay-manager")
+		} else {
+			rm.logger.Info("Published relay disconnection to DHT after connection loss", "relay-manager")
+		}
+	}
 }
 
 // GetCurrentRelay returns the currently connected relay
