@@ -753,6 +753,11 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 	// Convert to RemoteServiceInfo
 	services := make([]RemoteServiceInfo, 0, len(searchResponse.Services))
 	for _, svc := range searchResponse.Services {
+		// Use peerID if available, otherwise fallback to peerAddr
+		servicePeerID := peerID
+		if servicePeerID == "" {
+			servicePeerID = peerAddr
+		}
 		services = append(services, RemoteServiceInfo{
 			ID:              svc.ID,
 			Name:            svc.Name,
@@ -767,7 +772,7 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 			Capabilities:    svc.Capabilities,
 			Hash:            svc.Hash,
 			SizeBytes:       svc.SizeBytes,
-			PeerID:          peerAddr, // Use peer address as ID for now
+			PeerID:          servicePeerID,
 		})
 	}
 

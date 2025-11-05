@@ -225,7 +225,14 @@
             </Column>
             <Column field="peer_id" :header="$t('message.peers.peerId')">
               <template #body="slotProps">
-                <code class="peer-id-code">{{ shorten(slotProps.data.peer_id, 6, 6) }}</code>
+                <div class="stat-value-with-copy">
+                  <span class="stat-value">{{ shorten(slotProps.data.peer_id, 6, 6) }}</span>
+                  <i
+                    class="pi pi-copy copy-icon"
+                    @click.stop="copyRemotePeerId(slotProps.data.peer_id)"
+                    :title="$t('message.common.copy')"
+                  ></i>
+                </div>
               </template>
             </Column>
             <Column :header="$t('message.common.actions')" :exportable="false" style="min-width:8rem">
@@ -539,6 +546,18 @@ async function copyPeerId() {
   }
 }
 
+async function copyRemotePeerId(peerIdToCopy: string) {
+  const success = await copyToClipboard(peerIdToCopy)
+  if (success) {
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.common.copiedToClipboard'),
+      life: 2000
+    })
+  }
+}
+
 // Navigate to service details page
 function viewServiceDetails(service: any) {
   router.push(`/services/service/${service.id}`)
@@ -761,13 +780,21 @@ onMounted(async () => {
   }
 }
 
-.peer-id-code {
-  font-family: 'Courier New', monospace;
-  font-size: vars.$font-size-sm;
-  background: rgba(vars.$color-primary, 0.1);
-  padding: 0.25rem 0.5rem;
-  border-radius: vars.$border-radius-sm;
-  color: vars.$color-primary;
+.stat-value-with-copy {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+
+  .copy-icon {
+    color: vars.$color-text-secondary;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: color 0.2s ease;
+
+    &:hover {
+      color: vars.$color-primary;
+    }
+  }
 }
 
 .passphrase-content {
