@@ -36,6 +36,7 @@ type PeerManager struct {
 	trafficMonitor        *p2p.RelayTrafficMonitor
 	natDetector           *p2p.NATDetector
 	topologyMgr           *p2p.NATTopologyManager
+	networkStateMonitor   *p2p.NetworkStateMonitor
 	holePuncher           *p2p.HolePuncher
 	// Phase 4: DHT-based metadata services (replaces MetadataBroadcaster)
 	metadataPublisher       *p2p.MetadataPublisher
@@ -162,6 +163,11 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 	periodicDiscoveryMgr := p2p.NewPeriodicDiscovery(peerDiscovery, dbManager, logger, config)
 	logger.Info("Periodic discovery initialized (3-hour DHT rediscovery)", "core")
 
+	// Initialize network state monitor for IP/NAT change detection
+	// Will be started after initial detection in Start()
+	networkStateMonitor := p2p.NewNetworkStateMonitor(config, logger, natDetector, topologyMgr, metadataPublisher, relayManager)
+	logger.Info("Network state monitor initialized (IP/NAT change detection)", "core")
+
 	pm := &PeerManager{
 		config:                  config,
 		logger:                  logger,
@@ -173,6 +179,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 		trafficMonitor:          trafficMonitor,
 		natDetector:             natDetector,
 		topologyMgr:             topologyMgr,
+		networkStateMonitor:     networkStateMonitor,
 		holePuncher:             holePuncher,
 		metadataPublisher:       metadataPublisher,
 		metadataFetcher:         metadataFetcher,
@@ -308,6 +315,15 @@ func (pm *PeerManager) Start() error {
 	// Re-acquire mutex to set running state
 	pm.mutex.Lock()
 
+	// Start network state monitor for IP/NAT change detection
+	if pm.networkStateMonitor != nil {
+		if err := pm.networkStateMonitor.Start(); err != nil {
+			pm.logger.Warn(fmt.Sprintf("Failed to start network state monitor: %v", err), "core")
+		} else {
+			pm.logger.Info("Network state monitor started for IP/NAT change detection", "core")
+		}
+	}
+
 	// Start background tasks
 	pm.logger.Debug("Starting periodic announce goroutine", "core")
 	go pm.periodicAnnounce()
@@ -323,7 +339,7 @@ func (pm *PeerManager) Start() error {
 
 	pm.startTime = time.Now()
 	pm.running = true
-	pm.logger.Info("Peer Manager started successfully with 4 background goroutines", "core")
+	pm.logger.Info("Peer Manager started successfully with 5 background services", "core")
 
 	return nil
 }
@@ -743,6 +759,11 @@ func (pm *PeerManager) GetStats() map[string]interface{} {
 		stats["hole_punch_metrics"] = pm.holePuncher.GetMetrics()
 	}
 
+	// Add network state monitor stats
+	if pm.networkStateMonitor != nil {
+		stats["network_monitor"] = pm.networkStateMonitor.GetStats()
+	}
+
 	topicStats := make(map[string]interface{})
 	for name, state := range pm.topics {
 		state.mutex.RLock()
@@ -813,6 +834,12 @@ func (pm *PeerManager) Stop() error {
 	if pm.metadataPublisher != nil {
 		pm.metadataPublisher.StopPeriodicRepublish()
 		pm.logger.Info("Metadata publisher stopped", "core")
+	}
+
+	// Stop network state monitor
+	if pm.networkStateMonitor != nil {
+		pm.networkStateMonitor.Stop()
+		pm.logger.Info("Network state monitor stopped", "core")
 	}
 
 	// Stop QUIC peer

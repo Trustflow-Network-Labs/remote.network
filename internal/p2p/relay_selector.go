@@ -98,6 +98,17 @@ func (rs *RelaySelector) RemoveCandidate(nodeID string) {
 	rs.logger.Debug(fmt.Sprintf("Removed relay candidate: %s", nodeID), "relay-selector")
 }
 
+// ClearCandidates removes all relay candidates
+// This is used when network configuration changes to force fresh relay discovery
+func (rs *RelaySelector) ClearCandidates() {
+	rs.candidatesMutex.Lock()
+	defer rs.candidatesMutex.Unlock()
+
+	count := len(rs.candidates)
+	rs.candidates = make(map[string]*RelayCandidate)
+	rs.logger.Info(fmt.Sprintf("Cleared %d relay candidates for fresh discovery", count), "relay-selector")
+}
+
 // UpdateCandidateLastSeen updates the LastSeen timestamp for a candidate
 // This prevents actively-used relays from being removed as stale
 func (rs *RelaySelector) UpdateCandidateLastSeen(nodeID string) {

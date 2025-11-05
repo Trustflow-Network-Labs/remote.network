@@ -1002,3 +1002,54 @@ func (rm *RelayManager) RecordEgressTraffic(bytes int64) {
 	rm.egressBytes += bytes
 	rm.trafficMutex.Unlock()
 }
+
+// DisconnectCurrentRelay disconnects from the current relay
+// This is a wrapper around DisconnectRelay() for use by network state monitor
+func (rm *RelayManager) DisconnectCurrentRelay() {
+	rm.logger.Info("Disconnecting from current relay (requested by network state monitor)", "relay-manager")
+	rm.DisconnectRelay()
+}
+
+// ReconnectRelay disconnects from current relay and establishes a new relay connection
+// This is used when network configuration changes (IP or NAT type changes)
+func (rm *RelayManager) ReconnectRelay() error {
+	rm.logger.Info("Reconnecting to relay with new network configuration...", "relay-manager")
+
+	// Step 1: Disconnect from current relay if connected
+	rm.relayMutex.RLock()
+	hasCurrentRelay := rm.currentRelay != nil
+	rm.relayMutex.RUnlock()
+
+	if hasCurrentRelay {
+		rm.logger.Info("Disconnecting from current relay before reconnection...", "relay-manager")
+		rm.DisconnectRelay()
+
+		// Wait briefly for clean disconnect
+		time.Sleep(1 * time.Second)
+	}
+
+	// Step 2: Clear relay candidates to force re-discovery with new network conditions
+	// This ensures we select the best relay for our new network configuration
+	if rm.selector != nil {
+		rm.logger.Info("Clearing relay candidates for fresh discovery...", "relay-manager")
+		rm.selector.ClearCandidates()
+	}
+
+	// Step 3: Rediscover relay candidates
+	rm.logger.Info("Rediscovering relay candidates with new network configuration...", "relay-manager")
+	relayCount := rm.rediscoverRelayCandidates()
+	if relayCount == 0 {
+		return fmt.Errorf("no relay candidates found after network change")
+	}
+	rm.logger.Info(fmt.Sprintf("Discovered %d relay candidates", relayCount), "relay-manager")
+
+	// Step 4: Select and connect to best relay for new network conditions
+	rm.logger.Info("Selecting and connecting to best relay for new network configuration...", "relay-manager")
+	err := rm.SelectAndConnectRelay()
+	if err != nil {
+		return fmt.Errorf("failed to connect to relay after network change: %v", err)
+	}
+
+	rm.logger.Info("Successfully reconnected to relay with new network configuration", "relay-manager")
+	return nil
+}

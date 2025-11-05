@@ -78,6 +78,13 @@ nat_port_prediction_samples = 3
 nat_port_prediction_max_diff = 10
 nat_hairpinning_timeout = 2s
 
+# Network State Monitoring
+# How often to check for IP/NAT changes (in minutes)
+# When changes are detected, triggers automatic metadata republishing:
+#  - Public nodes: Update and republish metadata with new IP
+#  - NAT nodes: Disconnect from relay, re-select relay, reconnect, then republish with new relay info
+network_monitor_interval_minutes = 5
+
 [keystore]
 # Keystore passphrase (optional - for automated/background startup)
 # Set this to your keystore passphrase to avoid interactive prompts
