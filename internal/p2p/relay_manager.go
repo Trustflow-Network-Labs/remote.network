@@ -92,15 +92,48 @@ func (rm *RelayManager) Start() error {
 					rm.logger.Info(fmt.Sprintf("✅ Auto-added relay from metadata discovery: %s (endpoint: %s)",
 						metadata.PeerID[:8], metadata.NetworkInfo.RelayEndpoint), "relay-manager")
 
-					// If we're not connected to any relay, try connecting to this new discovery
-					if rm.GetCurrentRelay() == nil {
-						rm.logger.Info("No relay connected, attempting to connect to newly discovered relay...", "relay-manager")
-						go func() {
+					// Measure latency asynchronously for the newly discovered relay
+					go func(peerID, endpoint string) {
+						rm.logger.Debug(fmt.Sprintf("Measuring latency for newly discovered relay %s...", peerID[:8]), "relay-manager")
+
+						// Use PeerID for measurement lookup
+						if _, err := rm.selector.MeasureCandidate(peerID); err != nil {
+							rm.logger.Warn(fmt.Sprintf("Failed to measure latency for relay %s: %v", peerID[:8], err), "relay-manager")
+							return
+						}
+
+						rm.logger.Info(fmt.Sprintf("✅ Measured latency for newly discovered relay %s", peerID[:8]), "relay-manager")
+
+						// Check if we have an active relay
+						rm.relayMutex.RLock()
+						hasActiveRelay := rm.currentRelay != nil
+						rm.relayMutex.RUnlock()
+
+						if hasActiveRelay {
+							// OPTION C: We have an active relay, disconnect immediately after measurement
+							rm.quicPeer.DisconnectFromPeer(endpoint)
+							rm.logger.Debug(fmt.Sprintf("Cleaned up connection after measuring relay %s (have active relay)", peerID[:8]), "relay-manager")
+						} else {
+							// OPTION B: No active relay, keep connection and let SelectAndConnectRelay() reuse it
+							rm.logger.Info("No relay connected, attempting to select and connect after measurement...", "relay-manager")
 							if err := rm.SelectAndConnectRelay(); err != nil {
-								rm.logger.Warn(fmt.Sprintf("Failed to connect to newly discovered relay: %v", err), "relay-manager")
+								rm.logger.Warn(fmt.Sprintf("Failed to connect to relay: %v", err), "relay-manager")
+								// Cleanup connection since we failed to use it
+								rm.quicPeer.DisconnectFromPeer(endpoint)
+							} else {
+								// SelectAndConnectRelay succeeded - cleanup non-selected relays
+								rm.relayMutex.RLock()
+								selectedRelay := rm.currentRelay
+								rm.relayMutex.RUnlock()
+
+								// Disconnect if this relay wasn't selected
+								if selectedRelay == nil || selectedRelay.PeerID != peerID {
+									rm.quicPeer.DisconnectFromPeer(endpoint)
+									rm.logger.Debug(fmt.Sprintf("Cleaned up connection after measuring relay %s (not selected)", peerID[:8]), "relay-manager")
+								}
 							}
-						}()
-					}
+						}
+					}(metadata.PeerID, metadata.NetworkInfo.RelayEndpoint)
 				} else {
 					rm.logger.Debug(fmt.Sprintf("Failed to add auto-discovered relay %s: %v", metadata.PeerID[:8], err), "relay-manager")
 				}
@@ -112,26 +145,15 @@ func (rm *RelayManager) Start() error {
 	}
 
 	// Start periodic relay evaluation
-	evaluationInterval := rm.config.GetConfigDuration("relay_evaluation_interval", 5*time.Minute)
+	evaluationInterval := rm.config.GetConfigDuration("relay_evaluation_interval", 30*time.Minute)
 	rm.evaluationTicker = time.NewTicker(evaluationInterval)
 
 	go rm.periodicRelayEvaluation()
 
-	// Perform initial relay selection
-	go func() {
-		// Wait a bit for peers to be discovered via identity exchange
-		time.Sleep(5 * time.Second)
-
-		// First, discover relay candidates from database
-		rm.logger.Info("Initial relay discovery: loading candidates from database...", "relay-manager")
-		candidatesFound := rm.rediscoverRelayCandidates()
-		rm.logger.Info(fmt.Sprintf("Initial relay discovery: found %d candidates", candidatesFound), "relay-manager")
-
-		// Then attempt to select and connect
-		if err := rm.SelectAndConnectRelay(); err != nil {
-			rm.logger.Error(fmt.Sprintf("Initial relay selection failed: %v", err), "relay-manager")
-		}
-	}()
+	// Note: No initial relay selection needed here
+	// Relays will be discovered via metadata query service callbacks (line 86-143)
+	// Each discovery triggers async measurement and SelectAndConnectRelay() if no relay is connected
+	// This prevents race conditions and allows natural, event-driven relay selection
 
 	return nil
 }
@@ -159,15 +181,14 @@ func (rm *RelayManager) AddRelayCandidate(metadata *database.PeerMetadata) error
 	return rm.selector.AddCandidate(metadata)
 }
 
-// SelectAndConnectRelay selects the best relay and establishes connection
+// SelectAndConnectRelay selects the best relay from existing measurements and establishes connection
+// Note: This function does NOT measure latencies - it assumes measurements are already done
+// For periodic evaluation that requires fresh measurements, use EvaluateAndSelectRelay() instead
 func (rm *RelayManager) SelectAndConnectRelay() error {
 	candidateCount := rm.selector.GetCandidateCount()
-	rm.logger.Info(fmt.Sprintf("🎯 Selecting best relay peer from %d candidates...", candidateCount), "relay-manager")
+	rm.logger.Info(fmt.Sprintf("🎯 Selecting best relay peer from %d candidates (using existing measurements)...", candidateCount), "relay-manager")
 
-	// Measure latency to all candidates
-	rm.selector.MeasureAllCandidates()
-
-	// Select best relay
+	// Select best relay from existing latency measurements
 	bestRelay := rm.selector.SelectBestRelay()
 	if bestRelay == nil {
 		rm.logger.Warn(fmt.Sprintf("❌ No suitable relay found (had %d candidates)", candidateCount), "relay-manager")
@@ -175,7 +196,7 @@ func (rm *RelayManager) SelectAndConnectRelay() error {
 	}
 
 	rm.logger.Info(fmt.Sprintf("🏆 Best relay selected: %s (endpoint: %s, latency: %v)",
-		bestRelay.NodeID, bestRelay.Endpoint, bestRelay.Latency), "relay-manager")
+		bestRelay.PeerID[:8], bestRelay.Endpoint, bestRelay.Latency), "relay-manager")
 
 	// Check if we should switch
 	rm.relayMutex.RLock()
@@ -184,14 +205,62 @@ func (rm *RelayManager) SelectAndConnectRelay() error {
 
 	if currentRelay != nil {
 		if !rm.selector.ShouldSwitchRelay(currentRelay, bestRelay) {
-			rm.logger.Info(fmt.Sprintf("Current relay %s is still optimal", currentRelay.NodeID), "relay-manager")
+			rm.logger.Info(fmt.Sprintf("Current relay %s is still optimal", currentRelay.PeerID[:8]), "relay-manager")
 			return nil
 		}
-		rm.logger.Info(fmt.Sprintf("Switching from relay %s to %s", currentRelay.NodeID, bestRelay.NodeID), "relay-manager")
+		rm.logger.Info(fmt.Sprintf("Switching from relay %s to %s", currentRelay.PeerID[:8], bestRelay.PeerID[:8]), "relay-manager")
 	}
 
 	// Connect to new relay
 	return rm.ConnectToRelay(bestRelay)
+}
+
+// EvaluateAndSelectRelay measures all relay candidates, selects the best, and connects
+// Used for initial selection and periodic re-evaluation
+func (rm *RelayManager) EvaluateAndSelectRelay() error {
+	candidateCount := rm.selector.GetCandidateCount()
+	rm.logger.Info(fmt.Sprintf("🔍 Evaluating %d relay candidates (measuring latencies)...", candidateCount), "relay-manager")
+
+	// Capture existing connections BEFORE measurement to avoid closing them
+	// (e.g., ongoing file downloads, service connections to peers)
+	existingConnections := rm.quicPeer.GetConnectionAddressesMap()
+	rm.logger.Debug(fmt.Sprintf("Pre-measurement: %d existing connections to preserve", len(existingConnections)), "relay-manager")
+
+	// Measure latency to all candidates (may reuse existing connections)
+	measuredEndpoints := rm.selector.MeasureAllCandidates()
+
+	// Select best relay from measurements and connect
+	err := rm.SelectAndConnectRelay()
+
+	// Get current relay to preserve its connection
+	rm.relayMutex.RLock()
+	currentRelay := rm.currentRelay
+	rm.relayMutex.RUnlock()
+
+	// Filter: only cleanup NEW connections created during measurement
+	// Exclude: 1) pre-existing connections, 2) current relay connection
+	newConnections := make([]string, 0, len(measuredEndpoints))
+	for _, endpoint := range measuredEndpoints {
+		// Skip if this was a pre-existing connection
+		if existingConnections[endpoint] {
+			rm.logger.Debug(fmt.Sprintf("Preserving pre-existing connection to %s", endpoint), "relay-manager")
+			continue
+		}
+		// Skip if this is the current relay
+		if currentRelay != nil && endpoint == currentRelay.Endpoint {
+			continue
+		}
+		newConnections = append(newConnections, endpoint)
+	}
+
+	// Cleanup only NEW connections created during measurement
+	if len(newConnections) > 0 {
+		disconnected := rm.quicPeer.DisconnectFromPeers(newConnections, "")
+		rm.logger.Debug(fmt.Sprintf("Cleaned up %d new connections (preserved %d pre-existing)",
+			disconnected, len(existingConnections)), "relay-manager")
+	}
+
+	return err
 }
 
 // ConnectToRelay establishes connection to a specific relay
@@ -732,8 +801,8 @@ func (rm *RelayManager) handleRelayConnectionLoss() {
 		rm.selector.RemoveCandidate(failedRelay.NodeID)
 	}
 
-	// PHASE 3: Select alternative relay (immediate)
-	rm.logger.Info("🔍 Selecting alternative relay for immediate connection", "relay-manager")
+	// PHASE 3: Select alternative relay from existing measurements (fast failover)
+	rm.logger.Info("🔍 Selecting alternative relay for immediate connection (using existing measurements)", "relay-manager")
 
 	if err := rm.SelectAndConnectRelay(); err != nil {
 		rm.logger.Error(fmt.Sprintf("❌ Failed to connect to alternative relay: %v", err), "relay-manager")
@@ -744,8 +813,9 @@ func (rm *RelayManager) handleRelayConnectionLoss() {
 			discovered := rm.rediscoverRelayCandidates()
 
 			if discovered > 0 {
-				rm.logger.Info(fmt.Sprintf("Rediscovery completed, retrying connection (discovered: %d)", discovered), "relay-manager")
-				if err := rm.SelectAndConnectRelay(); err != nil {
+				rm.logger.Info(fmt.Sprintf("Rediscovery completed, measuring and connecting (discovered: %d)", discovered), "relay-manager")
+				// Rediscovered candidates have no latency measurements, must evaluate first
+				if err := rm.EvaluateAndSelectRelay(); err != nil {
 					rm.logger.Error(fmt.Sprintf("❌ Failed to connect after rediscovery: %v", err), "relay-manager")
 					// Ensure DHT is updated to reflect no relay connection
 					rm.ensureDHTDisconnected()
@@ -831,7 +901,7 @@ func (rm *RelayManager) periodicRelayEvaluation() {
 	for {
 		select {
 		case <-rm.evaluationTicker.C:
-			rm.logger.Debug("Performing periodic relay evaluation...", "relay-manager")
+			rm.logger.Info("⏰ Performing periodic relay evaluation (re-measuring all candidates)...", "relay-manager")
 
 			// Check if we have relay candidates, if not try to rediscover
 			if rm.selector.GetCandidateCount() == 0 {
@@ -839,9 +909,9 @@ func (rm *RelayManager) periodicRelayEvaluation() {
 				rm.rediscoverRelayCandidates()
 			}
 
-			// Re-evaluate and potentially switch relay
-			if err := rm.SelectAndConnectRelay(); err != nil {
-				rm.logger.Debug(fmt.Sprintf("Relay evaluation: %v", err), "relay-manager")
+			// Re-measure all candidates and potentially switch relay
+			if err := rm.EvaluateAndSelectRelay(); err != nil {
+				rm.logger.Debug(fmt.Sprintf("Periodic relay evaluation: %v", err), "relay-manager")
 			}
 
 		case <-rm.evaluationStop:
@@ -1064,9 +1134,9 @@ func (rm *RelayManager) ReconnectRelay() error {
 	}
 	rm.logger.Info(fmt.Sprintf("Discovered %d relay candidates", relayCount), "relay-manager")
 
-	// Step 4: Select and connect to best relay for new network conditions
-	rm.logger.Info("Selecting and connecting to best relay for new network configuration...", "relay-manager")
-	err := rm.SelectAndConnectRelay()
+	// Step 4: Measure and select best relay for new network conditions
+	rm.logger.Info("Measuring latencies and selecting best relay for new network configuration...", "relay-manager")
+	err := rm.EvaluateAndSelectRelay()
 	if err != nil {
 		return fmt.Errorf("failed to connect to relay after network change: %v", err)
 	}

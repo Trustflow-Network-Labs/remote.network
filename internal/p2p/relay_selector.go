@@ -166,11 +166,42 @@ func (rs *RelaySelector) MeasureLatency(candidate *RelayCandidate) (time.Duratio
 	return latency, nil
 }
 
-// MeasureAllCandidates measures latency to all relay candidates
-// Uses a two-phase approach to avoid measuring connection establishment time as latency:
-// Phase 1: Pre-establish connections to all candidates concurrently
-// Phase 2: Measure latency over existing connections
-func (rs *RelaySelector) MeasureAllCandidates() {
+// MeasureCandidate measures latency to a single relay candidate by PeerID or NodeID
+// Used for on-demand measurement upon relay discovery or re-evaluation
+// Returns the measured latency and any error encountered
+func (rs *RelaySelector) MeasureCandidate(peerIDOrNodeID string) (time.Duration, error) {
+	// Look up candidate by PeerID or NodeID
+	rs.candidatesMutex.RLock()
+	var candidate *RelayCandidate
+	for _, c := range rs.candidates {
+		if c.PeerID == peerIDOrNodeID || c.NodeID == peerIDOrNodeID {
+			candidate = c
+			break
+		}
+	}
+	rs.candidatesMutex.RUnlock()
+
+	if candidate == nil {
+		return 0, fmt.Errorf("relay candidate %s not found", peerIDOrNodeID)
+	}
+
+	rs.logger.Debug(fmt.Sprintf("Measuring latency for relay candidate %s (endpoint: %s)", candidate.PeerID[:8], candidate.Endpoint), "relay-selector")
+
+	// Measure latency
+	latency, err := rs.MeasureLatency(candidate)
+	if err != nil {
+		rs.logger.Warn(fmt.Sprintf("Failed to measure latency for relay %s: %v", candidate.PeerID[:8], err), "relay-selector")
+		return 0, err
+	}
+
+	rs.logger.Info(fmt.Sprintf("✅ Measured relay %s latency: %v", candidate.PeerID[:8], latency), "relay-selector")
+	return latency, nil
+}
+
+// MeasureAllCandidates measures latency to all relay candidates using hybrid batching
+// Returns list of measured endpoints for cleanup by caller
+// Batching approach: measure N relays at a time to balance speed and resource usage
+func (rs *RelaySelector) MeasureAllCandidates() []string {
 	rs.candidatesMutex.RLock()
 	candidateList := make([]*RelayCandidate, 0, len(rs.candidates))
 	for _, candidate := range rs.candidates {
@@ -178,41 +209,69 @@ func (rs *RelaySelector) MeasureAllCandidates() {
 	}
 	rs.candidatesMutex.RUnlock()
 
-	// PHASE 1: Pre-establish connections to all candidates
-	// This prevents measuring connection establishment time (43-45s) as latency
-	rs.logger.Debug(fmt.Sprintf("Pre-establishing connections to %d relay candidates...", len(candidateList)), "relay-selector")
-
-	var wg sync.WaitGroup
-	for _, candidate := range candidateList {
-		wg.Add(1)
-		go func(c *RelayCandidate) {
-			defer wg.Done()
-			_, err := rs.quicPeer.ConnectToPeer(c.Endpoint)
-			if err != nil {
-				rs.logger.Debug(fmt.Sprintf("Failed to pre-establish connection to relay %s: %v", c.NodeID, err), "relay-selector")
-			} else {
-				rs.logger.Debug(fmt.Sprintf("Pre-established connection to relay %s", c.NodeID), "relay-selector")
-			}
-		}(candidate)
+	if len(candidateList) == 0 {
+		rs.logger.Debug("No relay candidates to measure", "relay-selector")
+		return []string{}
 	}
-	wg.Wait()
 
-	rs.logger.Debug(fmt.Sprintf("Connection pre-establishment complete, now measuring latency to %d candidates", len(candidateList)), "relay-selector")
+	// Get batch size from config (default: 3 relays per batch)
+	batchSize := rs.config.GetConfigInt("relay_batch_size", 3, 1, 20)
 
-	// PHASE 2: Measure latency over existing connections
-	// Now that connections exist, ping will measure actual network latency (~30-150ms)
-	for _, candidate := range candidateList {
-		wg.Add(1)
-		go func(c *RelayCandidate) {
-			defer wg.Done()
-			if _, err := rs.MeasureLatency(c); err != nil {
-				rs.logger.Debug(fmt.Sprintf("Failed to measure latency to %s: %v", c.NodeID, err), "relay-selector")
-			}
-		}(candidate)
+	rs.logger.Info(fmt.Sprintf("Measuring latency for %d relay candidates (batch size: %d)...", len(candidateList), batchSize), "relay-selector")
+
+	measuredEndpoints := make([]string, 0, len(candidateList))
+	totalMeasured := 0
+
+	// Process candidates in batches
+	for i := 0; i < len(candidateList); i += batchSize {
+		end := i + batchSize
+		if end > len(candidateList) {
+			end = len(candidateList)
+		}
+		batch := candidateList[i:end]
+
+		rs.logger.Debug(fmt.Sprintf("Processing batch %d-%d of %d candidates", i+1, end, len(candidateList)), "relay-selector")
+
+		// PHASE 1: Pre-establish connections for this batch
+		var wg sync.WaitGroup
+		for _, candidate := range batch {
+			wg.Add(1)
+			go func(c *RelayCandidate) {
+				defer wg.Done()
+				_, err := rs.quicPeer.ConnectToPeer(c.Endpoint)
+				if err != nil {
+					rs.logger.Debug(fmt.Sprintf("Failed to pre-establish connection to relay %s: %v", c.NodeID, err), "relay-selector")
+				} else {
+					rs.logger.Debug(fmt.Sprintf("Pre-established connection to relay %s", c.NodeID), "relay-selector")
+				}
+			}(candidate)
+		}
+		wg.Wait()
+
+		// PHASE 2: Measure latency for this batch over existing connections
+		for _, candidate := range batch {
+			wg.Add(1)
+			go func(c *RelayCandidate) {
+				defer wg.Done()
+				if _, err := rs.MeasureLatency(c); err != nil {
+					rs.logger.Debug(fmt.Sprintf("Failed to measure latency to %s: %v", c.NodeID, err), "relay-selector")
+				} else {
+					totalMeasured++
+				}
+			}(candidate)
+		}
+		wg.Wait()
+
+		// Collect endpoints from this batch
+		for _, candidate := range batch {
+			measuredEndpoints = append(measuredEndpoints, candidate.Endpoint)
+		}
+
+		rs.logger.Debug(fmt.Sprintf("Completed batch %d-%d (%d/%d candidates measured)", i+1, end, totalMeasured, len(candidateList)), "relay-selector")
 	}
-	wg.Wait()
 
-	rs.logger.Debug(fmt.Sprintf("Measured latency for %d relay candidates", len(candidateList)), "relay-selector")
+	rs.logger.Info(fmt.Sprintf("✅ Measured latency for %d/%d relay candidates", totalMeasured, len(candidateList)), "relay-selector")
+	return measuredEndpoints
 }
 
 // SelectBestRelay selects the best relay based on preferred relay (if set), then latency, reputation, and pricing

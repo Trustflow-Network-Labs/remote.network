@@ -888,6 +888,20 @@ func (q *QUICPeer) GetConnections() []string {
 	return addrs
 }
 
+// GetConnectionAddressesMap returns a map of connection addresses for quick lookup
+// Used to identify pre-existing connections before relay measurement
+func (q *QUICPeer) GetConnectionAddressesMap() map[string]bool {
+	q.connMutex.RLock()
+	defer q.connMutex.RUnlock()
+
+	addrMap := make(map[string]bool, len(q.connections))
+	for addr := range q.connections {
+		addrMap[addr] = true
+	}
+
+	return addrMap
+}
+
 func (q *QUICPeer) GetConnectionCount() int {
 	q.connMutex.RLock()
 	defer q.connMutex.RUnlock()
@@ -931,6 +945,55 @@ func (q *QUICPeer) GetConnectionByPeerID(peerID string) (*quic.Conn, error) {
 	}
 
 	return connInfo.Conn, nil
+}
+
+// DisconnectFromPeer explicitly closes a connection to a peer by address
+// Used for cleanup after relay candidate measurement to free resources
+func (q *QUICPeer) DisconnectFromPeer(addr string) error {
+	q.connMutex.Lock()
+	defer q.connMutex.Unlock()
+
+	connInfo, exists := q.connections[addr]
+	if !exists {
+		// Connection doesn't exist or already closed
+		return nil
+	}
+
+	// Close the connection
+	connInfo.Conn.CloseWithError(0, "measurement cleanup")
+
+	// Remove from connection maps
+	if connInfo.PeerID != "" {
+		delete(q.peerConnections, connInfo.PeerID)
+	}
+	delete(q.connections, addr)
+
+	q.logger.Debug(fmt.Sprintf("Disconnected from peer %s (cleanup)", addr), "quic")
+	return nil
+}
+
+// DisconnectFromPeers disconnects from multiple peers, optionally excluding one
+// Used for batch cleanup after relay measurement
+func (q *QUICPeer) DisconnectFromPeers(addrs []string, exceptAddr string) int {
+	disconnected := 0
+
+	for _, addr := range addrs {
+		// Skip the exception address (e.g., active relay)
+		if addr == exceptAddr {
+			q.logger.Debug(fmt.Sprintf("Skipping disconnect for %s (exception)", addr), "quic")
+			continue
+		}
+
+		if err := q.DisconnectFromPeer(addr); err == nil {
+			disconnected++
+		}
+	}
+
+	if disconnected > 0 {
+		q.logger.Debug(fmt.Sprintf("Disconnected from %d peers during cleanup", disconnected), "quic")
+	}
+
+	return disconnected
 }
 
 // Ping sends a ping message to a peer and waits for pong response
