@@ -256,7 +256,7 @@ func (nd *NATDetector) performSTUNTest() (string, int, error) {
 // stunQuery sends a STUN binding request and returns the mapped address
 func (nd *NATDetector) stunQuery(stunServer string) (string, int, error) {
 	// Get timeout from config
-	timeout := nd.config.GetConfigDuration("nat_stun_timeout", 5*time.Second)
+	timeout := nd.config.GetConfigDuration("nat_stun_timeout", 3*time.Second)
 
 	// Create UDP connection
 	conn, err := net.DialTimeout("udp", stunServer, timeout)

@@ -675,7 +675,7 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 	keepAlivePeriod := q.config.GetConfigDuration("quic_keepalive_period", 10*time.Second)
 
 	// Get dial timeout for connection establishment (prevents hanging on unreachable peers)
-	dialTimeout := q.config.GetConfigDuration("quic_dial_timeout", 10*time.Second)
+	dialTimeout := q.config.GetConfigDuration("quic_dial_timeout", 5*time.Second)
 
 	q.logger.Debug(fmt.Sprintf("Dialing %s with QUIC config: DialTimeout=%v, MaxIdleTimeout=%v, KeepAlivePeriod=%v", addr, dialTimeout, idleTimeout, keepAlivePeriod), "quic")
 

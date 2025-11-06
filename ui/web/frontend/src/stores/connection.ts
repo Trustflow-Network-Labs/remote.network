@@ -5,7 +5,7 @@ import { api } from '../services/api'
 export const useConnectionStore = defineStore('connection', () => {
   // State
   const nodeEndpoint = ref<string>(
-    localStorage.getItem('node_endpoint') || 'http://localhost:8080'
+    localStorage.getItem('node_endpoint') || 'http://localhost:30069'
   )
   const connected = ref<boolean>(false)
   const checking = ref<boolean>(false)
@@ -47,10 +47,10 @@ export const useConnectionStore = defineStore('connection', () => {
   }
 
   function reset() {
-    nodeEndpoint.value = 'http://localhost:8080'
+    nodeEndpoint.value = 'http://localhost:30069'
     connected.value = false
     localStorage.removeItem('node_endpoint')
-    api.setBaseURL('http://localhost:8080')
+    api.setBaseURL('http://localhost:30069')
   }
 
   return {

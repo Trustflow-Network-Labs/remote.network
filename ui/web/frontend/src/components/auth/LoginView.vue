@@ -15,7 +15,7 @@
             id="endpoint"
             v-model="inputEndpoint"
             type="text"
-            placeholder="localhost:8080"
+            placeholder="localhost:30069"
             :disabled="loading"
           />
           <button class="test-button" @click="testConnection" :disabled="loading || testing">

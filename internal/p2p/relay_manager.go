@@ -120,7 +120,7 @@ func (rm *RelayManager) Start() error {
 	// Perform initial relay selection
 	go func() {
 		// Wait a bit for peers to be discovered via identity exchange
-		time.Sleep(10 * time.Second)
+		time.Sleep(5 * time.Second)
 
 		// First, discover relay candidates from database
 		rm.logger.Info("Initial relay discovery: loading candidates from database...", "relay-manager")

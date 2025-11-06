@@ -37,9 +37,9 @@ type APIServer struct {
 	server           *http.Server
 	listener         net.Listener
 	port             string
-	httpServer       *http.Server   // HTTP server for localhost access
-	httpListener     net.Listener    // HTTP listener for localhost
-	httpPort         string          // HTTP port for localhost
+	httpServer       *http.Server // HTTP server for localhost access
+	httpListener     net.Listener // HTTP listener for localhost
+	httpPort         string       // HTTP port for localhost
 	logger           *utils.LogsManager
 	config           *utils.ConfigManager
 	peerManager      *core.PeerManager
@@ -162,8 +162,8 @@ func NewAPIServer(
 
 // Start initializes and starts the API server
 func (s *APIServer) Start() error {
-	// Get API port from config (use dedicated api_port, fallback to 8080)
-	apiPort := s.config.GetConfigWithDefault("api_port", "8080")
+	// Get API port from config (use dedicated api_port, fallback to 30069)
+	apiPort := s.config.GetConfigWithDefault("api_port", "30069")
 	s.port = apiPort
 
 	s.logger.Info(fmt.Sprintf("Starting API server on port %s", apiPort), "api")
@@ -225,7 +225,7 @@ func (s *APIServer) Start() error {
 		// Configure TLS with modern settings
 		s.server.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12, // Minimum TLS 1.2 for browser compatibility
+			MinVersion:   tls.VersionTLS12,           // Minimum TLS 1.2 for browser compatibility
 			NextProtos:   []string{"h2", "http/1.1"}, // Enable HTTP/2
 		}
 

@@ -101,7 +101,7 @@ The node uses Ed25519 keys for identity and authentication. You can manage these
 ./remote-network key export --force
 ```
 
-**Security Note:** The private key grants full control over your node's identity. Never share it with untrusted parties. The exported key can be used to authenticate with the web UI at `http://localhost:8080`.
+**Security Note:** The private key grants full control over your node's identity. Never share it with untrusted parties. The exported key can be used to authenticate with the web UI at `http://localhost:30069`.
 
 ### Linux Server Configuration
 

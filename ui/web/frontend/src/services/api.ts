@@ -8,7 +8,7 @@ class APIClient {
   private client: AxiosInstance
   private baseURL: string
 
-  constructor(baseURL: string = 'http://localhost:8080') {
+  constructor(baseURL: string = 'http://localhost:30069') {
     this.baseURL = baseURL
     this.client = axios.create({
       baseURL: this.baseURL,

@@ -51,15 +51,15 @@ pprof_fallback_ports = 6061,6062
 
 [api]
 # API Server Configuration
-api_port = 8080
+api_port = 30069
 # Fallback ports for API server if primary is unavailable (comma-separated)
-api_fallback_ports = 8081,8082
+api_fallback_ports = 30096,36009
 # Use HTTPS for API server (recommended for production)
 api_use_https = true
 # Enable HTTP server on localhost (convenient for local access without SSL warnings)
 api_http_localhost = true
 # Port for HTTP localhost server (only binds to 127.0.0.1)
-api_http_port = 8081
+api_http_port = 36900
 
 [database]
 # Database configuration
@@ -70,7 +70,7 @@ relay_session_cleanup_hours = 24
 [nat]
 # NAT Detection and Classification
 nat_stun_servers = stun.l.google.com:19302, stun1.l.google.com:19302, stun2.l.google.com:19302
-nat_stun_timeout = 5s
+nat_stun_timeout = 3s
 nat_stun_buffer_size = 1024
 nat_test_hairpinning = true
 nat_default_filtering = address-port-dependent
