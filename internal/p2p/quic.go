@@ -57,6 +57,8 @@ type QUICPeer struct {
 	onRelayDiscovered func(*database.PeerMetadata)
 	// Callback for connection failures
 	onConnectionFailure func(string)
+	// Callback for when connection is ready (after identity exchange)
+	onConnectionReady func(peerID string, remoteAddr string)
 }
 
 func NewQUICPeer(config *utils.ConfigManager, logger *utils.LogsManager, paths *utils.AppPaths, keyPair *crypto.KeyPair) (*QUICPeer, error) {
@@ -110,6 +112,11 @@ func (q *QUICPeer) SetRelayDiscoveryCallback(callback func(*database.PeerMetadat
 // SetConnectionFailureCallback sets a callback for when connections to peers fail
 func (q *QUICPeer) SetConnectionFailureCallback(callback func(string)) {
 	q.onConnectionFailure = callback
+}
+
+// SetConnectionReadyCallback sets a callback for when connection is ready (after identity exchange)
+func (q *QUICPeer) SetConnectionReadyCallback(callback func(peerID string, remoteAddr string)) {
+	q.onConnectionReady = callback
 }
 
 // generateEd25519Certificate creates a self-signed X.509 certificate using an Ed25519 keypair
@@ -454,6 +461,11 @@ func (q *QUICPeer) handleConnection(conn *quic.Conn, remoteAddr string) {
 			q.peerConnections[remotePeer.PeerID] = remoteAddr
 		}
 		q.connMutex.Unlock()
+
+		// Notify that connection is ready (server-side)
+		if q.onConnectionReady != nil {
+			go q.onConnectionReady(remotePeer.PeerID, remoteAddr)
+		}
 	} else {
 		q.logger.Warn(fmt.Sprintf("Identity exchanger not set, skipping identity exchange for %s", remoteAddr), "quic")
 	}
@@ -735,6 +747,11 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 		}
 		q.peerConnections[remotePeer.PeerID] = addr
 		q.connMutex.Unlock()
+
+		// Notify that connection is ready (client-side)
+		if q.onConnectionReady != nil {
+			go q.onConnectionReady(remotePeer.PeerID, addr)
+		}
 	} else {
 		q.logger.Warn(fmt.Sprintf("Identity exchanger not set, connection to %s not authenticated", addr), "quic")
 

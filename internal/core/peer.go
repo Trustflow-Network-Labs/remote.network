@@ -216,6 +216,12 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 		})
 	}
 
+	// Set up connection ready callback - triggered after identity exchange completes
+	quic.SetConnectionReadyCallback(func(peerID string, remoteAddr string) {
+		logger.Info(fmt.Sprintf("Connection ready: peer %s at %s (identity exchange complete)", peerID[:8], remoteAddr), "core")
+		// Can be used to trigger additional actions when peer is authenticated and ready
+	})
+
 	// Note: Connection failure callback removed - peer cleanup handled by PeerValidator
 	// Note: QUIC metadata exchange removed - metadata comes from DHT only
 	// Peer discovery stores peer IDs in known_peers during identity exchange
