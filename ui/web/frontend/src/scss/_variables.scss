@@ -5,13 +5,17 @@ $color-secondary: rgb(49, 64, 92);       // Medium blue-grey
 $color-accent: rgb(68, 86, 118);         // Lighter blue-grey for accents
 $color-background: rgb(27, 38, 54);      // Dark blue-grey background
 $color-surface: rgb(38, 49, 65);         // Sidebar/menu background
+$color-surface-variant: rgb(45, 58, 78); // Surface variant (slightly lighter)
+$color-surface-hover: rgb(52, 65, 85);   // Surface hover state
 $color-card: rgb(45, 58, 78);            // Card background (slightly lighter)
 $color-text: rgb(240, 240, 240);         // Light grey/white text
+$color-text-primary: rgb(240, 240, 240); // Primary text (alias)
 $color-text-secondary: rgb(180, 180, 180); // Secondary text
 $color-border: rgb(49, 64, 92);          // Border color
 $color-success: #4caf50;
 $color-warning: #ff9800;
 $color-error: #f44336;
+$color-danger: #f44336;                  // Danger (alias for error)
 $color-info: #2196f3;
 
 // Spacing

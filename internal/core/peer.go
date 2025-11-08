@@ -12,6 +12,7 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/p2p"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -48,6 +49,9 @@ type PeerManager struct {
 	connectabilityFilter    *p2p.ConnectabilityFilter
 	peerDiscovery           *p2p.PeerDiscoveryService
 	dbManager             *database.SQLiteManager
+	// Job and workflow management
+	jobManager            *JobManager
+	workflowManager       *WorkflowManager
 	topics                map[string]*TopicState
 	ctx                   context.Context
 	cancel                context.CancelFunc
@@ -801,6 +805,165 @@ func (pm *PeerManager) GetRelayManager() *p2p.RelayManager {
 	return pm.relayManager
 }
 
+// InitializeJobSystem initializes the job and workflow management system
+func (pm *PeerManager) InitializeJobSystem() error {
+	pm.logger.Info("Initializing job and workflow management system", "core")
+
+	// Create JobManager
+	pm.jobManager = NewJobManager(pm.ctx, pm.dbManager, pm.config, pm)
+	pm.logger.Info("JobManager created", "core")
+
+	// Create WorkflowManager
+	pm.workflowManager = NewWorkflowManager(pm.ctx, pm.dbManager, pm.config, pm.jobManager, pm)
+	pm.logger.Info("WorkflowManager created", "core")
+
+	// Create JobMessageHandler for QUIC communication
+	jobHandler := p2p.NewJobMessageHandler(pm.config, pm.quic)
+	pm.quic.SetJobHandler(jobHandler)
+	pm.logger.Info("JobMessageHandler created and set on QUIC peer", "core")
+
+	// Set up callbacks for job operations
+	jobHandler.SetCallbacks(
+		pm.handleJobRequest,
+		pm.handleJobStatusUpdate,
+		pm.handleJobDataTransferRequest,
+		pm.handleJobDataChunk,
+		pm.handleJobDataTransferComplete,
+		pm.handleJobCancel,
+	)
+	pm.logger.Info("JobMessageHandler callbacks configured", "core")
+
+	// Set job handler on data worker
+	if pm.jobManager.dataWorker != nil {
+		pm.jobManager.dataWorker.SetJobHandler(jobHandler)
+		pm.jobManager.dataWorker.SetPeerID(pm.GetPeerID())
+		pm.logger.Info("JobHandler and PeerID set on DataServiceWorker", "core")
+	}
+
+	return nil
+}
+
+// StartJobSystem starts the job and workflow management system
+func (pm *PeerManager) StartJobSystem() error {
+	if pm.jobManager == nil || pm.workflowManager == nil {
+		return fmt.Errorf("job system not initialized")
+	}
+
+	pm.logger.Info("Starting job and workflow management system", "core")
+
+	// Start JobManager
+	if err := pm.jobManager.Start(); err != nil {
+		return fmt.Errorf("failed to start JobManager: %v", err)
+	}
+
+	// Start WorkflowManager
+	if err := pm.workflowManager.Start(); err != nil {
+		return fmt.Errorf("failed to start WorkflowManager: %v", err)
+	}
+
+	pm.logger.Info("Job and workflow management system started successfully", "core")
+	return nil
+}
+
+// GetJobManager returns the job manager instance
+func (pm *PeerManager) GetJobManager() *JobManager {
+	return pm.jobManager
+}
+
+// GetWorkflowManager returns the workflow manager instance
+func (pm *PeerManager) GetWorkflowManager() *WorkflowManager {
+	return pm.workflowManager
+}
+
+// GetQUICPeer returns the QUIC peer instance
+func (pm *PeerManager) GetQUICPeer() *p2p.QUICPeer {
+	return pm.quic
+}
+
+// GetMetadataQueryService returns the metadata query service instance
+func (pm *PeerManager) GetMetadataQueryService() *p2p.MetadataQueryService {
+	return pm.metadataQuery
+}
+
+// Job message handler callbacks
+func (pm *PeerManager) handleJobRequest(request *types.JobExecutionRequest, peerID string) (*types.JobExecutionResponse, error) {
+	pm.logger.Info(fmt.Sprintf("Received job request from peer %s for workflow %d", peerID[:8], request.WorkflowID), "core")
+
+	// Delegate to JobManager
+	if pm.jobManager != nil {
+		return pm.jobManager.HandleJobRequest(request, peerID)
+	}
+
+	return &types.JobExecutionResponse{
+		WorkflowJobID: request.WorkflowJobID,
+		Accepted:      false,
+		Message:       "job manager not initialized",
+	}, fmt.Errorf("job manager not initialized")
+}
+
+func (pm *PeerManager) handleJobStatusUpdate(update *types.JobStatusUpdate, peerID string) error {
+	pm.logger.Info(fmt.Sprintf("Received job status update from peer %s for job %d: status=%s", peerID[:8], update.JobExecutionID, update.Status), "core")
+
+	// Delegate to JobManager
+	if pm.jobManager != nil {
+		return pm.jobManager.HandleJobStatusUpdate(update, peerID)
+	}
+
+	return fmt.Errorf("job manager not initialized")
+}
+
+func (pm *PeerManager) handleJobDataTransferRequest(request *types.JobDataTransferRequest, peerID string) (*types.JobDataTransferResponse, error) {
+	pm.logger.Info(fmt.Sprintf("Received job data transfer request from peer %s for job %d", peerID[:8], request.JobExecutionID), "core")
+
+	// Delegate to JobManager
+	if pm.jobManager != nil {
+		return pm.jobManager.HandleJobDataTransferRequest(request, peerID)
+	}
+
+	return &types.JobDataTransferResponse{
+		JobExecutionID: request.JobExecutionID,
+		Accepted:       false,
+		Message:        "job manager not initialized",
+	}, fmt.Errorf("job manager not initialized")
+}
+
+func (pm *PeerManager) handleJobDataChunk(chunk *types.JobDataChunk, peerID string) error {
+	pm.logger.Debug(fmt.Sprintf("Received job data chunk from peer %s for transfer %s", peerID[:8], chunk.TransferID), "core")
+
+	// Delegate to JobManager
+	if pm.jobManager != nil {
+		return pm.jobManager.HandleJobDataChunk(chunk, peerID)
+	}
+
+	return fmt.Errorf("job manager not initialized")
+}
+
+func (pm *PeerManager) handleJobDataTransferComplete(complete *types.JobDataTransferComplete, peerID string) error {
+	pm.logger.Info(fmt.Sprintf("Received job data transfer complete from peer %s for transfer %s", peerID[:8], complete.TransferID), "core")
+
+	// Delegate to JobManager
+	if pm.jobManager != nil {
+		return pm.jobManager.HandleJobDataTransferComplete(complete, peerID)
+	}
+
+	return fmt.Errorf("job manager not initialized")
+}
+
+func (pm *PeerManager) handleJobCancel(request *types.JobCancelRequest, peerID string) (*types.JobCancelResponse, error) {
+	pm.logger.Info(fmt.Sprintf("Received job cancel request from peer %s for job %d", peerID[:8], request.JobExecutionID), "core")
+
+	// Delegate to JobManager
+	if pm.jobManager != nil {
+		return pm.jobManager.HandleJobCancel(request, peerID)
+	}
+
+	return &types.JobCancelResponse{
+		JobExecutionID: request.JobExecutionID,
+		Cancelled:      false,
+		Message:        "job manager not initialized",
+	}, fmt.Errorf("job manager not initialized")
+}
+
 func (pm *PeerManager) Stop() error {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
@@ -846,6 +1009,16 @@ func (pm *PeerManager) Stop() error {
 	if pm.networkStateMonitor != nil {
 		pm.networkStateMonitor.Stop()
 		pm.logger.Info("Network state monitor stopped", "core")
+	}
+
+	// Stop job and workflow managers
+	if pm.workflowManager != nil {
+		pm.workflowManager.Stop()
+		pm.logger.Info("Workflow manager stopped", "core")
+	}
+	if pm.jobManager != nil {
+		pm.jobManager.Stop()
+		pm.logger.Info("Job manager stopped", "core")
 	}
 
 	// Stop QUIC peer

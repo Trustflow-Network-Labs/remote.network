@@ -414,9 +414,36 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			s.handleExecuteWorkflow(w, r)
 			return
 		}
-		// Check if it's a jobs request
+		// Check if it's a jobs request (legacy)
 		if strings.HasSuffix(r.URL.Path, "/jobs") {
 			s.handleGetWorkflowJobs(w, r)
+			return
+		}
+		// Check if it's a nodes request
+		if strings.Contains(r.URL.Path, "/nodes") {
+			if strings.HasSuffix(r.URL.Path, "/gui-props") {
+				s.handleUpdateWorkflowNodeGUIProps(w, r)
+			} else if strings.Contains(r.URL.Path, "/nodes/") {
+				// DELETE /api/workflows/:id/nodes/:nodeId
+				s.handleDeleteWorkflowNode(w, r)
+			} else if r.Method == http.MethodGet {
+				s.handleGetWorkflowNodes(w, r)
+			} else if r.Method == http.MethodPost {
+				s.handleAddWorkflowNode(w, r)
+			} else {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		// Check if it's a UI state request
+		if strings.HasSuffix(r.URL.Path, "/ui-state") {
+			if r.Method == http.MethodGet {
+				s.handleGetWorkflowUIState(w, r)
+			} else if r.Method == http.MethodPut {
+				s.handleUpdateWorkflowUIState(w, r)
+			} else {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
 			return
 		}
 

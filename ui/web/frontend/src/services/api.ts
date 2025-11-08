@@ -241,27 +241,64 @@ class APIClient {
   }
 
   /**
-   * Add job to workflow
+   * Add workflow node (service card)
    */
+  async addWorkflowNode(workflowId: number, node: any) {
+    const response = await this.client.post(`/api/workflows/${workflowId}/nodes`, node)
+    return response.data
+  }
+
+  /**
+   * Get all nodes for a workflow
+   */
+  async getWorkflowNodes(workflowId: number) {
+    const response = await this.client.get(`/api/workflows/${workflowId}/nodes`)
+    return response.data
+  }
+
+  /**
+   * Remove workflow node
+   */
+  async removeWorkflowNode(workflowId: number, nodeId: number) {
+    const response = await this.client.delete(`/api/workflows/${workflowId}/nodes/${nodeId}`)
+    return response.data
+  }
+
+  /**
+   * Update node GUI properties (position)
+   */
+  async updateNodeGUIProps(workflowId: number, nodeId: number, props: { x: number; y: number }) {
+    const response = await this.client.put(`/api/workflows/${workflowId}/nodes/${nodeId}/gui-props`, props)
+    return response.data
+  }
+
+  /**
+   * Get workflow UI state
+   */
+  async getWorkflowUIState(workflowId: number) {
+    const response = await this.client.get(`/api/workflows/${workflowId}/ui-state`)
+    return response.data
+  }
+
+  /**
+   * Update workflow UI state
+   */
+  async updateWorkflowUIState(workflowId: number, state: any) {
+    const response = await this.client.put(`/api/workflows/${workflowId}/ui-state`, state)
+    return response.data
+  }
+
+  // Legacy job methods (for backward compatibility)
   async addWorkflowJob(workflowId: number, job: any) {
-    const response = await this.client.post(`/api/workflows/${workflowId}/jobs`, job)
-    return response.data
+    return this.addWorkflowNode(workflowId, job)
   }
 
-  /**
-   * Remove job from workflow
-   */
   async removeWorkflowJob(workflowId: number, jobId: number) {
-    const response = await this.client.delete(`/api/workflows/${workflowId}/jobs/${jobId}`)
-    return response.data
+    return this.removeWorkflowNode(workflowId, jobId)
   }
 
-  /**
-   * Update job GUI properties (position)
-   */
   async updateJobGUIProps(workflowId: number, jobId: number, props: { x: number; y: number }) {
-    const response = await this.client.put(`/api/workflows/${workflowId}/jobs/${jobId}/gui-props`, props)
-    return response.data
+    return this.updateNodeGUIProps(workflowId, jobId, props)
   }
 
   /**

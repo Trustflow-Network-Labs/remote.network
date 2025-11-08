@@ -1,3 +1,5 @@
+import { faker } from '@faker-js/faker'
+
 export function useTextUtils() {
   const shorten = (text: string, prefixLen: number, suffixLen: number): string => {
     if (!text || text.length <= prefixLen + suffixLen) {
@@ -8,7 +10,12 @@ export function useTextUtils() {
     return `${prefix}...${suffix}`
   }
 
+  const generateRandomName = (): string => {
+    return `${faker.word.adjective()}-${faker.animal.type()}-${Date.now().toString(36).slice(-4)}`
+  }
+
   return {
-    shorten
+    shorten,
+    generateRandomName
   }
 }

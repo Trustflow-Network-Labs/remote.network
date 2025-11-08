@@ -53,6 +53,8 @@ type QUICPeer struct {
 	identityExchanger *IdentityExchanger
 	// Service query handler for service discovery
 	serviceQueryHandler *ServiceQueryHandler
+	// Job message handler for job execution and data transfer
+	jobHandler *JobMessageHandler
 	// Callback for relay peer discovery
 	onRelayDiscovered func(*database.PeerMetadata)
 	// Callback for connection failures
@@ -384,6 +386,18 @@ func (q *QUICPeer) SetServiceQueryHandler(handler *ServiceQueryHandler) {
 	q.serviceQueryHandler = handler
 }
 
+// SetJobHandler sets the job message handler for this QUIC peer
+func (q *QUICPeer) SetJobHandler(handler *JobMessageHandler) {
+	q.jobHandler = handler
+}
+
+// GetConnectionInfo returns connection info for a given remote address
+func (q *QUICPeer) GetConnectionInfo(remoteAddr string) *ConnectionInfo {
+	q.connMutex.RLock()
+	defer q.connMutex.RUnlock()
+	return q.connections[remoteAddr]
+}
+
 func (q *QUICPeer) acceptConnections() {
 	for {
 		select {
@@ -586,6 +600,24 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 			}
 		} else {
 			q.logger.Warn("Received hole punch message but hole puncher is not initialized", "quic")
+		}
+		return
+	case MessageTypeJobRequest, MessageTypeJobResponse, MessageTypeJobStatusUpdate,
+		MessageTypeJobDataTransferRequest, MessageTypeJobDataTransferResponse,
+		MessageTypeJobDataChunk, MessageTypeJobDataTransferComplete, MessageTypeJobCancel:
+		// Job-related messages are handled by the JobMessageHandler
+		if q.jobHandler != nil {
+			// Get peer ID from connection (use remote address as fallback)
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+
+			if err := q.jobHandler.HandleJobMessage(msg, stream, peerID); err != nil {
+				q.logger.Error(fmt.Sprintf("Job message handling failed: %v", err), "quic")
+			}
+		} else {
+			q.logger.Warn("Received job message but job handler is not initialized", "quic")
 		}
 		return
 	default:
@@ -945,6 +977,52 @@ func (q *QUICPeer) GetConnectionByPeerID(peerID string) (*quic.Conn, error) {
 	}
 
 	return connInfo.Conn, nil
+}
+
+// SendMessageToPeer sends a message to a peer by peer ID (no response expected)
+func (q *QUICPeer) SendMessageToPeer(peerID string, message []byte) error {
+	addr, exists := q.GetAddressByPeerID(peerID)
+	if !exists {
+		return fmt.Errorf("no connection found for peer ID %s", peerID[:8])
+	}
+
+	return q.SendMessage(addr, message)
+}
+
+// SendMessageWithResponse sends a message and waits for a response
+func (q *QUICPeer) SendMessageWithResponse(peerID string, message []byte) ([]byte, error) {
+	conn, err := q.GetConnectionByPeerID(peerID)
+	if err != nil {
+		return nil, err
+	}
+
+	stream, err := q.openStreamWithTimeout(conn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stream to peer %s: %v", peerID[:8], err)
+	}
+	defer stream.Close()
+
+	// Send message
+	_, err = stream.Write(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send message to peer %s: %v", peerID[:8], err)
+	}
+
+	q.logger.Debug(fmt.Sprintf("Sent message to peer %s, waiting for response", peerID[:8]), "quic")
+
+	// Read response
+	buffer := make([]byte, q.config.GetConfigInt("buffer_size", 65536, 1024, 1048576))
+	n, err := stream.Read(buffer)
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("failed to read response from peer %s: %v", peerID[:8], err)
+	}
+
+	if n == 0 {
+		return nil, fmt.Errorf("received empty response from peer %s", peerID[:8])
+	}
+
+	q.logger.Debug(fmt.Sprintf("Received response from peer %s: %d bytes", peerID[:8], n), "quic")
+	return buffer[:n], nil
 }
 
 // DisconnectFromPeer explicitly closes a connection to a peer by address

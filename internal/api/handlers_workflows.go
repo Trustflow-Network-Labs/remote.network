@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -208,7 +209,7 @@ func (s *APIServer) handleExecuteWorkflow(w http.ResponseWriter, r *http.Request
 	}
 
 	// Check if workflow exists
-	workflow, err := s.dbManager.GetWorkflowByID(id)
+	_, err = s.dbManager.GetWorkflowByID(id)
 	if err != nil {
 		if err.Error() == "workflow not found" {
 			http.Error(w, "Workflow not found", http.StatusNotFound)
@@ -219,35 +220,34 @@ func (s *APIServer) handleExecuteWorkflow(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Create a workflow job
-	job, err := s.dbManager.CreateWorkflowJob(id)
-	if err != nil {
-		s.logger.Error("Failed to create workflow job", "api")
-		http.Error(w, "Failed to create workflow job", http.StatusInternalServerError)
+	// Get WorkflowManager from PeerManager
+	workflowManager := s.peerManager.GetWorkflowManager()
+	if workflowManager == nil {
+		s.logger.Error("Workflow manager not initialized", "api")
+		http.Error(w, "Workflow manager not initialized - job system may not be started", http.StatusServiceUnavailable)
 		return
 	}
 
-	// TODO: Actually execute the workflow asynchronously
-	// For now, we just mark it as completed immediately
+	// Execute workflow asynchronously (validation happens inside)
 	go func() {
-		// Simulate workflow execution
-		// In a real implementation, this would process the workflow definition
-		// and coordinate with peers to execute the workflow steps
-		result := map[string]interface{}{
-			"workflow_id":   workflow.ID,
-			"workflow_name": workflow.Name,
-			"status":        "simulated_execution",
-			"message":       "Workflow execution not yet implemented",
+		s.logger.Info(fmt.Sprintf("Starting workflow %d execution asynchronously", id), "api")
+
+		workflowJob, err := workflowManager.ExecuteWorkflow(id)
+		if err != nil {
+			s.logger.Error(fmt.Sprintf("Workflow %d execution failed: %v", id, err), "api")
+			// Error is already logged in workflow execution record
+			return
 		}
-		s.dbManager.UpdateWorkflowJobStatus(job.ID, "completed", result, "")
+
+		s.logger.Info(fmt.Sprintf("Workflow %d execution completed with job ID %d", id, workflowJob.ID), "api")
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"job_id":  job.ID,
-		"status":  job.Status,
-		"message": "Workflow execution started",
+		"message":     "Workflow execution started - validation and execution in progress",
+		"workflow_id": id,
+		"note":        "Check workflow status via GET /api/workflows/:id for execution progress",
 	})
 }
 

@@ -61,6 +61,16 @@ func NewSQLiteManager(cm *utils.ConfigManager) (*SQLiteManager, error) {
 		return nil, fmt.Errorf("failed to initialize workflows table: %v", err)
 	}
 
+	// Initialize workflow nodes and UI state tables
+	if err := sqlm.InitWorkflowNodesTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize workflow nodes table: %v", err)
+	}
+
+	// Initialize job executions table
+	if err := sqlm.InitJobExecutionsTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize job executions table: %v", err)
+	}
+
 	return sqlm, nil
 }
 

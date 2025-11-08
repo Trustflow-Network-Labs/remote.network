@@ -52,6 +52,16 @@ const (
 	MessageTypeKnownPeersRequest MessageType = "known_peers_request"
 	MessageTypeKnownPeersResponse MessageType = "known_peers_response"
 
+	// Workflow and job execution
+	MessageTypeJobRequest              MessageType = "job_request"
+	MessageTypeJobResponse             MessageType = "job_response"
+	MessageTypeJobStatusUpdate         MessageType = "job_status_update"
+	MessageTypeJobDataTransferRequest  MessageType = "job_data_transfer_request"
+	MessageTypeJobDataTransferResponse MessageType = "job_data_transfer_response"
+	MessageTypeJobDataChunk            MessageType = "job_data_chunk"
+	MessageTypeJobDataTransferComplete MessageType = "job_data_transfer_complete"
+	MessageTypeJobCancel               MessageType = "job_cancel"
+
 	// Legacy support
 	MessageTypeEcho MessageType = "echo"
 )
@@ -745,4 +755,48 @@ func CreateKnownPeersResponse(topic string, peers []*KnownPeerEntry, totalCount 
 		Peers: peers,
 		Count: totalCount,
 	})
+}
+
+// ============================================================================
+// Workflow and Job Execution Messages
+// ============================================================================
+
+// CreateJobRequest creates a job execution request message
+func CreateJobRequest(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobRequest, data)
+}
+
+// CreateJobResponse creates a job execution response message
+func CreateJobResponse(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobResponse, data)
+}
+
+// CreateJobStatusUpdate creates a job status update message
+func CreateJobStatusUpdate(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobStatusUpdate, data)
+}
+
+// CreateJobDataTransferRequest creates a data transfer request message
+func CreateJobDataTransferRequest(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobDataTransferRequest, data)
+}
+
+// CreateJobDataTransferResponse creates a data transfer response message
+func CreateJobDataTransferResponse(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobDataTransferResponse, data)
+}
+
+// CreateJobDataChunk creates a data chunk message
+func CreateJobDataChunk(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobDataChunk, data)
+}
+
+// CreateJobDataTransferComplete creates a transfer complete message
+func CreateJobDataTransferComplete(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobDataTransferComplete, data)
+}
+
+// CreateJobCancel creates a job cancellation message
+func CreateJobCancel(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobCancel, data)
 }
