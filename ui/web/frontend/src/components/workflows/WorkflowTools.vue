@@ -330,9 +330,9 @@ defineExpose({
   right: 0;
   top: 0;
   width: 320px;
-  height: 100vh;
+  max-height: 100vh;
   background-color: transparent;
-  overflow: hidden;
+  overflow: visible;
   z-index: 100;
 
   input,
@@ -345,17 +345,20 @@ defineExpose({
     display: flex;
     flex-direction: column;
     width: 100%;
-    height: 100vh;
+    max-height: 100vh;
+
+    .search-services {
+      flex: 1 1 auto;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      min-height: 0; // Important for flex overflow
+      max-height: calc(100vh - 60px); // Leave room for workflow details header at minimum
+    }
 
     .workflow-details {
       flex-shrink: 0;
-    }
-
-    .search-services {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
     }
 
     .workflow-details,
@@ -406,10 +409,11 @@ defineExpose({
 
       .search-services-body {
         flex: 1;
+        position: relative;
         display: flex;
         flex-direction: column;
-        overflow: hidden;
-        max-height: 100vh;
+        width: 100%;
+        min-height: 0; // Important for flex overflow
       }
 
       .workflow-details-body-section,
