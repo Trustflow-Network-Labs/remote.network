@@ -137,6 +137,7 @@ export default {
       searchByName: 'Search by name',
       searchByDescription: 'Search by description',
       serviceTypes: 'Service Types',
+      selectPeers: 'Select peers to search...',
       servicesFound: 'Services Found',
       deleteConfirm: 'Are you sure you want to delete this workflow?',
       deleteSuccess: 'Workflow deleted successfully',

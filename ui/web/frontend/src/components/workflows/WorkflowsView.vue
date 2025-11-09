@@ -128,6 +128,9 @@
             </template>
           </Column>
           <Column field="description" :header="$t('message.workflows.description')" filterMatchMode="contains" :showFilterMenu="false">
+            <template #body="slotProps">
+              <div class="description-cell">{{ slotProps.data.description }}</div>
+            </template>
             <template #filter="{ filterModel, filterCallback }">
               <InputText
                 v-model="filterModel.value"
@@ -550,6 +553,16 @@ onMounted(async () => {
       border: none;
     }
   }
+}
+
+.description-cell {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-clamp: 3;
+  max-width: 400px;
 }
 
 .action-buttons {

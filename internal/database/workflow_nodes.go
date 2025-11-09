@@ -9,19 +9,23 @@ import (
 
 // WorkflowNode represents a service/node in a workflow design
 type WorkflowNode struct {
-	ID           int64                  `json:"id"`
-	WorkflowID   int64                  `json:"workflow_id"`
-	ServiceID    int64                  `json:"service_id"`
-	NodeID       string                 `json:"node_id"`       // Peer ID that provides the service
-	ServiceName  string                 `json:"service_name"`
-	ServiceType  string                 `json:"service_type"`  // "DATA", "DOCKER", "STANDALONE"
-	Order        int                    `json:"order"`         // Execution order
-	GUIX         int                    `json:"gui_x"`         // X position in UI
-	GUIY         int                    `json:"gui_y"`         // Y position in UI
-	InputMapping map[string]interface{} `json:"input_mapping,omitempty"`  // Input connections
-	OutputMapping map[string]interface{} `json:"output_mapping,omitempty"` // Output connections
-	CreatedAt    time.Time              `json:"created_at"`
-	UpdatedAt    time.Time              `json:"updated_at"`
+	ID             int64                  `json:"id"`
+	WorkflowID     int64                  `json:"workflow_id"`
+	ServiceID      int64                  `json:"service_id"`
+	PeerID         string                 `json:"peer_id"`       // App Peer ID that provides the service
+	ServiceName    string                 `json:"service_name"`
+	ServiceType    string                 `json:"service_type"`  // "DATA", "DOCKER", "STANDALONE"
+	Order          int                    `json:"order"`         // Execution order
+	GUIX           int                    `json:"gui_x"`         // X position in UI
+	GUIY           int                    `json:"gui_y"`         // Y position in UI
+	InputMapping   map[string]interface{} `json:"input_mapping,omitempty"`  // Input connections
+	OutputMapping  map[string]interface{} `json:"output_mapping,omitempty"` // Output connections
+	PricingAmount  float64                `json:"pricing_amount,omitempty"`
+	PricingType    string                 `json:"pricing_type,omitempty"`     // "ONE_TIME", "RECURRING"
+	PricingInterval int                   `json:"pricing_interval,omitempty"` // number of units
+	PricingUnit    string                 `json:"pricing_unit,omitempty"`     // "SECONDS", "MINUTES", "HOURS", "DAYS", "WEEKS", "MONTHS", "YEARS"
+	CreatedAt      time.Time              `json:"created_at"`
+	UpdatedAt      time.Time              `json:"updated_at"`
 }
 
 // WorkflowUIState represents UI-specific preferences for a workflow
@@ -43,7 +47,7 @@ func (sm *SQLiteManager) InitWorkflowNodesTable() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		workflow_id INTEGER NOT NULL,
 		service_id INTEGER NOT NULL,
-		node_id TEXT NOT NULL,
+		peer_id TEXT NOT NULL,
 		service_name TEXT NOT NULL,
 		service_type TEXT NOT NULL,
 		"order" INTEGER NOT NULL DEFAULT 0,
@@ -51,6 +55,10 @@ func (sm *SQLiteManager) InitWorkflowNodesTable() error {
 		gui_y INTEGER NOT NULL DEFAULT 0,
 		input_mapping TEXT,
 		output_mapping TEXT,
+		pricing_amount REAL DEFAULT 0.0,
+		pricing_type TEXT,
+		pricing_interval INTEGER DEFAULT 1,
+		pricing_unit TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
@@ -104,9 +112,9 @@ func (sm *SQLiteManager) AddWorkflowNode(node *WorkflowNode) error {
 	}
 
 	result, err := sm.db.Exec(`
-		INSERT INTO workflow_nodes (workflow_id, service_id, node_id, service_name, service_type, "order", gui_x, gui_y, input_mapping, output_mapping)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, node.WorkflowID, node.ServiceID, node.NodeID, node.ServiceName, node.ServiceType, node.Order, node.GUIX, node.GUIY, inputMappingJSON, outputMappingJSON)
+		INSERT INTO workflow_nodes (workflow_id, service_id, peer_id, service_name, service_type, "order", gui_x, gui_y, input_mapping, output_mapping, pricing_amount, pricing_type, pricing_interval, pricing_unit)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, node.WorkflowID, node.ServiceID, node.PeerID, node.ServiceName, node.ServiceType, node.Order, node.GUIX, node.GUIY, inputMappingJSON, outputMappingJSON, node.PricingAmount, node.PricingType, node.PricingInterval, node.PricingUnit)
 
 	if err != nil {
 		return fmt.Errorf("failed to add workflow node: %v", err)
@@ -127,8 +135,8 @@ func (sm *SQLiteManager) AddWorkflowNode(node *WorkflowNode) error {
 // GetWorkflowNodes retrieves all nodes for a workflow
 func (sm *SQLiteManager) GetWorkflowNodes(workflowID int64) ([]*WorkflowNode, error) {
 	rows, err := sm.db.Query(`
-		SELECT id, workflow_id, service_id, node_id, service_name, service_type, "order", gui_x, gui_y,
-		       input_mapping, output_mapping, created_at, updated_at
+		SELECT id, workflow_id, service_id, peer_id, service_name, service_type, "order", gui_x, gui_y,
+		       input_mapping, output_mapping, pricing_amount, pricing_type, pricing_interval, pricing_unit, created_at, updated_at
 		FROM workflow_nodes
 		WHERE workflow_id = ?
 		ORDER BY "order" ASC
@@ -143,11 +151,14 @@ func (sm *SQLiteManager) GetWorkflowNodes(workflowID int64) ([]*WorkflowNode, er
 	for rows.Next() {
 		node := &WorkflowNode{}
 		var inputMappingStr, outputMappingStr sql.NullString
+		var pricingType, pricingUnit sql.NullString
+		var pricingInterval sql.NullInt64
 
 		err := rows.Scan(
-			&node.ID, &node.WorkflowID, &node.ServiceID, &node.NodeID, &node.ServiceName,
+			&node.ID, &node.WorkflowID, &node.ServiceID, &node.PeerID, &node.ServiceName,
 			&node.ServiceType, &node.Order, &node.GUIX, &node.GUIY,
-			&inputMappingStr, &outputMappingStr, &node.CreatedAt, &node.UpdatedAt,
+			&inputMappingStr, &outputMappingStr, &node.PricingAmount, &pricingType, &pricingInterval, &pricingUnit,
+			&node.CreatedAt, &node.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan workflow node: %v", err)
@@ -163,6 +174,17 @@ func (sm *SQLiteManager) GetWorkflowNodes(workflowID int64) ([]*WorkflowNode, er
 			if err := json.Unmarshal([]byte(outputMappingStr.String), &node.OutputMapping); err != nil {
 				node.OutputMapping = make(map[string]interface{})
 			}
+		}
+
+		// Handle nullable pricing fields
+		if pricingType.Valid {
+			node.PricingType = pricingType.String
+		}
+		if pricingUnit.Valid {
+			node.PricingUnit = pricingUnit.String
+		}
+		if pricingInterval.Valid {
+			node.PricingInterval = int(pricingInterval.Int64)
 		}
 
 		nodes = append(nodes, node)

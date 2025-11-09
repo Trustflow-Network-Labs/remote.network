@@ -70,35 +70,16 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 		// Don't return early - continue to peer discovery phase below
 	}
 
-	// Filter peers if specific peer IDs were requested
-	peersToQuery := connectedPeers
+	// Build peer ID filter map if specific peer IDs were requested
+	var peerIDFilter map[string]bool
 	if len(request.PeerIDs) > 0 {
-		peersToQuery = make([]string, 0)
-		peerIDMap := make(map[string]bool)
+		peerIDFilter = make(map[string]bool)
 		for _, pid := range request.PeerIDs {
-			peerIDMap[pid] = true
+			peerIDFilter[pid] = true
 		}
-
-		for _, peerAddr := range connectedPeers {
-			// Check if this peer address matches any requested peer ID
-			// Support both exact match and prefix match (for address:port format)
-			if peerIDMap[peerAddr] {
-				peersToQuery = append(peersToQuery, peerAddr)
-				continue
-			}
-			// Also check if the peer ID (without port) matches
-			if idx := strings.LastIndex(peerAddr, ":"); idx != -1 {
-				peerAddrWithoutPort := peerAddr[:idx]
-				if peerIDMap[peerAddrWithoutPort] {
-					peersToQuery = append(peersToQuery, peerAddr)
-				}
-			}
-		}
-
 		ssh.logger.WithFields(logrus.Fields{
 			"requested_peers": len(request.PeerIDs),
-			"matched_peers":   len(peersToQuery),
-		}).Info("Filtered peers for search")
+		}).Info("Filtering search to specific peer IDs")
 	}
 
 	// Build integrated query list: direct connections + relay-accessible NAT peers
@@ -128,7 +109,14 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 		peerID := ssh.getPeerIDFromConnection(nil, addr)
 
 		if peerID == "" {
-			// No peer ID available, treat as direct connection
+			// No peer ID available - if we have a filter, skip this connection
+			if peerIDFilter != nil {
+				ssh.logger.WithFields(logrus.Fields{
+					"address": addr,
+				}).Debug("Skipping connection without peer ID (filter active)")
+				continue
+			}
+			// No filter active, treat as direct connection
 			queryTargets = append(queryTargets, queryTarget{
 				peerAddr: addr,
 				useRelay: false,
@@ -147,6 +135,15 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 			}).Debug("Skipping duplicate peer ID")
 			continue
 		}
+
+		// If filter is active, check if this peer ID matches
+		if peerIDFilter != nil && !peerIDFilter[peerID] {
+			ssh.logger.WithFields(logrus.Fields{
+				"peer_id": peerID[:8],
+			}).Debug("Skipping peer - not in requested peer IDs")
+			continue
+		}
+
 		peerIDsSeen[peerID] = true
 
 		// Check if this is an inbound-only connection (NAT peer)

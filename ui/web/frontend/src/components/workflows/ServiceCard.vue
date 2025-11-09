@@ -5,6 +5,11 @@
         <i class="pi pi-times-circle" @click="closeCard"></i>
       </div>
       <div class="service-name">{{ job.service_name || 'Unknown Service' }}</div>
+      <div class="service-price" v-if="job.pricing_amount">{{ formattedPrice }}</div>
+      <div class="service-peer" v-if="job.peer_id">
+        <span>{{ shorten(job.peer_id, 6, 6) }}</span>
+        <i class="pi pi-copy copy-icon" @click.stop="copyToClipboard(job.peer_id)" title="Copy peer ID"></i>
+      </div>
       <div :class="['service-type', { 'data': isData, 'docker': isDocker, 'standalone': isStandalone }]">
         <i :class="serviceIcon" v-if="isData"></i>
         <i :class="serviceIcon" v-if="isDocker || isStandalone"></i>
@@ -27,6 +32,8 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useTextUtils } from '../../composables/useTextUtils'
+import { useClipboard } from '../../composables/useClipboard'
 import type { WorkflowJob } from '../../stores/workflows'
 
 interface Props {
@@ -39,6 +46,9 @@ const emit = defineEmits<{
   closeServiceCard: [id: number]
   configureServiceCard: [id: number]
 }>()
+
+const { shorten } = useTextUtils()
+const { copyToClipboard } = useClipboard()
 
 const isData = computed(() => props.job.service_type === 'DATA')
 const isDocker = computed(() => props.job.service_type === 'DOCKER')
@@ -61,12 +71,25 @@ const serviceTypeLabel = computed(() => {
   return props.job.service_type || 'Unknown'
 })
 
-const hasInputs = computed(() => {
-  return props.job.input_mapping && Object.keys(props.job.input_mapping).length > 0
+const formattedPrice = computed(() => {
+  const amount = props.job.pricing_amount || 0
+  const type = props.job.pricing_type || 'ONE_TIME'
+  const interval = props.job.pricing_interval || 1
+  const unit = props.job.pricing_unit || 'MONTHS'
+
+  const tokenLabel = amount === 1 ? 'token' : 'tokens'
+  let priceStr = `${amount} ${tokenLabel}`
+
+  if (type === 'RECURRING') {
+    const unitStr = interval > 1 ? `${interval} ${unit.toLowerCase()}` : unit.toLowerCase().slice(0, -1)
+    priceStr += `/${unitStr}`
+  }
+
+  return priceStr
 })
 
-const hasOutputs = computed(() => {
-  return props.job.output_mapping && Object.keys(props.job.output_mapping).length > 0
+const hasInputs = computed(() => {
+  return props.job.input_mapping && Object.keys(props.job.input_mapping).length > 0
 })
 
 function closeCard() {
@@ -125,13 +148,46 @@ function configureJob() {
     }
 
     .service-name {
-      padding: 16px 8px 8px 8px;
+      padding: 16px 8px 2px 8px;
       display: -webkit-box;
       -webkit-box-orient: vertical;
       overflow: hidden;
       text-overflow: ellipsis;
-      line-clamp: 3;
-      -webkit-line-clamp: 3;
+      line-clamp: 2;
+      -webkit-line-clamp: 2;
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .service-price {
+      padding: 0 8px 2px 8px;
+      font-size: 11px;
+      color: #16a34a;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .service-peer {
+      padding: 0 8px 4px 8px;
+      font-size: 10px;
+      color: #666;
+      font-family: monospace;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+
+      .copy-icon {
+        cursor: pointer;
+        font-size: 9px;
+        opacity: 0.5;
+        transition: opacity 0.2s ease;
+
+        &:hover {
+          opacity: 1;
+          color: rgb(205, 81, 36);
+        }
+      }
     }
 
     .service-type {

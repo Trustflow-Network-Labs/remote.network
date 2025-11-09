@@ -69,27 +69,53 @@
           </div>
         </div>
         <div v-show="!serviceSearchExpanded" class="search-services-body">
+          <!-- Search Input -->
           <div class="search-services-body-section">
-            <InputGroup>
+            <div class="search-box">
               <InputText
                 v-model="searchQuery"
                 :placeholder="$t('message.workflows.searchPlaceholder')"
+                class="search-input"
+                @keyup.enter="performSearch"
               />
-              <InputGroupAddon>
-                <Button
-                  icon="pi pi-search"
-                  severity="secondary"
-                  variant="text"
-                  @click="toggleSearchServiceTypes"
-                />
-              </InputGroupAddon>
-            </InputGroup>
-            <Menu ref="menu" :model="searchServicesTypes" popup class="!min-w-fit" />
+              <Button
+                icon="pi pi-search"
+                :loading="servicesStore.remoteLoading"
+                @click="performSearch"
+                class="search-button"
+              />
+            </div>
+          </div>
+
+          <!-- Service Type Filter -->
+          <div class="search-services-body-section">
+            <MultiSelect
+              v-model="selectedServiceTypes"
+              :options="serviceTypeOptions"
+              optionLabel="label"
+              optionValue="value"
+              :placeholder="$t('message.services.selectServiceTypes')"
+              :maxSelectedLabels="2"
+              class="filter-multiselect"
+            />
+          </div>
+
+          <!-- Peer Filter -->
+          <div class="search-services-body-section">
+            <MultiSelect
+              v-model="selectedPeers"
+              :options="peerOptions"
+              optionLabel="label"
+              optionValue="value"
+              :placeholder="$t('message.workflows.selectPeers')"
+              :maxSelectedLabels="2"
+              class="filter-multiselect"
+            />
           </div>
 
           <div class="separator">{{ $t('message.workflows.servicesFound') }}:</div>
 
-          <div v-if="servicesStore.loading" class="loading">
+          <div v-if="servicesStore.remoteLoading" class="loading">
             <ProgressSpinner style="width:30px;height:30px" strokeWidth="4" />
           </div>
 
@@ -108,7 +134,13 @@
               <div class="service-item-details">
                 <div class="service-item-name">{{ service.name }}</div>
                 <div class="service-item-type">{{ service.service_type }}</div>
-                <div class="service-item-node">{{ service.node_id?.substring(0, 12) }}...</div>
+                <div class="service-item-price" v-if="service.pricing_amount">
+                  {{ formatPrice(service) }}
+                </div>
+                <div class="service-item-node">
+                  <span>{{ service.peer_id ? shorten(service.peer_id, 6, 6) : '...' }}</span>
+                  <i class="pi pi-copy copy-icon" @click.stop="copyToClipboard(service.peer_id)" title="Copy peer ID"></i>
+                </div>
               </div>
             </div>
           </div>
@@ -122,23 +154,27 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import InputText from 'primevue/inputtext'
-import InputGroup from 'primevue/inputgroup'
-import InputGroupAddon from 'primevue/inputgroupaddon'
 import Textarea from 'primevue/textarea'
 import Button from 'primevue/button'
 import FloatLabel from 'primevue/floatlabel'
 import ToggleButton from 'primevue/togglebutton'
 import ProgressSpinner from 'primevue/progressspinner'
-import Menu from 'primevue/menu'
+import MultiSelect from 'primevue/multiselect'
 import { useServicesStore } from '../../stores/services'
 import { useWorkflowsStore } from '../../stores/workflows'
+import { useAuthStore } from '../../stores/auth'
+import { usePeersStore } from '../../stores/peers'
 import { useTextUtils } from '../../composables/useTextUtils'
+import { useClipboard } from '../../composables/useClipboard'
 
 // @ts-ignore - t is used in template
 const { t } = useI18n()
 const servicesStore = useServicesStore() as any // TODO: Fix Pinia typing
 const workflowsStore = useWorkflowsStore() as any // TODO: Fix Pinia typing
-const { generateRandomName } = useTextUtils()
+const authStore = useAuthStore() as any // TODO: Fix Pinia typing
+const peersStore = usePeersStore() as any // TODO: Fix Pinia typing
+const { generateRandomName, shorten } = useTextUtils()
+const { copyToClipboard } = useClipboard()
 
 const emit = defineEmits<{
   save: [data: { name: string; description: string }]
@@ -156,49 +192,84 @@ const snapToGrid = ref(false)
 // Service Search
 const serviceSearchExpanded = ref(false)
 const searchQuery = ref('')
-const selectedServiceTypes = ref<string[]>(['DATA', 'DOCKER', 'STANDALONE'])
-const menu = ref()
+const selectedServiceTypes = ref<string[]>([])
+const selectedPeers = ref<string[]>([])
 
-// Menu items for service type filter
-const searchServicesTypes = computed(() => [
-  {
-    label: 'DATA',
-    icon: 'pi pi-file',
-    command: () => toggleServiceType('DATA')
-  },
-  {
-    label: 'DOCKER',
-    icon: 'pi pi-box',
-    command: () => toggleServiceType('DOCKER')
-  },
-  {
-    label: 'STANDALONE',
-    icon: 'pi pi-code',
-    command: () => toggleServiceType('STANDALONE')
+// Service type options for MultiSelect
+const serviceTypeOptions = [
+  { label: 'DATA (Data / Files)', value: 'DATA' },
+  { label: 'DOCKER (Docker Container)', value: 'DOCKER' },
+  { label: 'STANDALONE (Standalone App)', value: 'STANDALONE' }
+]
+
+// Peer options for MultiSelect (includes local peer + remote peers)
+const peerOptions = computed(() => {
+  const options = []
+
+  // Add local peer first
+  if (authStore.peerId) {
+    options.push({
+      label: `${shorten(authStore.peerId, 6, 6)} (Local)`,
+      value: authStore.peerId
+    })
   }
-])
 
+  // Add remote peers
+  if (peersStore.peers && peersStore.peers.length > 0) {
+    peersStore.peers.forEach((peer: any) => {
+      const label = peer.is_relay
+        ? `${shorten(peer.peer_id, 6, 6)} (Relay)`
+        : shorten(peer.peer_id, 6, 6)
+      options.push({
+        label,
+        value: peer.peer_id
+      })
+    })
+  }
+
+  return options
+})
+
+// Combined services: local + remote from WebSocket search
 const filteredServices = computed(() => {
-  let services = servicesStore.services || []
+  const combined = []
 
-  // Filter by service type
-  if (selectedServiceTypes.value.length > 0) {
-    services = services.filter((s: any) =>
-      selectedServiceTypes.value.includes(s.service_type)
-    )
+  // Add local services (convert to RemoteService format with peer_id)
+  // Only include if local peer is selected or no specific peers selected
+  const includeLocal = selectedPeers.value.length === 0 ||
+                       (authStore.peerId && selectedPeers.value.includes(authStore.peerId))
+
+  if (includeLocal && servicesStore.services && servicesStore.services.length > 0) {
+    let localServices = servicesStore.services.map((service: any) => ({
+      ...service,
+      peer_id: authStore.peerId // Add local peer_id
+    }))
+
+    // Filter by service type if specified
+    if (selectedServiceTypes.value.length > 0) {
+      localServices = localServices.filter((s: any) =>
+        selectedServiceTypes.value.includes(s.service_type)
+      )
+    }
+
+    // Filter by search query if specified
+    if (searchQuery.value) {
+      const query = searchQuery.value.toLowerCase()
+      localServices = localServices.filter((s: any) =>
+        s.name?.toLowerCase().includes(query) ||
+        s.description?.toLowerCase().includes(query)
+      )
+    }
+
+    combined.push(...localServices)
   }
 
-  // Filter by search query
-  if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase()
-    services = services.filter((s: any) =>
-      s.name.toLowerCase().includes(query) ||
-      s.description?.toLowerCase().includes(query) ||
-      s.node_id?.toLowerCase().includes(query)
-    )
+  // Add remote services from WebSocket search
+  if (servicesStore.remoteServices && servicesStore.remoteServices.length > 0) {
+    combined.push(...servicesStore.remoteServices)
   }
 
-  return services
+  return combined
 })
 
 function toggleWorkflowDetails() {
@@ -209,19 +280,6 @@ function toggleServiceSearch() {
   serviceSearchExpanded.value = !serviceSearchExpanded.value
 }
 
-function toggleSearchServiceTypes(event: any) {
-  menu.value.toggle(event)
-}
-
-function toggleServiceType(type: string) {
-  const index = selectedServiceTypes.value.indexOf(type)
-  if (index > -1) {
-    selectedServiceTypes.value.splice(index, 1)
-  } else {
-    selectedServiceTypes.value.push(type)
-  }
-}
-
 function saveWorkflow() {
   emit('save', {
     name: workflowName.value,
@@ -229,16 +287,28 @@ function saveWorkflow() {
   })
 }
 
-function executeWorkflow() {
-  emit('execute')
-}
-
 function deleteWorkflow() {
   emit('delete')
 }
 
-async function searchServices() {
-  await servicesStore.fetchServices()
+function performSearch() {
+  const serviceTypes = selectedServiceTypes.value.length > 0 ? selectedServiceTypes.value : []
+  let peerIds = selectedPeers.value.length > 0 ? selectedPeers.value : []
+
+  // When no peers selected, search all peers including local
+  if (peerIds.length === 0) {
+    peerIds = []
+    // Add local peer
+    if (authStore.peerId) {
+      peerIds.push(authStore.peerId)
+    }
+    // Add all remote peers
+    if (peersStore.peers && peersStore.peers.length > 0) {
+      peerIds.push(...peersStore.peers.map((p: any) => p.peer_id))
+    }
+  }
+
+  servicesStore.searchRemoteServices(searchQuery.value, serviceTypes, peerIds)
 }
 
 function getServiceIcon(serviceType: string): string {
@@ -265,6 +335,23 @@ function onDragEnd() {
   // Cleanup if needed
 }
 
+function formatPrice(service: any): string {
+  const amount = service.pricing_amount || 0
+  const type = service.pricing_type || 'ONE_TIME'
+  const interval = service.pricing_interval || 1
+  const unit = service.pricing_unit || 'MONTHS'
+
+  const tokenLabel = amount === 1 ? 'token' : 'tokens'
+  let priceStr = `${amount} ${tokenLabel}`
+
+  if (type === 'RECURRING') {
+    const unitStr = interval > 1 ? `${interval} ${unit.toLowerCase()}` : unit.toLowerCase().slice(0, -1)
+    priceStr += `/${unitStr}`
+  }
+
+  return priceStr
+}
+
 // Watch snap to grid changes
 watch(snapToGrid, (newValue) => {
   emit('snapToGrid', newValue)
@@ -275,19 +362,27 @@ watch(() => workflowsStore.currentWorkflow, (workflow) => {
   if (workflow) {
     workflowName.value = workflow.name
     workflowDescription.value = workflow.description
-    snapToGrid.value = workflow.snap_to_grid
+  } else {
+    // Reset fields when creating a new workflow
+    workflowName.value = generateRandomName()
+    workflowDescription.value = ''
+  }
+}, { immediate: true })
+
+// Load UI state including snap-to-grid
+watch(() => workflowsStore.currentUIState, (uiState) => {
+  if (uiState) {
+    snapToGrid.value = uiState.snap_to_grid || false
   }
 }, { immediate: true })
 
 // Initialize on mount
-onMounted(() => {
-  // Generate random workflow name if not set
-  if (!workflowName.value) {
-    workflowName.value = generateRandomName()
-  }
+onMounted(async () => {
+  // Load peers for the filter
+  await peersStore.fetchPeers()
 
-  // Load services
-  searchServices()
+  // Load local services
+  await servicesStore.fetchServices()
 })
 
 defineExpose({
@@ -420,6 +515,20 @@ defineExpose({
       .search-services-body-section {
         margin: .5rem 0;
 
+        .search-box {
+          display: flex;
+          gap: 0.5rem;
+          align-items: center;
+
+          .search-input {
+            flex: 1;
+          }
+
+          .search-button {
+            min-width: 50px;
+          }
+        }
+
         textarea {
           background-color: var(--p-textarea-background) !important;
           color:  var(--p-textarea-color) !important;
@@ -435,6 +544,10 @@ defineExpose({
           &:focus {
             border-color: var(--p-inputtext-focus-border-color) !important;
           }
+        }
+
+        .filter-multiselect {
+          width: 100%;
         }
 
         &:first-child {
@@ -611,10 +724,33 @@ defineExpose({
     font-weight: 500;
   }
 
+  .service-item-price {
+    font-size: vars.$font-size-xs;
+    color: #4ade80;
+    font-weight: 600;
+    margin-top: 2px;
+  }
+
   .service-item-node {
     font-size: vars.$font-size-xs;
     color: rgba(255, 255, 255, 0.7);
     font-family: monospace;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 2px;
+
+    .copy-icon {
+      cursor: pointer;
+      font-size: 10px;
+      opacity: 0.5;
+      transition: opacity 0.2s ease;
+
+      &:hover {
+        opacity: 1;
+        color: rgb(246, 114, 66);
+      }
+    }
   }
 }
 </style>

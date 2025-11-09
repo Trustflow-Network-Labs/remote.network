@@ -175,16 +175,20 @@ async function addServiceToWorkflow(service: any, x: number, y: number) {
     const job = await workflowsStore.addWorkflowJob(workflowsStore.currentWorkflow.id, {
       workflow_id: workflowsStore.currentWorkflow.id,
       service_id: service.id,
-      node_id: service.node_id,
+      peer_id: service.peer_id, // App Peer ID (not DHT node_id)
       service_name: service.name,
       service_type: service.service_type,
       order: serviceCards.value.length,
       gui_x: x,
-      gui_y: y
+      gui_y: y,
+      pricing_amount: service.pricing_amount,
+      pricing_type: service.pricing_type,
+      pricing_interval: service.pricing_interval,
+      pricing_unit: service.pricing_unit
     })
 
-    // Add card to canvas
-    const cardId = serviceCards.value.length
+    // Add card to canvas using the database ID from the job
+    const cardId = job.id // Use actual database ID instead of array length
     serviceCards.value.push({
       id: cardId,
       job: job,
@@ -519,6 +523,9 @@ async function loadWorkflow() {
     // Load UI state
     if (workflowsStore.currentUIState) {
       snapToGrid.value = workflowsStore.currentUIState.snap_to_grid
+
+      // Apply snap-to-grid to existing draggable instances
+      updateSnapToGrid(snapToGrid.value)
     }
   } catch (error: any) {
     toast.add({

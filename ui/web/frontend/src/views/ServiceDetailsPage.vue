@@ -272,7 +272,20 @@ const formatDate = (dateString: string): string => {
 
 const formatPricing = (svc: any): string => {
   if (!svc.pricing_amount) return t('message.services.free')
-  return `$${svc.pricing_amount.toFixed(2)} ${svc.pricing_type || 'ONE_TIME'}`
+
+  const amount = svc.pricing_amount
+  const type = svc.pricing_type || 'ONE_TIME'
+  const tokenLabel = amount === 1 ? 'token' : 'tokens'
+
+  if (type === 'ONE_TIME') {
+    return `${amount} ${tokenLabel}`
+  }
+
+  const interval = svc.pricing_interval || 1
+  const unit = svc.pricing_unit || 'MONTHS'
+  const unitStr = interval > 1 ? `${interval} ${unit.toLowerCase()}` : unit.toLowerCase().slice(0, -1)
+
+  return `${amount} ${tokenLabel}/${unitStr}`
 }
 
 const getStatusLabel = (status: string): string => {

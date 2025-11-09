@@ -6,7 +6,7 @@ export interface WorkflowJob {
   id: number
   workflow_id: number
   service_id: number
-  node_id: string
+  peer_id: string  // App Peer ID (not DHT node_id)
   service_name: string
   service_type: string
   order: number
@@ -14,6 +14,10 @@ export interface WorkflowJob {
   gui_y?: number
   input_mapping?: Record<string, any>
   output_mapping?: Record<string, any>
+  pricing_amount?: number
+  pricing_type?: string
+  pricing_interval?: number
+  pricing_unit?: string
   created_at: string
 }
 
@@ -93,7 +97,7 @@ export const useWorkflowsStore = defineStore('workflows', {
 
         // Fetch nodes for the workflow
         const nodesResponse = await api.getWorkflowNodes(id)
-        if (nodesResponse.nodes) {
+        if (nodesResponse.nodes && this.currentWorkflow) {
           this.currentWorkflow.jobs = nodesResponse.nodes
         }
 
