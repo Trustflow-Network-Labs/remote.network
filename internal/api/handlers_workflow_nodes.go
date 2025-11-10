@@ -255,3 +255,118 @@ func (s *APIServer) handleUpdateWorkflowUIState(w http.ResponseWriter, r *http.R
 		"success": true,
 	})
 }
+
+// handleGetWorkflowConnections gets all connections for a workflow
+// GET /api/workflows/:id/connections
+func (s *APIServer) handleGetWorkflowConnections(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract workflow ID from path
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	workflowID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid workflow ID", http.StatusBadRequest)
+		return
+	}
+
+	connections, err := s.dbManager.GetWorkflowConnections(workflowID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get workflow connections: %v", err), "api")
+		http.Error(w, "Failed to get workflow connections", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"connections": connections,
+	})
+}
+
+// handleAddWorkflowConnection adds a connection to a workflow
+// POST /api/workflows/:id/connections
+func (s *APIServer) handleAddWorkflowConnection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract workflow ID from path
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 4 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	workflowID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid workflow ID", http.StatusBadRequest)
+		return
+	}
+
+	var conn database.WorkflowConnection
+	err = json.NewDecoder(r.Body).Decode(&conn)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	conn.WorkflowID = workflowID
+
+	err = s.dbManager.AddWorkflowConnection(&conn)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to add workflow connection: %v", err), "api")
+		http.Error(w, "Failed to add workflow connection", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"connection": conn,
+	})
+}
+
+// handleDeleteWorkflowConnection deletes a connection
+// DELETE /api/workflows/:workflow_id/connections/:connection_id
+func (s *APIServer) handleDeleteWorkflowConnection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract IDs from path
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 5 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	connectionID, err := strconv.ParseInt(parts[4], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid connection ID", http.StatusBadRequest)
+		return
+	}
+
+	err = s.dbManager.DeleteWorkflowConnection(connectionID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to delete workflow connection: %v", err), "api")
+		http.Error(w, "Failed to delete workflow connection", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+	})
+}

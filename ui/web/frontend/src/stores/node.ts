@@ -60,7 +60,6 @@ export const useNodeStore = defineStore('node', {
         }
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to fetch node status:', error)
       } finally {
         this.loading = false
       }
@@ -84,7 +83,6 @@ export const useNodeStore = defineStore('node', {
     initializeWebSocket() {
       const wsService = getWebSocketService()
       if (!wsService) {
-        console.warn('[NodeStore] WebSocket service not available')
         return
       }
 
@@ -93,8 +91,6 @@ export const useNodeStore = defineStore('node', {
 
       // Store unsubscribe function
       ;(this as any)._wsUnsubscribe = unsubscribe
-
-      console.log('[NodeStore] WebSocket subscription initialized')
     },
 
     // Cleanup WebSocket subscription

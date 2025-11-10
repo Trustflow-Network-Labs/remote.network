@@ -346,6 +346,10 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			s.handleGetServicePassphrase(w, r)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/interfaces") {
+			s.handleGetServiceInterfaces(w, r)
+			return
+		}
 
 		// Default service CRUD operations
 		if r.Method == http.MethodGet {
@@ -430,6 +434,20 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 				s.handleGetWorkflowNodes(w, r)
 			} else if r.Method == http.MethodPost {
 				s.handleAddWorkflowNode(w, r)
+			} else {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		// Check if it's a connections request
+		if strings.Contains(r.URL.Path, "/connections") {
+			if strings.Contains(r.URL.Path, "/connections/") {
+				// DELETE /api/workflows/:id/connections/:connectionId
+				s.handleDeleteWorkflowConnection(w, r)
+			} else if r.Method == http.MethodGet {
+				s.handleGetWorkflowConnections(w, r)
+			} else if r.Method == http.MethodPost {
+				s.handleAddWorkflowConnection(w, r)
 			} else {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}

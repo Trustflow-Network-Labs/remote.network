@@ -77,7 +77,6 @@ export const useServicesStore = defineStore('services', {
         this.services = response.services || []
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to fetch services:', error)
       } finally {
         this.loading = false
       }
@@ -90,7 +89,6 @@ export const useServicesStore = defineStore('services', {
         return response.service
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to add service:', error)
         throw error
       }
     },
@@ -105,7 +103,6 @@ export const useServicesStore = defineStore('services', {
         return response.service
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to update service:', error)
         throw error
       }
     },
@@ -116,7 +113,6 @@ export const useServicesStore = defineStore('services', {
         this.services = this.services.filter(s => s.id !== id)
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to delete service:', error)
         throw error
       }
     },
@@ -137,7 +133,6 @@ export const useServicesStore = defineStore('services', {
         }
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to update service status:', error)
         throw error
       }
     },
@@ -148,7 +143,6 @@ export const useServicesStore = defineStore('services', {
         return response.passphrase
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to get service passphrase:', error)
         throw error
       }
     },
@@ -220,7 +214,6 @@ export const useServicesStore = defineStore('services', {
         this.remoteServices = services
       } catch (error: any) {
         this.error = error.message || 'Failed to search remote services'
-        console.error('Failed to search remote services:', error)
         this.remoteServices = []
       } finally {
         this.remoteLoading = false
@@ -231,7 +224,6 @@ export const useServicesStore = defineStore('services', {
     initializeWebSocket() {
       const wsService = getWebSocketService()
       if (!wsService) {
-        console.warn('[ServicesStore] WebSocket service not available')
         return
       }
 
@@ -243,8 +235,6 @@ export const useServicesStore = defineStore('services', {
 
       // Store unsubscribe function
       ;(this as any)._wsUnsubscribe = unsubscribe
-
-      console.log('[ServicesStore] WebSocket subscription initialized')
     },
 
     // Cleanup WebSocket subscription

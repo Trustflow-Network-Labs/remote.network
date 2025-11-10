@@ -64,6 +64,41 @@ func (s *APIServer) handleGetService(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGetServiceInterfaces returns all interfaces for a service
+func (s *APIServer) handleGetServiceInterfaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract ID from path (format: /api/services/{id}/interfaces)
+	path := strings.TrimPrefix(r.URL.Path, "/api/services/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	interfaces, err := s.dbManager.GetServiceInterfaces(id)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get service interfaces: %v", err), "api")
+		http.Error(w, "Failed to retrieve service interfaces", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"interfaces": interfaces,
+		"total":      len(interfaces),
+	})
+}
+
 // handleAddService adds a new service
 func (s *APIServer) handleAddService(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -118,6 +153,12 @@ func (s *APIServer) handleAddService(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to add service", "api")
 		http.Error(w, "Failed to add service", http.StatusInternalServerError)
 		return
+	}
+
+	// Create default interfaces based on service type
+	if err := s.createDefaultServiceInterfaces(&service); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to create default service interfaces: %v", err), "api")
+		// Don't fail the request, just log the error
 	}
 
 	// Broadcast service update via WebSocket
@@ -436,4 +477,27 @@ func (s *APIServer) updatePeerMetadataAfterServiceChange() {
 			s.logger.Debug("Successfully updated peer metadata after service change", "api")
 		}
 	}()
+}
+
+// createDefaultServiceInterfaces creates default interfaces for a service based on its type
+// Only DATA services get auto-created interfaces. DOCKER and STANDALONE interfaces are user-defined.
+func (s *APIServer) createDefaultServiceInterfaces(service *database.OfferedService) error {
+	if service.ServiceType != "DATA" {
+		// DOCKER and STANDALONE interfaces will be defined by user in service creation wizard
+		return nil
+	}
+
+	// DATA services only provide output (the data file itself)
+	stdoutInterface := &database.ServiceInterface{
+		ServiceID:     service.ID,
+		InterfaceType: "STDOUT",
+		Path:          "",
+	}
+
+	if err := s.dbManager.AddServiceInterface(stdoutInterface); err != nil {
+		return fmt.Errorf("failed to add STDOUT interface: %w", err)
+	}
+
+	s.logger.Info(fmt.Sprintf("Created STDOUT interface for DATA service %d", service.ID), "api")
+	return nil
 }

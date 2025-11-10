@@ -52,6 +52,18 @@
               </div>
             </div>
           </div>
+          <div class="workflow-details-body-section">
+            <div class="input-box">
+              <button
+                class="btn btn-execute"
+                :class="{ 'btn-success': props.canExecute, 'btn-disabled': !props.canExecute }"
+                :disabled="!props.canExecute"
+                @click="executeWorkflow"
+              >
+                <i class="pi pi-play"></i> {{ $t('message.common.execute') }}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -166,6 +178,14 @@ import { useAuthStore } from '../../stores/auth'
 import { usePeersStore } from '../../stores/peers'
 import { useTextUtils } from '../../composables/useTextUtils'
 import { useClipboard } from '../../composables/useClipboard'
+
+interface Props {
+  canExecute?: boolean
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  canExecute: false
+})
 
 // @ts-ignore - t is used in template
 const { t } = useI18n()
@@ -289,6 +309,10 @@ function saveWorkflow() {
 
 function deleteWorkflow() {
   emit('delete')
+}
+
+function executeWorkflow() {
+  emit('execute')
 }
 
 function performSearch() {
@@ -612,6 +636,20 @@ defineExpose({
 
           i {
             vertical-align: text-bottom;
+          }
+
+          &.btn-success {
+            background-color: #16a34a;
+          }
+
+          &.btn-disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+            opacity: 0.6;
+          }
+
+          &.btn-execute {
+            width: 100%;
           }
 
           &.light {

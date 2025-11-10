@@ -2,6 +2,14 @@ import { defineStore } from 'pinia'
 import { api } from '../services/api'
 import { getWebSocketService, MessageType } from '../services/websocket'
 
+export interface ServiceInterface {
+  id: number
+  service_id: number
+  interface_type: 'STDIN' | 'STDOUT' | 'MOUNT'
+  path: string
+  created_at: string
+}
+
 export interface WorkflowJob {
   id: number
   workflow_id: number
@@ -18,6 +26,7 @@ export interface WorkflowJob {
   pricing_type?: string
   pricing_interval?: number
   pricing_unit?: string
+  interfaces?: ServiceInterface[]  // Service interfaces defining allowed inputs/outputs
   created_at: string
 }
 
@@ -37,6 +46,8 @@ export interface WorkflowUIState {
   zoom_level?: number
   pan_x?: number
   pan_y?: number
+  self_peer_x?: number
+  self_peer_y?: number
 }
 
 export interface WorkflowsState {
@@ -79,7 +90,6 @@ export const useWorkflowsStore = defineStore('workflows', {
         this.workflows = response.workflows || []
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to fetch workflows:', error)
       } finally {
         this.loading = false
       }
@@ -98,7 +108,21 @@ export const useWorkflowsStore = defineStore('workflows', {
         // Fetch nodes for the workflow
         const nodesResponse = await api.getWorkflowNodes(id)
         if (nodesResponse.nodes && this.currentWorkflow) {
-          this.currentWorkflow.jobs = nodesResponse.nodes
+          // Fetch interfaces for each job
+          const jobsWithInterfaces = await Promise.all(
+            nodesResponse.nodes.map(async (node: WorkflowJob) => {
+              if (node.service_id) {
+                try {
+                  const interfacesResponse = await api.getServiceInterfaces(node.service_id)
+                  node.interfaces = interfacesResponse.interfaces || []
+                } catch (interfaceError) {
+                  node.interfaces = []
+                }
+              }
+              return node
+            })
+          )
+          this.currentWorkflow.jobs = jobsWithInterfaces
         }
 
         // Fetch UI state
@@ -111,14 +135,15 @@ export const useWorkflowsStore = defineStore('workflows', {
             snap_to_grid: false,
             zoom_level: 1.0,
             pan_x: 0,
-            pan_y: 0
+            pan_y: 0,
+            self_peer_x: 50,
+            self_peer_y: 50
           }
         }
 
         return workflow
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to fetch workflow:', error)
         throw error
       } finally {
         this.loading = false
@@ -139,7 +164,6 @@ export const useWorkflowsStore = defineStore('workflows', {
         return newWorkflow
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to create workflow:', error)
         throw error
       }
     },
@@ -159,7 +183,6 @@ export const useWorkflowsStore = defineStore('workflows', {
         return updatedWorkflow
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to update workflow:', error)
         throw error
       }
     },
@@ -173,7 +196,6 @@ export const useWorkflowsStore = defineStore('workflows', {
         }
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to delete workflow:', error)
         throw error
       }
     },
@@ -182,6 +204,17 @@ export const useWorkflowsStore = defineStore('workflows', {
       try {
         const response = await api.addWorkflowNode(workflowId, job)
         const node = response.node || response
+
+        // Fetch service interfaces for the job
+        if (node.service_id) {
+          try {
+            const interfacesResponse = await api.getServiceInterfaces(node.service_id)
+            node.interfaces = interfacesResponse.interfaces || []
+          } catch (interfaceError) {
+            node.interfaces = []
+          }
+        }
+
         if (this.currentWorkflow?.id === workflowId) {
           // Ensure jobs array exists
           if (!this.currentWorkflow.jobs) {
@@ -192,7 +225,6 @@ export const useWorkflowsStore = defineStore('workflows', {
         return node
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to add workflow job:', error)
         throw error
       }
     },
@@ -205,7 +237,6 @@ export const useWorkflowsStore = defineStore('workflows', {
         }
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to remove workflow job:', error)
         throw error
       }
     },
@@ -222,7 +253,6 @@ export const useWorkflowsStore = defineStore('workflows', {
         }
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to update job GUI props:', error)
         throw error
       }
     },
@@ -235,7 +265,6 @@ export const useWorkflowsStore = defineStore('workflows', {
         }
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to update workflow UI state:', error)
         throw error
       }
     },
@@ -246,7 +275,35 @@ export const useWorkflowsStore = defineStore('workflows', {
         return response
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to execute workflow:', error)
+        throw error
+      }
+    },
+
+    async addWorkflowConnection(workflowId: number, connection: any) {
+      try {
+        const response = await api.addWorkflowConnection(workflowId, connection)
+        return response
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        throw error
+      }
+    },
+
+    async getWorkflowConnections(workflowId: number) {
+      try {
+        const response = await api.getWorkflowConnections(workflowId)
+        return response
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        throw error
+      }
+    },
+
+    async deleteWorkflowConnection(workflowId: number, connectionId: number) {
+      try {
+        await api.deleteWorkflowConnection(workflowId, connectionId)
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
         throw error
       }
     },
@@ -269,7 +326,6 @@ export const useWorkflowsStore = defineStore('workflows', {
     initializeWebSocket() {
       const wsService = getWebSocketService()
       if (!wsService) {
-        console.warn('[WorkflowsStore] WebSocket service not available')
         return
       }
 
@@ -282,8 +338,6 @@ export const useWorkflowsStore = defineStore('workflows', {
 
       // Store unsubscribe function
       self._wsUnsubscribe = unsubscribe
-
-      console.log('[WorkflowsStore] WebSocket subscription initialized')
     },
 
     // Cleanup WebSocket subscription

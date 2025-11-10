@@ -36,8 +36,21 @@ type WorkflowUIState struct {
 	ZoomLevel  float64   `json:"zoom_level"`  // For future use
 	PanX       float64   `json:"pan_x"`       // For future use
 	PanY       float64   `json:"pan_y"`       // For future use
+	SelfPeerX  float64   `json:"self_peer_x"` // Self-peer card X position
+	SelfPeerY  float64   `json:"self_peer_y"` // Self-peer card Y position
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// WorkflowConnection represents a connection between workflow nodes
+type WorkflowConnection struct {
+	ID               int64     `json:"id"`
+	WorkflowID       int64     `json:"workflow_id"`
+	FromNodeID       *int64    `json:"from_node_id"`       // Source node ID (null if self-peer)
+	FromInterfaceType string   `json:"from_interface_type"` // STDIN, STDOUT, MOUNT
+	ToNodeID         *int64    `json:"to_node_id"`         // Destination node ID (null if self-peer)
+	ToInterfaceType  string    `json:"to_interface_type"`   // STDIN, STDOUT, MOUNT
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // InitWorkflowNodesTable creates the workflow_nodes and workflow_ui_state tables
@@ -71,14 +84,32 @@ func (sm *SQLiteManager) InitWorkflowNodesTable() error {
 		zoom_level REAL NOT NULL DEFAULT 1.0,
 		pan_x REAL NOT NULL DEFAULT 0.0,
 		pan_y REAL NOT NULL DEFAULT 0.0,
+		self_peer_x REAL NOT NULL DEFAULT 50.0,
+		self_peer_y REAL NOT NULL DEFAULT 50.0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 	);
 
+	CREATE TABLE IF NOT EXISTS workflow_connections (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		workflow_id INTEGER NOT NULL,
+		from_node_id INTEGER,
+		from_interface_type TEXT CHECK(from_interface_type IN ('STDIN', 'STDOUT', 'MOUNT')) NOT NULL,
+		to_node_id INTEGER,
+		to_interface_type TEXT CHECK(to_interface_type IN ('STDIN', 'STDOUT', 'MOUNT')) NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+		FOREIGN KEY (from_node_id) REFERENCES workflow_nodes(id) ON DELETE CASCADE,
+		FOREIGN KEY (to_node_id) REFERENCES workflow_nodes(id) ON DELETE CASCADE
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_workflow_nodes_workflow_id ON workflow_nodes(workflow_id);
 	CREATE INDEX IF NOT EXISTS idx_workflow_nodes_order ON workflow_nodes("order");
 	CREATE INDEX IF NOT EXISTS idx_workflow_ui_state_workflow_id ON workflow_ui_state(workflow_id);
+	CREATE INDEX IF NOT EXISTS idx_workflow_connections_workflow_id ON workflow_connections(workflow_id);
+	CREATE INDEX IF NOT EXISTS idx_workflow_connections_from_node_id ON workflow_connections(from_node_id);
+	CREATE INDEX IF NOT EXISTS idx_workflow_connections_to_node_id ON workflow_connections(to_node_id);
 	`
 
 	_, err := sm.db.Exec(createTableSQL)
@@ -221,12 +252,12 @@ func (sm *SQLiteManager) DeleteWorkflowNode(nodeID int64) error {
 func (sm *SQLiteManager) GetWorkflowUIState(workflowID int64) (*WorkflowUIState, error) {
 	state := &WorkflowUIState{}
 	err := sm.db.QueryRow(`
-		SELECT id, workflow_id, snap_to_grid, zoom_level, pan_x, pan_y, created_at, updated_at
+		SELECT id, workflow_id, snap_to_grid, zoom_level, pan_x, pan_y, self_peer_x, self_peer_y, created_at, updated_at
 		FROM workflow_ui_state
 		WHERE workflow_id = ?
 	`, workflowID).Scan(
 		&state.ID, &state.WorkflowID, &state.SnapToGrid, &state.ZoomLevel,
-		&state.PanX, &state.PanY, &state.CreatedAt, &state.UpdatedAt,
+		&state.PanX, &state.PanY, &state.SelfPeerX, &state.SelfPeerY, &state.CreatedAt, &state.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -242,8 +273,8 @@ func (sm *SQLiteManager) GetWorkflowUIState(workflowID int64) (*WorkflowUIState,
 // CreateWorkflowUIState creates a new UI state for a workflow
 func (sm *SQLiteManager) CreateWorkflowUIState(workflowID int64) (*WorkflowUIState, error) {
 	result, err := sm.db.Exec(`
-		INSERT INTO workflow_ui_state (workflow_id, snap_to_grid, zoom_level, pan_x, pan_y)
-		VALUES (?, 0, 1.0, 0.0, 0.0)
+		INSERT INTO workflow_ui_state (workflow_id, snap_to_grid, zoom_level, pan_x, pan_y, self_peer_x, self_peer_y)
+		VALUES (?, 0, 1.0, 0.0, 0.0, 50.0, 50.0)
 	`, workflowID)
 
 	if err != nil {
@@ -262,6 +293,8 @@ func (sm *SQLiteManager) CreateWorkflowUIState(workflowID int64) (*WorkflowUISta
 		ZoomLevel:  1.0,
 		PanX:       0.0,
 		PanY:       0.0,
+		SelfPeerX:  50.0,
+		SelfPeerY:  50.0,
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
 	}, nil
@@ -271,9 +304,9 @@ func (sm *SQLiteManager) CreateWorkflowUIState(workflowID int64) (*WorkflowUISta
 func (sm *SQLiteManager) UpdateWorkflowUIState(workflowID int64, state *WorkflowUIState) error {
 	_, err := sm.db.Exec(`
 		UPDATE workflow_ui_state
-		SET snap_to_grid = ?, zoom_level = ?, pan_x = ?, pan_y = ?, updated_at = CURRENT_TIMESTAMP
+		SET snap_to_grid = ?, zoom_level = ?, pan_x = ?, pan_y = ?, self_peer_x = ?, self_peer_y = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE workflow_id = ?
-	`, state.SnapToGrid, state.ZoomLevel, state.PanX, state.PanY, workflowID)
+	`, state.SnapToGrid, state.ZoomLevel, state.PanX, state.PanY, state.SelfPeerX, state.SelfPeerY, workflowID)
 
 	if err != nil {
 		// Try to create if doesn't exist
@@ -288,5 +321,78 @@ func (sm *SQLiteManager) UpdateWorkflowUIState(workflowID int64, state *Workflow
 		return fmt.Errorf("failed to update workflow UI state: %v", err)
 	}
 
+	return nil
+}
+
+// AddWorkflowConnection adds a connection between workflow nodes
+func (sm *SQLiteManager) AddWorkflowConnection(conn *WorkflowConnection) error {
+	result, err := sm.db.Exec(`
+		INSERT INTO workflow_connections (
+			workflow_id, from_node_id, from_interface_type, to_node_id, to_interface_type
+		) VALUES (?, ?, ?, ?, ?)
+	`, conn.WorkflowID, conn.FromNodeID, conn.FromInterfaceType, conn.ToNodeID, conn.ToInterfaceType)
+
+	if err != nil {
+		return fmt.Errorf("failed to add workflow connection: %v", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	conn.ID = id
+	return nil
+}
+
+// GetWorkflowConnections retrieves all connections for a workflow
+func (sm *SQLiteManager) GetWorkflowConnections(workflowID int64) ([]*WorkflowConnection, error) {
+	rows, err := sm.db.Query(`
+		SELECT id, workflow_id, from_node_id, from_interface_type, to_node_id, to_interface_type, created_at
+		FROM workflow_connections
+		WHERE workflow_id = ?
+	`, workflowID)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workflow connections: %v", err)
+	}
+	defer rows.Close()
+
+	var connections []*WorkflowConnection
+	for rows.Next() {
+		var conn WorkflowConnection
+		err := rows.Scan(
+			&conn.ID,
+			&conn.WorkflowID,
+			&conn.FromNodeID,
+			&conn.FromInterfaceType,
+			&conn.ToNodeID,
+			&conn.ToInterfaceType,
+			&conn.CreatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan workflow connection: %v", err)
+		}
+		connections = append(connections, &conn)
+	}
+
+	return connections, nil
+}
+
+// DeleteWorkflowConnection deletes a connection by ID
+func (sm *SQLiteManager) DeleteWorkflowConnection(id int64) error {
+	_, err := sm.db.Exec(`DELETE FROM workflow_connections WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete workflow connection: %v", err)
+	}
+	return nil
+}
+
+// DeleteAllWorkflowConnections deletes all connections for a workflow
+func (sm *SQLiteManager) DeleteAllWorkflowConnections(workflowID int64) error {
+	_, err := sm.db.Exec(`DELETE FROM workflow_connections WHERE workflow_id = ?`, workflowID)
+	if err != nil {
+		return fmt.Errorf("failed to delete workflow connections: %v", err)
+	}
 	return nil
 }

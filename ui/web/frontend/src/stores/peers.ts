@@ -49,7 +49,6 @@ export const usePeersStore = defineStore('peers', {
         this.peers = response.peers || []
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to fetch peers:', error)
       } finally {
         this.loading = false
       }
@@ -64,7 +63,6 @@ export const usePeersStore = defineStore('peers', {
         this.blacklist = response.blacklist || []
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to fetch blacklist:', error)
       } finally {
         this.loading = false
       }
@@ -78,7 +76,6 @@ export const usePeersStore = defineStore('peers', {
         }
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to add peer to blacklist:', error)
         throw error
       }
     },
@@ -89,7 +86,6 @@ export const usePeersStore = defineStore('peers', {
         this.blacklist = this.blacklist.filter(id => id !== peerId)
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
-        console.error('Failed to remove peer from blacklist:', error)
         throw error
       }
     },
@@ -111,7 +107,6 @@ export const usePeersStore = defineStore('peers', {
     initializeWebSocket() {
       const wsService = getWebSocketService()
       if (!wsService) {
-        console.warn('[PeersStore] WebSocket service not available')
         return
       }
 
@@ -130,8 +125,6 @@ export const usePeersStore = defineStore('peers', {
       // Store unsubscribe functions
       ;(this as any)._wsUnsubscribePeers = unsubscribePeers
       ;(this as any)._wsUnsubscribeBlacklist = unsubscribeBlacklist
-
-      console.log('[PeersStore] WebSocket subscriptions initialized')
     },
 
     // Cleanup WebSocket subscriptions

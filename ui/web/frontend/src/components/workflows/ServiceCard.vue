@@ -18,8 +18,16 @@
     </div>
 
     <div class="card-rip">
-      <div :class="['card-rip-connector', 'left', 'not-allowed', { 'data': isData, 'docker': isDocker, 'standalone': isStandalone }]"></div>
-      <div :class="['card-rip-connector', 'right', 'allowed', { 'data': isData, 'docker': isDocker, 'standalone': isStandalone }]"></div>
+      <div
+        :class="['card-rip-connector', 'left', leftConnectorState, { 'data': isData, 'docker': isDocker, 'standalone': isStandalone }]"
+        :data-card-id="serviceCardId"
+        :data-connector="'input'"
+      ></div>
+      <div
+        :class="['card-rip-connector', 'right', rightConnectorState, { 'data': isData, 'docker': isDocker, 'standalone': isStandalone }]"
+        :data-card-id="serviceCardId"
+        :data-connector="'output'"
+      ></div>
     </div>
 
     <div class="card-bottom">
@@ -90,6 +98,33 @@ const formattedPrice = computed(() => {
 
 const hasInputs = computed(() => {
   return props.job.input_mapping && Object.keys(props.job.input_mapping).length > 0
+})
+
+// Connector states based on service interfaces
+const leftConnectorState = computed(() => {
+  // Left connector is for INPUT (STDIN or MOUNT input)
+  if (!props.job.interfaces || props.job.interfaces.length === 0) {
+    return 'not-allowed'
+  }
+
+  const hasInputInterface = props.job.interfaces.some(
+    iface => iface.interface_type === 'STDIN' || iface.interface_type === 'MOUNT'
+  )
+
+  return hasInputInterface ? 'allowed' : 'not-allowed'
+})
+
+const rightConnectorState = computed(() => {
+  // Right connector is for OUTPUT (STDOUT or MOUNT output)
+  if (!props.job.interfaces || props.job.interfaces.length === 0) {
+    return 'not-allowed'
+  }
+
+  const hasOutputInterface = props.job.interfaces.some(
+    iface => iface.interface_type === 'STDOUT' || iface.interface_type === 'MOUNT'
+  )
+
+  return hasOutputInterface ? 'allowed' : 'not-allowed'
 })
 
 function closeCard() {

@@ -27,6 +27,16 @@ type OfferedService struct {
 	UpdatedAt       time.Time              `json:"updated_at"`
 }
 
+// ServiceInterface represents an available interface (STDIN, STDOUT, MOUNT) for a service
+// These define what interfaces a service supports and constrain what inputs/outputs jobs can have
+type ServiceInterface struct {
+	ID            int64     `json:"id"`
+	ServiceID     int64     `json:"service_id"`
+	InterfaceType string    `json:"interface_type"` // STDIN, STDOUT, MOUNT
+	Path          string    `json:"path"`           // Optional path for MOUNT interfaces
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 // InitServicesTable creates the services table if it doesn't exist
 func (sm *SQLiteManager) InitServicesTable() error {
 	createTableSQL := `
@@ -111,6 +121,19 @@ func (sm *SQLiteManager) InitServicesTable() error {
 	CREATE INDEX IF NOT EXISTS idx_upload_sessions_service_id ON upload_sessions(service_id);
 	CREATE INDEX IF NOT EXISTS idx_upload_sessions_upload_group_id ON upload_sessions(upload_group_id);
 	CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON upload_sessions(status);
+
+	-- Service interfaces table
+	CREATE TABLE IF NOT EXISTS service_interfaces (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		service_id INTEGER NOT NULL,
+		interface_type TEXT CHECK(interface_type IN ('STDIN', 'STDOUT', 'MOUNT')) NOT NULL,
+		path TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_service_interfaces_service_id ON service_interfaces(service_id);
+	CREATE INDEX IF NOT EXISTS idx_service_interfaces_type ON service_interfaces(interface_type);
 
 	-- Placeholder tables for future service types
 	CREATE TABLE IF NOT EXISTS docker_service_details (
@@ -433,5 +456,113 @@ func (sm *SQLiteManager) UpdateServiceStatus(id int64, status string) error {
 	}
 
 	sm.logger.Info("Service status updated successfully", "database")
+	return nil
+}
+
+// AddServiceInterface adds an interface to a service
+func (sm *SQLiteManager) AddServiceInterface(serviceInterface *ServiceInterface) error {
+	query := `
+		INSERT INTO service_interfaces (service_id, interface_type, path)
+		VALUES (?, ?, ?)
+	`
+
+	result, err := sm.db.Exec(
+		query,
+		serviceInterface.ServiceID,
+		serviceInterface.InterfaceType,
+		serviceInterface.Path,
+	)
+
+	if err != nil {
+		sm.logger.Error("Failed to add service interface", "database")
+		return err
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	serviceInterface.ID = id
+	serviceInterface.CreatedAt = time.Now()
+
+	sm.logger.Info("Service interface added successfully", "database")
+	return nil
+}
+
+// GetServiceInterfaces retrieves all interfaces for a service
+func (sm *SQLiteManager) GetServiceInterfaces(serviceID int64) ([]*ServiceInterface, error) {
+	query := `
+		SELECT id, service_id, interface_type, path, created_at
+		FROM service_interfaces
+		WHERE service_id = ?
+		ORDER BY created_at ASC
+	`
+
+	rows, err := sm.db.Query(query, serviceID)
+	if err != nil {
+		sm.logger.Error("Failed to get service interfaces", "database")
+		return nil, err
+	}
+	defer rows.Close()
+
+	var interfaces []*ServiceInterface
+
+	for rows.Next() {
+		var si ServiceInterface
+
+		err := rows.Scan(
+			&si.ID,
+			&si.ServiceID,
+			&si.InterfaceType,
+			&si.Path,
+			&si.CreatedAt,
+		)
+
+		if err != nil {
+			sm.logger.Error("Failed to scan service interface", "database")
+			continue
+		}
+
+		interfaces = append(interfaces, &si)
+	}
+
+	return interfaces, nil
+}
+
+// DeleteServiceInterface deletes a service interface by ID
+func (sm *SQLiteManager) DeleteServiceInterface(id int64) error {
+	query := `DELETE FROM service_interfaces WHERE id = ?`
+
+	result, err := sm.db.Exec(query, id)
+	if err != nil {
+		sm.logger.Error("Failed to delete service interface", "database")
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+
+	sm.logger.Info("Service interface deleted successfully", "database")
+	return nil
+}
+
+// DeleteServiceInterfaces deletes all interfaces for a service
+func (sm *SQLiteManager) DeleteServiceInterfaces(serviceID int64) error {
+	query := `DELETE FROM service_interfaces WHERE service_id = ?`
+
+	_, err := sm.db.Exec(query, serviceID)
+	if err != nil {
+		sm.logger.Error("Failed to delete service interfaces", "database")
+		return err
+	}
+
+	sm.logger.Info("Service interfaces deleted successfully", "database")
 	return nil
 }

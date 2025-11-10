@@ -1,13 +1,20 @@
 <template>
   <AppLayout>
-    <div class="workflow-editor">
+    <div ref="workflowEditor" class="workflow-editor">
       <div
         ref="grid"
         class="workflow-grid"
         :style="gridStyles"
         @dragover="onDragOver"
         @drop="onDrop"
+        @click="onGridClick"
       >
+        <!-- Self Peer Card (Local Peer) -->
+        <SelfPeerCard
+          ref="selfPeerCardRef"
+          :style="{ left: '50px', top: '50px' }"
+        />
+
         <!-- Service Cards -->
         <ServiceCard
           v-for="card in serviceCards"
@@ -23,6 +30,7 @@
       <!-- Workflow Tools Panel -->
       <WorkflowTools
         ref="workflowToolsRef"
+        :can-execute="canExecuteWorkflow"
         @save="saveWorkflow"
         @execute="executeWorkflow"
         @delete="confirmDeleteWorkflow"
@@ -45,9 +53,12 @@ import { useConfirm } from 'primevue/useconfirm'
 import { useToast } from 'primevue/usetoast'
 import PlainDraggable from 'plain-draggable'
 import ProgressSpinner from 'primevue/progressspinner'
+// @ts-ignore
+import LeaderLine from 'leader-line-new'
 
 import AppLayout from '../layout/AppLayout.vue'
 import ServiceCard from './ServiceCard.vue'
+import SelfPeerCard from './SelfPeerCard.vue'
 import WorkflowTools from './WorkflowTools.vue'
 import { useWorkflowsStore } from '../../stores/workflows'
 import type { WorkflowJob } from '../../stores/workflows'
@@ -66,8 +77,10 @@ const snapGravity = 80
 
 // State
 const loading = ref(false)
+const workflowEditor = ref<HTMLElement | null>(null)
 const grid = ref<HTMLElement | null>(null)
 const workflowToolsRef = ref<any>(null)
+const selfPeerCardRef = ref<any>(null)
 const snapToGrid = ref(false)
 const serviceCards = ref<Array<{
   id: number
@@ -77,14 +90,84 @@ const serviceCards = ref<Array<{
 }>>([])
 
 // Draggable instances
-const draggableInstances: Map<number, any> = new Map()
+const draggableInstances: Map<number | string, any> = new Map()
 const cardRefs: Map<number, any> = new Map()
+
+// Leader-line connections (must be reactive for computed properties to update)
+const connections = ref<Array<{
+  line: any
+  from: string
+  to: string
+  fromCardId: string | number
+  toCardId: string | number
+  dbId?: number // Database ID for persistence
+  svgElement?: SVGElement // Store reference to SVG element for click handling
+}>>([])
+const selectedConnector = ref<{ cardId: string | number; type: 'input' | 'output'; element: HTMLElement } | null>(null)
+const previewLine = ref<any>(null)
+let justCompletedConnection = false
 
 // Grid styling
 const gridStyles = computed(() => ({
   '--grid-box-x-size': `${gridBoxXSize}px`,
   '--grid-box-y-size': `${gridBoxYSize}px`,
 }))
+
+// Validate that all interfaces are connected
+const canExecuteWorkflow = computed(() => {
+  // No jobs means cannot execute
+  if (serviceCards.value.length === 0) {
+    return false
+  }
+
+  // Check all output interfaces are connected (except local peer)
+  for (const card of serviceCards.value) {
+    if (!card.job.interfaces || card.job.interfaces.length === 0) {
+      continue
+    }
+
+    const hasOutputInterface = card.job.interfaces.some(
+      iface => iface.interface_type === 'STDOUT' ||
+               (iface.interface_type === 'MOUNT' && card.job.service_type === 'DATA')
+    )
+
+    if (hasOutputInterface) {
+      // This card has output, check if it's connected (use loose equality for string/number comparison)
+      const hasConnection = connections.value.some(conn => conn.fromCardId == card.id)
+      if (!hasConnection) {
+        return false // Output not connected
+      }
+    }
+  }
+
+  // Check all input interfaces are connected (except local peer)
+  for (const card of serviceCards.value) {
+    if (!card.job.interfaces || card.job.interfaces.length === 0) {
+      continue
+    }
+
+    const hasInputInterface = card.job.interfaces.some(
+      iface => iface.interface_type === 'STDIN' ||
+               (iface.interface_type === 'MOUNT' && card.job.service_type !== 'DATA')
+    )
+
+    if (hasInputInterface) {
+      // This card has input, check if it's connected (use loose equality for string/number comparison)
+      const hasConnection = connections.value.some(conn => conn.toCardId == card.id)
+      if (!hasConnection) {
+        return false // Input not connected
+      }
+    }
+  }
+
+  // Local peer input must be connected (at least one connection to self-peer)
+  const hasSelfPeerConnection = connections.value.some(conn => conn.toCardId == 'self-peer')
+  if (!hasSelfPeerConnection) {
+    return false
+  }
+
+  return true
+})
 
 // Snap targets for PlainDraggable
 const snapTargets = ref<Array<{ x: number; y: number }>>([])
@@ -113,6 +196,14 @@ function onDragOver(event: DragEvent) {
   event.preventDefault()
   if (event.dataTransfer) {
     event.dataTransfer.dropEffect = 'copy'
+  }
+}
+
+function onGridClick(event: MouseEvent) {
+  // If clicking on the grid itself (not a connector), cancel the preview
+  const target = event.target as HTMLElement
+  if (selectedConnector.value && !target.classList.contains('card-rip-connector')) {
+    clearSelection()
   }
 }
 
@@ -200,6 +291,10 @@ async function addServiceToWorkflow(service: any, x: number, y: number) {
     await nextTick()
     initializeDraggableCard(cardId, x, y)
 
+    // Setup connector handlers for the new card
+    await nextTick()
+    setupConnectorHandlers()
+
     toast.add({
       severity: 'success',
       summary: t('message.common.success'),
@@ -221,13 +316,11 @@ async function addServiceToWorkflow(service: any, x: number, y: number) {
 function initializeDraggableCard(cardId: number, x: number, y: number) {
   const card = serviceCards.value.find(c => c.id === cardId)
   if (!card) {
-    console.warn('Card not found:', cardId)
     return
   }
 
   const cardEl = cardRefs.get(cardId)
   if (!cardEl) {
-    console.warn('Card ref not found:', cardId)
     return
   }
 
@@ -238,7 +331,6 @@ function initializeDraggableCard(cardId: number, x: number, y: number) {
   }
 
   if (!domElement || !(domElement instanceof HTMLElement)) {
-    console.warn('Invalid DOM element for card:', cardId, domElement)
     return
   }
 
@@ -251,8 +343,8 @@ function initializeDraggableCard(cardId: number, x: number, y: number) {
     draggableInstances.delete(cardId)
   }
 
-  // Create new draggable instance
-  const draggable = new PlainDraggable(domElement, {
+  // Create new draggable instance (cast to any to avoid TypeScript errors with onMove)
+  const draggable: any = new PlainDraggable(domElement, {
     autoScroll: true
   })
 
@@ -266,9 +358,18 @@ function initializeDraggableCard(cardId: number, x: number, y: number) {
     }
   }
 
+  // Update connections while dragging
+  draggable.onMove = () => {
+    updateConnectionsForCard(cardId)
+  }
+
   draggable.onDragEnd = async (pos: { left: number; top: number }) => {
-    card.x = pos.left
-    card.y = pos.top
+    // Round to integers since backend expects int values
+    const x = Math.round(pos.left)
+    const y = Math.round(pos.top)
+
+    card.x = x
+    card.y = y
 
     // Update job GUI props in database
     if (workflowsStore.currentWorkflow) {
@@ -276,11 +377,11 @@ function initializeDraggableCard(cardId: number, x: number, y: number) {
         await workflowsStore.updateJobGUIProps(
           workflowsStore.currentWorkflow.id,
           card.job.id,
-          pos.left,
-          pos.top
+          x,
+          y
         )
       } catch (error) {
-        console.error('Failed to update job position:', error)
+        // Silently fail - position update is not critical
       }
     }
   }
@@ -292,7 +393,37 @@ async function removeServiceCard(cardId: number) {
   const card = serviceCards.value.find(c => c.id === cardId)
   if (!card) return
 
-  // Clean up draggable instance first
+  // Remove all connections associated with this card
+  const connectionsToRemove = connections.value.filter(c =>
+    c.from.includes(cardId.toString()) || c.to.includes(cardId.toString())
+  )
+
+  // Delete connections from database
+  if (workflowsStore.currentWorkflow?.id) {
+    for (const conn of connectionsToRemove) {
+      if (conn.dbId) {
+        try {
+          await workflowsStore.deleteWorkflowConnection(workflowsStore.currentWorkflow.id, conn.dbId)
+        } catch (error) {
+          // Silently fail - connection will be cascade deleted
+        }
+      }
+    }
+  }
+
+  // Remove leader lines from UI
+  connectionsToRemove.forEach(conn => {
+    if (conn.line && conn.line.remove) {
+      conn.line.remove()
+    }
+  })
+
+  // Remove from connections array
+  connections.value.splice(0, connections.value.length,
+    ...connections.value.filter(c => !connectionsToRemove.includes(c))
+  )
+
+  // Clean up draggable instance
   if (draggableInstances.has(cardId)) {
     const instance = draggableInstances.get(cardId)
     if (instance && instance.remove) {
@@ -317,7 +448,6 @@ async function removeServiceCard(cardId: number) {
         life: 3000
       })
     } catch (error: any) {
-      console.error('Failed to remove job from database:', error)
       // UI already updated, don't confuse user with error
     } finally {
       loading.value = false
@@ -430,9 +560,19 @@ async function deleteWorkflow() {
 
   try {
     const workflowId = workflowsStore.currentWorkflow.id
+
+    // Clean up leader lines first (DB connections will be cascade deleted)
+    connections.value.forEach(c => {
+      if (c.line && c.line.remove) {
+        c.line.remove()
+      }
+    })
+    connections.value.length = 0
+
+    // Delete workflow from database (cascade deletes nodes and connections)
     await workflowsStore.deleteWorkflow(workflowId)
 
-    // Clean up
+    // Clean up UI state
     serviceCards.value = []
     draggableInstances.clear()
     cardRefs.clear()
@@ -475,8 +615,10 @@ function updateSnapToGrid(enabled: boolean) {
   })
 
   // Save UI state to database only if workflow exists AND has an ID
-  if (workflowsStore.currentWorkflow?.id) {
+  if (workflowsStore.currentWorkflow?.id && workflowsStore.currentUIState) {
+    // Merge with existing state to avoid overwriting other fields
     workflowsStore.updateUIState(workflowsStore.currentWorkflow.id, {
+      ...workflowsStore.currentUIState,
       snap_to_grid: enabled
     })
   }
@@ -485,17 +627,28 @@ function updateSnapToGrid(enabled: boolean) {
 async function loadWorkflow() {
   const workflowId = route.params.id
 
+  // Clean up existing UI connections and cards before loading (without deleting from database)
+  clearConnectionsUI()
+  serviceCards.value = []
+
   // Handle new workflow or invalid ID
   if (!workflowId || workflowId === 'design' || workflowId === 'new' || Array.isArray(workflowId)) {
     workflowsStore.clearCurrentWorkflow()
+    // Still initialize self-peer for new workflows
+    await initializeSelfPeerDraggable()
+    await nextTick()
+    setupConnectorHandlers()
     return
   }
 
   // Validate numeric ID
   const numericId = Number(workflowId)
   if (isNaN(numericId) || numericId <= 0) {
-    console.warn('Invalid workflow ID:', workflowId)
     workflowsStore.clearCurrentWorkflow()
+    // Still initialize self-peer for invalid IDs
+    await initializeSelfPeerDraggable()
+    await nextTick()
+    setupConnectorHandlers()
     return
   }
 
@@ -507,14 +660,17 @@ async function loadWorkflow() {
     // Load service cards from workflow jobs (nodes)
     if (workflow.jobs && workflow.jobs.length > 0) {
       serviceCards.value = workflow.jobs.map((job: WorkflowJob, index: number) => ({
-        id: index,
+        id: job.id, // Use database ID, not array index
         job: job,
         x: job.gui_x || 100 + (index * 50),
         y: job.gui_y || 100 + (index * 50)
       }))
 
-      // Initialize draggables
+      // Wait for cards to render
       await nextTick()
+      await nextTick() // Extra tick to ensure refs are populated
+
+      // Initialize draggables
       serviceCards.value.forEach(card => {
         initializeDraggableCard(card.id, card.x, card.y)
       })
@@ -526,6 +682,21 @@ async function loadWorkflow() {
 
       // Apply snap-to-grid to existing draggable instances
       updateSnapToGrid(snapToGrid.value)
+    }
+
+    // Initialize self-peer draggable after UI state is loaded
+    await initializeSelfPeerDraggable()
+
+    // Set up connector handlers for all cards including self-peer
+    await nextTick()
+    await nextTick() // Extra tick to ensure connectors are in DOM
+    setupConnectorHandlers()
+
+    // Load connections after all cards and connectors are fully initialized
+    if (workflow.jobs && workflow.jobs.length > 0) {
+      await nextTick()
+      await nextTick() // Extra tick to ensure everything is ready
+      await loadConnections()
     }
   } catch (error: any) {
     toast.add({
@@ -539,9 +710,540 @@ async function loadWorkflow() {
   }
 }
 
-onMounted(() => {
+// Leader-line connection management
+function handleConnectorClick(event: Event, cardId: string | number, connectorType: 'input' | 'output') {
+  event.stopPropagation()
+
+  // Prevent starting a new connection immediately after completing one
+  if (justCompletedConnection) {
+    justCompletedConnection = false
+    return
+  }
+
+  const element = event.target as HTMLElement
+
+  if (!selectedConnector.value) {
+    // First click - select this connector and create preview line
+    selectedConnector.value = { cardId, type: connectorType, element }
+    element.classList.add('selected')
+
+    // Create preview line from this connector to a temporary anchor point
+    createPreviewLine(element)
+
+    // Add mouse move listener to update preview line
+    grid.value?.addEventListener('mousemove', updatePreviewLine)
+  } else {
+    // Second click - create connection
+    const { cardId: fromCardId, type: fromType } = selectedConnector.value
+
+    // Validate connection: output -> input
+    if (fromType === 'output' && connectorType === 'input') {
+      createConnection(fromCardId, cardId)
+    } else if (fromType === 'input' && connectorType === 'output') {
+      createConnection(cardId, fromCardId)
+    } else {
+      toast.add({
+        severity: 'warn',
+        summary: t('message.common.warning'),
+        detail: 'Connections must go from output to input',
+        life: 3000
+      })
+    }
+
+    // Set flag to prevent immediate re-selection
+    justCompletedConnection = true
+
+    // Clear selection and preview
+    clearSelection()
+
+    // Reset flag after a short delay
+    setTimeout(() => {
+      justCompletedConnection = false
+    }, 100)
+  }
+}
+
+function createPreviewLine(startElement: HTMLElement) {
+  // Create a temporary div to act as the end point that will follow the mouse
+  const tempEnd = document.createElement('div')
+  tempEnd.id = 'preview-line-end'
+  tempEnd.style.position = 'absolute'
+  tempEnd.style.width = '1px'
+  tempEnd.style.height = '1px'
+  tempEnd.style.left = '0px'
+  tempEnd.style.top = '0px'
+  tempEnd.style.pointerEvents = 'none'
+  grid.value?.appendChild(tempEnd)
+
+  previewLine.value = new LeaderLine(
+    startElement,
+    tempEnd,
+    {
+      color: 'rgba(205, 81, 36, 0.5)',
+      size: 2,
+      path: 'fluid',
+      startPlug: 'disc',
+      endPlug: 'arrow2',
+      startPlugColor: 'rgba(205, 81, 36, 0.5)',
+      endPlugColor: 'rgba(205, 81, 36, 0.5)',
+      dash: { animation: true }
+    }
+  )
+}
+
+function updatePreviewLine(event: MouseEvent) {
+  if (!previewLine.value || !grid.value) return
+
+  const tempEnd = document.getElementById('preview-line-end')
+  if (tempEnd) {
+    // Get grid's position and scroll offset
+    const gridRect = grid.value.getBoundingClientRect()
+    const scrollLeft = grid.value.scrollLeft
+    const scrollTop = grid.value.scrollTop
+
+    // Calculate position relative to grid
+    const x = event.clientX - gridRect.left + scrollLeft
+    const y = event.clientY - gridRect.top + scrollTop
+
+    tempEnd.style.left = `${x}px`
+    tempEnd.style.top = `${y}px`
+    previewLine.value.position()
+  }
+}
+
+function clearSelection() {
+  // Remove preview line
+  if (previewLine.value) {
+    previewLine.value.remove()
+    previewLine.value = null
+  }
+
+  // Remove temp end element
+  const tempEnd = document.getElementById('preview-line-end')
+  if (tempEnd) {
+    tempEnd.remove()
+  }
+
+  // Remove mouse move listener
+  grid.value?.removeEventListener('mousemove', updatePreviewLine)
+
+  // Clear selection styling
+  document.querySelectorAll('.card-rip-connector.selected').forEach(el => {
+    el.classList.remove('selected')
+  })
+
+  selectedConnector.value = null
+}
+
+function attachConnectionClickHandler(connectionId: string, line: any): Promise<SVGElement | null> {
+  return new Promise((resolve) => {
+    if (!line) {
+      resolve(null)
+      return
+    }
+
+    // Wait for SVG to be rendered
+    setTimeout(() => {
+      // Find all leader-line SVG elements
+      const allLines = document.querySelectorAll('body > svg.leader-line')
+      const targetSvg = allLines[allLines.length - 1] as SVGElement
+
+      if (targetSvg) {
+        // Store the connection ID
+        targetSvg.setAttribute('data-connection-id', connectionId)
+
+        // Enable pointer events on the SVG
+        targetSvg.style.pointerEvents = 'auto'
+        targetSvg.style.cursor = 'pointer'
+
+        // Make ALL child elements clickable
+        const allElements = targetSvg.querySelectorAll('*')
+        allElements.forEach(el => {
+          ;(el as SVGElement).style.pointerEvents = 'auto'
+          ;(el as SVGElement).style.cursor = 'pointer'
+        })
+
+        resolve(targetSvg)
+      } else {
+        resolve(null)
+      }
+    }, 150)
+  })
+}
+
+async function createConnection(fromCardId: string | number, toCardId: string | number) {
+  // Find connector elements
+  const fromElement = document.querySelector(`[data-card-id="${fromCardId}"][data-connector="output"]`)
+  const toElement = document.querySelector(`[data-card-id="${toCardId}"][data-connector="input"]`)
+
+  if (!fromElement || !toElement) {
+    return
+  }
+
+  // Check if connection already exists
+  const connectionId = `${fromCardId}->${toCardId}`
+  if (connections.value.find(c => c.from === connectionId)) {
+    toast.add({
+      severity: 'warn',
+      summary: t('message.common.warning'),
+      detail: 'Connection already exists',
+      life: 3000
+    })
+    return
+  }
+
+  // Create curved leader line
+  const line = new LeaderLine(
+    fromElement,
+    toElement,
+    {
+      color: 'rgb(205, 81, 36)',
+      size: 3,
+      path: 'fluid',
+      startPlug: 'disc',
+      endPlug: 'arrow2',
+      startPlugColor: 'rgb(205, 81, 36)',
+      endPlugColor: 'rgb(205, 81, 36)',
+      dash: false
+    }
+  )
+
+  // Add visual draw animation effect
+  line.show('draw', {duration: 500, timing: [0.58, 0, 0.42, 1]})
+
+  // Store connection ID with the line object for later reference
+  ;(line as any)._connectionId = connectionId
+
+  // Save to database - check if workflow exists first
+  if (!workflowsStore.currentWorkflow?.id) {
+    line.remove()
+    toast.add({
+      severity: 'warn',
+      summary: t('message.common.warning'),
+      detail: 'Please save the workflow before creating connections',
+      life: 5000
+    })
+    return
+  }
+
+  try {
+    // Get actual database node IDs from cards
+    let fromNodeId: number | null = null
+    if (fromCardId !== 'self-peer') {
+      const fromCard = serviceCards.value.find(c => c.id == fromCardId)
+      fromNodeId = fromCard?.job.id || null
+    }
+
+    let toNodeId: number | null = null
+    if (toCardId !== 'self-peer') {
+      const toCard = serviceCards.value.find(c => c.id == toCardId)
+      toNodeId = toCard?.job.id || null
+    }
+
+    const connection = {
+      from_node_id: fromNodeId,
+      from_interface_type: 'STDOUT',
+      to_node_id: toNodeId,
+      to_interface_type: 'STDIN'
+    }
+
+    const response = await workflowsStore.addWorkflowConnection(
+      workflowsStore.currentWorkflow.id,
+      connection
+    )
+
+    // Add click handler to delete connection and store SVG reference
+    const svgElement = await attachConnectionClickHandler(connectionId, line)
+
+    connections.value.push({
+      line,
+      from: connectionId,
+      to: `${toCardId}`,
+      fromCardId,
+      toCardId,
+      dbId: response.connection?.id,
+      svgElement: svgElement || undefined
+    })
+
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: 'Connection created',
+      life: 3000
+    })
+  } catch (error: any) {
+    // Remove the line if saving failed
+    line.remove()
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: error.message || 'Failed to save connection',
+      life: 5000
+    })
+  }
+}
+
+async function loadConnections() {
+  if (!workflowsStore.currentWorkflow?.id) return
+
+  try {
+    const response = await workflowsStore.getWorkflowConnections(workflowsStore.currentWorkflow.id)
+    const dbConnections = response.connections || []
+
+    for (const dbConn of dbConnections) {
+      // Map database node IDs to card IDs
+      let fromCardId: string | number = 'self-peer'
+      let toCardId: string | number = 'self-peer'
+
+      // Find the card with matching job.id for from_node_id
+      if (dbConn.from_node_id !== null) {
+        const fromCard = serviceCards.value.find(card => card.job.id === dbConn.from_node_id)
+        if (fromCard) {
+          fromCardId = fromCard.id
+        } else {
+          continue
+        }
+      }
+
+      // Find the card with matching job.id for to_node_id
+      if (dbConn.to_node_id !== null) {
+        const toCard = serviceCards.value.find(card => card.job.id === dbConn.to_node_id)
+        if (toCard) {
+          toCardId = toCard.id
+        } else {
+          continue
+        }
+      }
+
+      // Find connector DOM elements
+      const fromElement = document.querySelector(`[data-card-id="${fromCardId}"][data-connector="output"]`)
+      const toElement = document.querySelector(`[data-card-id="${toCardId}"][data-connector="input"]`)
+
+      if (!fromElement || !toElement) {
+        continue
+      }
+
+      // Create the leader line
+      const line = new LeaderLine(
+        fromElement,
+        toElement,
+        {
+          color: 'rgb(205, 81, 36)',
+          size: 3,
+          path: 'fluid',
+          startPlug: 'disc',
+          endPlug: 'arrow2',
+          startPlugColor: 'rgb(205, 81, 36)',
+          endPlugColor: 'rgb(205, 81, 36)'
+        }
+      )
+
+      // Add to connections array with database ID
+      const connectionId = `${fromCardId}->${toCardId}`
+
+      // Add click handler to delete connection and store SVG reference
+      await nextTick()
+      const svgElement = await attachConnectionClickHandler(connectionId, line)
+
+      connections.value.push({
+        line,
+        from: connectionId,
+        to: `${toCardId}`,
+        fromCardId,
+        toCardId,
+        dbId: dbConn.id,
+        svgElement: svgElement || undefined
+      })
+    }
+  } catch (error: any) {
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: error.message || 'Failed to load connections',
+      life: 5000
+    })
+  }
+}
+
+function updateConnectionsForCard(cardId: string | number) {
+  // Update all leader-lines that are connected to this card
+  // Use loose equality (==) to handle string vs number comparison
+  connections.value.forEach(conn => {
+    if (conn.fromCardId == cardId || conn.toCardId == cardId) {
+      if (conn.line && conn.line.position) {
+        conn.line.position()
+      }
+    }
+  })
+}
+
+async function removeConnection(connectionId: string) {
+  const index = connections.value.findIndex(c => c.from === connectionId)
+  if (index !== -1) {
+    const connection = connections.value[index]
+
+    // Delete from database
+    if (workflowsStore.currentWorkflow?.id && connection.dbId) {
+      try {
+        await workflowsStore.deleteWorkflowConnection(workflowsStore.currentWorkflow.id, connection.dbId)
+      } catch (error) {
+        toast.add({
+          severity: 'error',
+          summary: t('message.common.error'),
+          detail: 'Failed to delete connection',
+          life: 3000
+        })
+        return
+      }
+    }
+
+    // Remove leader line from UI
+    if (connection.line && connection.line.remove) {
+      connection.line.remove()
+    }
+
+    // Remove from connections array
+    connections.value.splice(index, 1)
+
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: 'Connection removed',
+      life: 3000
+    })
+  }
+}
+
+// Clear connection UI elements without deleting from database
+function clearConnectionsUI() {
+  // Remove all leader lines from UI
+  connections.value.forEach(c => {
+    if (c.line && c.line.remove) {
+      c.line.remove()
+    }
+  })
+
+  // Clear connections array
+  connections.value.length = 0
+}
+
+function setupConnectorHandlers() {
+  // Set up click handlers for all connectors
+  document.querySelectorAll('.card-rip-connector.allowed').forEach(connector => {
+    const cardId = connector.getAttribute('data-card-id')
+    const connectorType = connector.getAttribute('data-connector') as 'input' | 'output'
+
+    if (cardId && connectorType) {
+      connector.addEventListener('click', (e) => handleConnectorClick(e, cardId, connectorType))
+    }
+  })
+}
+
+async function initializeSelfPeerDraggable() {
+  await nextTick()
+  if (selfPeerCardRef.value) {
+    const domElement = selfPeerCardRef.value.$el || selfPeerCardRef.value
+    if (domElement && domElement instanceof HTMLElement) {
+      // Remove existing instance if present
+      const existingInstance = draggableInstances.get('self-peer')
+      if (existingInstance && existingInstance.remove) {
+        existingInstance.remove()
+      }
+
+      // Cast to any to avoid TypeScript errors with onMove
+      const draggable: any = new PlainDraggable(domElement, {
+        autoScroll: true
+      })
+
+      // Load saved position from database or use default
+      const selfPeerX = workflowsStore.currentUIState?.self_peer_x || 50
+      const selfPeerY = workflowsStore.currentUIState?.self_peer_y || 50
+      draggable.left = selfPeerX
+      draggable.top = selfPeerY
+
+      // Update connections while dragging
+      draggable.onMove = () => {
+        updateConnectionsForCard('self-peer')
+      }
+
+      // Save position to database when dragging ends
+      draggable.onDragEnd = (pos: { left: number; top: number }) => {
+        if (workflowsStore.currentWorkflow?.id && workflowsStore.currentUIState) {
+          // Round to integers since backend expects int values
+          const x = Math.round(pos.left)
+          const y = Math.round(pos.top)
+
+          // Merge with existing state to avoid overwriting other fields
+          workflowsStore.updateUIState(workflowsStore.currentWorkflow.id, {
+            ...workflowsStore.currentUIState,
+            self_peer_x: x,
+            self_peer_y: y
+          })
+        }
+      }
+
+      draggableInstances.set('self-peer', draggable)
+    }
+  }
+}
+
+onMounted(async () => {
   initializeSnapTargets()
-  loadWorkflow()
+
+  // Add global click handler for leader-line connections
+  document.addEventListener('click', (e: MouseEvent) => {
+    const target = e.target as Element
+    // Check if click is on a leader-line SVG or its child
+    let svgElement = target.closest('svg.leader-line') as SVGElement
+
+    if (svgElement) {
+      const connectionId = svgElement.getAttribute('data-connection-id')
+      if (connectionId) {
+        e.stopPropagation()
+        confirm.require({
+          message: 'Are you sure you want to delete this connection?',
+          header: t('message.common.confirm'),
+          icon: 'pi pi-exclamation-triangle',
+          acceptClass: 'p-button-danger',
+          accept: async () => {
+            await removeConnection(connectionId)
+          }
+        })
+      }
+    }
+  })
+
+  // Add global hover handler for visual feedback
+  document.addEventListener('mouseover', (e: MouseEvent) => {
+    const target = e.target as Element
+    const svgElement = target.closest('svg.leader-line') as SVGElement
+    if (svgElement && svgElement.hasAttribute('data-connection-id')) {
+      svgElement.style.opacity = '0.7'
+    }
+  })
+
+  document.addEventListener('mouseout', (e: MouseEvent) => {
+    const target = e.target as Element
+    const svgElement = target.closest('svg.leader-line') as SVGElement
+    if (svgElement && svgElement.hasAttribute('data-connection-id')) {
+      svgElement.style.opacity = '1'
+    }
+  })
+
+  // Add scroll handler for workflow-editor to update connection line positions
+  if (workflowEditor.value) {
+    workflowEditor.value.addEventListener('scroll', () => {
+      // Update all connection line positions when scrolling
+      connections.value.forEach(conn => {
+        if (conn.line && conn.line.position) {
+          conn.line.position()
+        }
+      })
+    })
+  }
+
+  // Load workflow (this will also initialize self-peer and set up connectors)
+  await loadWorkflow()
 })
 
 onUnmounted(() => {
@@ -553,11 +1255,14 @@ onUnmounted(() => {
   })
   draggableInstances.clear()
   cardRefs.clear()
+
+  // Clean up all leader-line UI connections (without deleting from database)
+  clearConnectionsUI()
 })
 
 // Watch for route changes to reload workflow
-watch(() => route.params.id, () => {
-  loadWorkflow()
+watch(() => route.params.id, async () => {
+  await loadWorkflow()
 })
 </script>
 
@@ -598,5 +1303,23 @@ watch(() => route.params.id, () => {
   align-items: center;
   justify-content: center;
   z-index: 1000;
+}
+
+// Connector selected state
+:deep(.card-rip-connector.selected) {
+  background-color: rgba(255, 215, 0, 0.5) !important;
+  border-width: 6px !important;
+  box-shadow: 0 0 10px rgba(255, 215, 0, 0.8);
+  cursor: pointer;
+}
+
+:deep(.card-rip-connector.allowed) {
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover {
+    transform: scale(1.2);
+    box-shadow: 0 0 8px rgba(205, 81, 36, 0.6);
+  }
 }
 </style>

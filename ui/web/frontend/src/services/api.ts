@@ -165,6 +165,14 @@ class APIClient {
   }
 
   /**
+   * Get service interfaces
+   */
+  async getServiceInterfaces(serviceId: number) {
+    const response = await this.client.get(`/api/services/${serviceId}/interfaces`)
+    return response.data
+  }
+
+  /**
    * Get service passphrase
    */
   async getServicePassphrase(id: number) {
@@ -253,6 +261,30 @@ class APIClient {
    */
   async getWorkflowNodes(workflowId: number) {
     const response = await this.client.get(`/api/workflows/${workflowId}/nodes`)
+    return response.data
+  }
+
+  /**
+   * Get workflow connections
+   */
+  async getWorkflowConnections(workflowId: number) {
+    const response = await this.client.get(`/api/workflows/${workflowId}/connections`)
+    return response.data
+  }
+
+  /**
+   * Add workflow connection
+   */
+  async addWorkflowConnection(workflowId: number, connection: any) {
+    const response = await this.client.post(`/api/workflows/${workflowId}/connections`, connection)
+    return response.data
+  }
+
+  /**
+   * Delete workflow connection
+   */
+  async deleteWorkflowConnection(workflowId: number, connectionId: number) {
+    const response = await this.client.delete(`/api/workflows/${workflowId}/connections/${connectionId}`)
     return response.data
   }
 

@@ -334,7 +334,6 @@ async function restartPeer() {
   restarting.value = true
 
   // Disconnect WebSocket before restarting to prevent reconnection attempts
-  console.log('[Dashboard] Disconnecting WebSocket before peer restart')
   disconnectWebSocket()
 
   try {
@@ -363,7 +362,6 @@ async function restartPeer() {
       restarting.value = false
     }
   } catch (error: any) {
-    console.error('Failed to restart peer:', error)
     toast.add({
       severity: 'error',
       summary: t('message.common.error'),
@@ -385,8 +383,6 @@ onMounted(async () => {
   servicesStore.initializeWebSocket()
   workflowsStore.initializeWebSocket()
 
-  console.log('[Dashboard] All WebSocket subscriptions initialized')
-
   // Note: Removed 30-second polling - now using WebSocket for real-time updates
 })
 
@@ -396,8 +392,6 @@ onUnmounted(() => {
   peersStore.cleanupWebSocket()
   servicesStore.cleanupWebSocket()
   workflowsStore.cleanupWebSocket()
-
-  console.log('[Dashboard] All WebSocket subscriptions cleaned up')
 })
 </script>
 

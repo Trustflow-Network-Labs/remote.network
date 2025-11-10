@@ -613,8 +613,6 @@ onMounted(async () => {
         // NOT from the candidates list which only has static relay info (latency, pricing, etc.)
       }
     })
-
-    console.log('[RelayInfoSection] WebSocket subscriptions initialized')
   }
 
   // Note: Removed 30-second polling - now using WebSocket for real-time updates
@@ -630,8 +628,6 @@ onUnmounted(() => {
     unsubscribeCandidates()
     unsubscribeCandidates = null
   }
-
-  console.log('[RelayInfoSection] WebSocket subscriptions cleaned up')
 })
 </script>
 

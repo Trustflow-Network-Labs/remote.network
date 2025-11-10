@@ -46,6 +46,7 @@ onMounted(() => {
   width: 250px;
   overflow: auto;
   height: 100vh;
+  z-index: 1;
 }
 
 .resizer {
