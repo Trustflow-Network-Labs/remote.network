@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,7 +62,120 @@ func NewWorkflowManager(ctx context.Context, db *database.SQLiteManager, cm *uti
 // Start starts the workflow manager
 func (wm *WorkflowManager) Start() error {
 	wm.logger.Info("Starting Workflow Manager", "workflow_manager")
+
+	// Recover running workflows from database (in case of restart)
+	if err := wm.recoverRunningWorkflows(); err != nil {
+		wm.logger.Error(fmt.Sprintf("Failed to recover running workflows: %v", err), "workflow_manager")
+		// Continue anyway - this is not fatal
+	}
+
+	// Start periodic workflow status updater
+	wm.startWorkflowStatusUpdater()
+
 	wm.logger.Info("Workflow Manager started successfully", "workflow_manager")
+	return nil
+}
+
+// recoverRunningWorkflows recovers running workflows from database after restart
+func (wm *WorkflowManager) recoverRunningWorkflows() error {
+	wm.logger.Info("Recovering running workflows from database", "workflow_manager")
+
+	// Query database for workflow_jobs with status='running'
+	rows, err := wm.db.GetDB().Query(`
+		SELECT id, workflow_id, status, created_at, updated_at
+		FROM workflow_jobs
+		WHERE status = 'running'
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to query running workflows: %v", err)
+	}
+	defer rows.Close()
+
+	recoveredCount := 0
+	for rows.Next() {
+		var workflowJobID, workflowID int64
+		var status, createdAt, updatedAt string
+
+		if err := rows.Scan(&workflowJobID, &workflowID, &status, &createdAt, &updatedAt); err != nil {
+			wm.logger.Error(fmt.Sprintf("Failed to scan workflow job row: %v", err), "workflow_manager")
+			continue
+		}
+
+		// Get workflow definition
+		workflow, err := wm.db.GetWorkflowByID(workflowID)
+		if err != nil {
+			wm.logger.Error(fmt.Sprintf("Failed to get workflow %d: %v", workflowID, err), "workflow_manager")
+			continue
+		}
+
+		workflowDef, err := wm.parseWorkflowDefinition(workflow)
+		if err != nil {
+			wm.logger.Error(fmt.Sprintf("Failed to parse workflow %d definition: %v", workflowID, err), "workflow_manager")
+			continue
+		}
+
+		// Create workflow execution tracker
+		execution := &WorkflowExecution{
+			WorkflowJobID: workflowJobID,
+			WorkflowID:    workflowID,
+			Definition:    workflowDef,
+			JobExecutions: make(map[string]*database.JobExecution),
+			Status:        status,
+			StartedAt:     time.Now(), // We don't have exact start time, use current time
+		}
+
+		// Load all job executions for this workflow from database
+		jobRows, err := wm.db.GetDB().Query(`
+			SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
+				   status, entrypoint, commands, execution_constraint, constraint_detail,
+				   started_at, ended_at, error_message, created_at, updated_at
+			FROM job_executions
+			WHERE workflow_job_id = ?
+		`, workflowJobID)
+		if err != nil {
+			wm.logger.Error(fmt.Sprintf("Failed to query job executions for workflow job %d: %v", workflowJobID, err), "workflow_manager")
+			continue
+		}
+
+		jobCount := 0
+		for jobRows.Next() {
+			var job database.JobExecution
+			var startedAt, endedAt, createdAt, updatedAt sql.NullString
+
+			err := jobRows.Scan(
+				&job.ID, &job.WorkflowJobID, &job.ServiceID, &job.ExecutorPeerID, &job.OrderingPeerID,
+				&job.Status, &job.Entrypoint, &job.Commands, &job.ExecutionConstraint, &job.ConstraintDetail,
+				&startedAt, &endedAt, &job.ErrorMessage, &createdAt, &updatedAt,
+			)
+			if err != nil {
+				wm.logger.Error(fmt.Sprintf("Failed to scan job execution: %v", err), "workflow_manager")
+				continue
+			}
+
+			// Find the job name from workflow definition
+			// For now, use a generic name based on service_id (we can improve this later)
+			jobName := fmt.Sprintf("job_%d", job.ID)
+			execution.JobExecutions[jobName] = &job
+			jobCount++
+		}
+		jobRows.Close()
+
+		// Add to active workflows
+		wm.mu.Lock()
+		wm.activeWorkflows[workflowJobID] = execution
+		wm.mu.Unlock()
+
+		wm.logger.Info(fmt.Sprintf("Recovered workflow job %d (workflow %d) with %d job executions",
+			workflowJobID, workflowID, jobCount), "workflow_manager")
+		recoveredCount++
+	}
+
+	if recoveredCount > 0 {
+		wm.logger.Info(fmt.Sprintf("Recovered %d running workflows from database", recoveredCount), "workflow_manager")
+	} else {
+		wm.logger.Info("No running workflows to recover", "workflow_manager")
+	}
+
 	return nil
 }
 
@@ -131,72 +245,29 @@ func (wm *WorkflowManager) ExecuteWorkflow(workflowID int64) (*database.Workflow
 		wm.logger.Error(fmt.Sprintf("Failed to update workflow job status: %v", err), "workflow_manager")
 	}
 
-	// Start workflow execution in background
-	wm.wg.Add(1)
-	go func() {
-		defer wm.wg.Done()
-		wm.executeWorkflowJobs(execution)
-	}()
+	// Broadcast job execution requests (non-blocking)
+	wm.executeWorkflowJobs(execution)
 
-	wm.logger.Info(fmt.Sprintf("Workflow %d execution started (workflow_job_id: %d)", workflowID, workflowJob.ID), "workflow_manager")
+	wm.logger.Info(fmt.Sprintf("Workflow %d execution requests sent (workflow_job_id: %d). Status will be updated via periodic polling.", workflowID, workflowJob.ID), "workflow_manager")
 	return workflowJob, nil
 }
 
-// executeWorkflowJobs executes all jobs in a workflow with parallel execution for independent jobs
+// executeWorkflowJobs broadcasts job execution requests to all peers
+// Jobs are executed asynchronously on their assigned peers
+// Workflow status is determined by periodic status polling, not synchronous waiting
 func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
-	wm.logger.Info(fmt.Sprintf("Starting workflow execution for workflow_job %d", execution.WorkflowJobID), "workflow_manager")
+	wm.logger.Info(fmt.Sprintf("Broadcasting job execution requests for workflow_job %d", execution.WorkflowJobID), "workflow_manager")
 
 	execution.mu.Lock()
 	execution.Status = "running"
 	execution.mu.Unlock()
 
-	// Build dependency graph
-	dependencies := wm.buildJobDependencies(execution.Definition.Jobs)
-
-	// Track job statuses
-	jobStatuses := make(map[string]string) // job_name -> status (pending, running, completed, failed)
-	jobErrors := make(map[string]error)
-	var statusMu sync.Mutex
-
-	// Initialize all jobs as pending
-	for _, job := range execution.Definition.Jobs {
-		statusMu.Lock()
-		jobStatuses[job.JobName] = "pending"
-		statusMu.Unlock()
-	}
-
-	// Channel to signal job completion
-	jobCompleteChan := make(chan string, len(execution.Definition.Jobs))
-
-	// WaitGroup to track all jobs
-	var jobWg sync.WaitGroup
-
-	// Error channel for early termination
-	errorChan := make(chan error, 1)
-
-	// Worker function to execute a job
-	executeJob := func(workflowJob *types.WorkflowJob) {
-		defer jobWg.Done()
-
+	// Send execution requests to all peers for their respective jobs
+	// No synchronous waiting - peers will execute based on their constraints
+	for _, workflowJob := range execution.Definition.Jobs {
 		jobName := workflowJob.JobName
-		wm.logger.Info(fmt.Sprintf("Executing job '%s' for workflow_job %d", jobName, execution.WorkflowJobID), "workflow_manager")
-
-		// Check if workflow was cancelled
-		select {
-		case <-wm.ctx.Done():
-			statusMu.Lock()
-			jobStatuses[jobName] = "failed"
-			jobErrors[jobName] = fmt.Errorf("workflow cancelled")
-			statusMu.Unlock()
-			jobCompleteChan <- jobName
-			return
-		default:
-		}
-
-		// Mark as running
-		statusMu.Lock()
-		jobStatuses[jobName] = "running"
-		statusMu.Unlock()
+		wm.logger.Info(fmt.Sprintf("Sending job execution request for '%s' to peer %s",
+			jobName, workflowJob.ExecutorPeerID[:8]), "workflow_manager")
 
 		// Create job execution request
 		request := &types.JobExecutionRequest{
@@ -205,6 +276,7 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 			JobName:             jobName,
 			ServiceID:           workflowJob.ServiceID,
 			ServiceType:         workflowJob.ServiceType,
+			ExecutorPeerID:      workflowJob.ExecutorPeerID,
 			Entrypoint:          workflowJob.Entrypoint,
 			Commands:            workflowJob.Commands,
 			ExecutionConstraint: workflowJob.ExecutionConstraint,
@@ -213,23 +285,13 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 			RequestedAt:         time.Now(),
 		}
 
-		// Submit job to job manager
+		// Submit job to job manager (non-blocking)
+		// Job manager will route to appropriate peer
 		jobExecution, err := wm.jobManager.SubmitJob(request)
 		if err != nil {
 			wm.logger.Error(fmt.Sprintf("Failed to submit job '%s': %v", jobName, err), "workflow_manager")
-			statusMu.Lock()
-			jobStatuses[jobName] = "failed"
-			jobErrors[jobName] = fmt.Errorf("failed to submit: %v", err)
-			statusMu.Unlock()
-
-			// Send error to error channel (non-blocking)
-			select {
-			case errorChan <- fmt.Errorf("failed to submit job '%s': %v", jobName, err):
-			default:
-			}
-
-			jobCompleteChan <- jobName
-			return
+			// Continue with other jobs even if one fails to submit
+			continue
 		}
 
 		// Track job execution
@@ -237,273 +299,20 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 		execution.JobExecutions[jobName] = jobExecution
 		execution.mu.Unlock()
 
-		wm.logger.Info(fmt.Sprintf("Job '%s' submitted (job_execution_id: %d)", jobName, jobExecution.ID), "workflow_manager")
-
-		// Wait for job completion
-		err = wm.waitForJobCompletion(jobExecution.ID)
-		if err != nil {
-			wm.logger.Error(fmt.Sprintf("Job '%s' failed: %v", jobName, err), "workflow_manager")
-			statusMu.Lock()
-			jobStatuses[jobName] = "failed"
-			jobErrors[jobName] = err
-			statusMu.Unlock()
-
-			// Send error to error channel (non-blocking)
-			select {
-			case errorChan <- fmt.Errorf("job '%s' failed: %v", jobName, err):
-			default:
-			}
-
-			jobCompleteChan <- jobName
-			return
-		}
-
-		// Mark as completed
-		statusMu.Lock()
-		jobStatuses[jobName] = "completed"
-		statusMu.Unlock()
-
-		// Update completed jobs count
-		execution.mu.Lock()
-		execution.CompletedJobs++
-		execution.mu.Unlock()
-
-		wm.logger.Info(fmt.Sprintf("Job '%s' completed successfully (%d/%d jobs completed)",
-			jobName, execution.CompletedJobs, len(execution.Definition.Jobs)), "workflow_manager")
-
-		jobCompleteChan <- jobName
+		wm.logger.Info(fmt.Sprintf("Job '%s' execution request sent (job_execution_id: %d)",
+			jobName, jobExecution.ID), "workflow_manager")
 	}
 
-	// Start a goroutine to monitor job completions and start new jobs
-	go func() {
-		jobsMap := make(map[string]*types.WorkflowJob)
-		for _, job := range execution.Definition.Jobs {
-			jobsMap[job.JobName] = job
-		}
+	wm.logger.Info(fmt.Sprintf("All job execution requests sent for workflow_job %d. Jobs will execute based on their constraints.",
+		execution.WorkflowJobID), "workflow_manager")
 
-		for {
-			// Check if we can start any pending jobs
-			statusMu.Lock()
-			for jobName, status := range jobStatuses {
-				if status != "pending" {
-					continue
-				}
-
-				// Check if all dependencies are completed
-				deps := dependencies[jobName]
-				canStart := true
-				for _, dep := range deps {
-					depStatus := jobStatuses[dep]
-					if depStatus != "completed" {
-						canStart = false
-						break
-					}
-				}
-
-				if canStart {
-					// Start this job
-					job := jobsMap[jobName]
-					jobStatuses[jobName] = "starting"
-					statusMu.Unlock()
-
-					wm.logger.Info(fmt.Sprintf("Starting job '%s' (dependencies satisfied)", jobName), "workflow_manager")
-					jobWg.Add(1)
-					go executeJob(job)
-
-					statusMu.Lock()
-				}
-			}
-			statusMu.Unlock()
-
-			// Check if all jobs are done
-			statusMu.Lock()
-			allDone := true
-			for _, status := range jobStatuses {
-				if status == "pending" || status == "running" || status == "starting" {
-					allDone = false
-					break
-				}
-			}
-			statusMu.Unlock()
-
-			if allDone {
-				break
-			}
-
-			// Wait for a job to complete before checking again
-			select {
-			case <-jobCompleteChan:
-				// A job completed, loop again to check for new jobs to start
-			case <-wm.ctx.Done():
-				// Workflow cancelled
-				return
-			case <-time.After(100 * time.Millisecond):
-				// Periodic check
-			}
-		}
-	}()
-
-	// Wait for all jobs to complete
-	jobWg.Wait()
-	close(jobCompleteChan)
-
-	// Check for errors
-	select {
-	case err := <-errorChan:
-		wm.handleWorkflowCompletion(execution, "failed", err.Error())
-		return
-	default:
-	}
-
-	// Check if any job failed
-	statusMu.Lock()
-	var failedJob string
-	var failedError error
-	for jobName, status := range jobStatuses {
-		if status == "failed" {
-			failedJob = jobName
-			failedError = jobErrors[jobName]
-			break
-		}
-	}
-	statusMu.Unlock()
-
-	if failedJob != "" {
-		wm.handleWorkflowCompletion(execution, "failed", fmt.Sprintf("Job '%s' failed: %v", failedJob, failedError))
-		return
-	}
-
-	// All jobs completed successfully
-	wm.handleWorkflowCompletion(execution, "completed", "")
+	// Workflow continues asynchronously
+	// Status updates will be received via periodic polling or push notifications
 }
 
-// buildJobDependencies builds a dependency graph for jobs based on their interfaces
-func (wm *WorkflowManager) buildJobDependencies(jobs []*types.WorkflowJob) map[string][]string {
-	// Map of job_name -> list of job names it depends on
-	dependencies := make(map[string][]string)
-
-	// Map of job_name -> job for quick lookup
-	jobsMap := make(map[string]*types.WorkflowJob)
-	for _, job := range jobs {
-		jobsMap[job.JobName] = job
-		dependencies[job.JobName] = []string{}
-	}
-
-	// For each job, check if it has STDIN interfaces that receive from other jobs
-	for _, job := range jobs {
-		for _, iface := range job.Interfaces {
-			if iface.Type == types.InterfaceTypeStdin {
-				// Check if any peer is a provider from another job
-				for _, peer := range iface.InterfacePeers {
-					if peer.PeerMountFunction == types.MountFunctionProvider {
-						// Find which job outputs to this peer
-						for _, otherJob := range jobs {
-							if otherJob.JobName == job.JobName {
-								continue
-							}
-
-							// Check if otherJob has STDOUT to this job
-							for _, otherIface := range otherJob.Interfaces {
-								if otherIface.Type == types.InterfaceTypeStdout {
-									for _, otherPeer := range otherIface.InterfacePeers {
-										// Check if this output goes to our job
-										if otherPeer.PeerMountFunction == types.MountFunctionReceiver &&
-										   otherPeer.PeerNodeID == peer.PeerNodeID {
-											// This job depends on otherJob
-											dependencies[job.JobName] = append(dependencies[job.JobName], otherJob.JobName)
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return dependencies
-}
-
-// waitForJobCompletion waits for a job to complete
-func (wm *WorkflowManager) waitForJobCompletion(jobExecutionID int64) error {
-	wm.logger.Info(fmt.Sprintf("Waiting for job execution %d to complete", jobExecutionID), "workflow_manager")
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	timeout := time.After(time.Duration(wm.cm.GetConfigInt("workflow_job_timeout_seconds", 3600, 60, 86400)) * time.Second)
-
-	for {
-		select {
-		case <-ticker.C:
-			// Check job status
-			status, err := wm.jobManager.GetJobStatus(jobExecutionID)
-			if err != nil {
-				wm.logger.Error(fmt.Sprintf("Failed to get job status: %v", err), "workflow_manager")
-				continue
-			}
-
-			wm.logger.Info(fmt.Sprintf("Job execution %d status: %s", jobExecutionID, status), "workflow_manager")
-
-			switch status {
-			case types.JobStatusCompleted:
-				wm.logger.Info(fmt.Sprintf("Job execution %d completed successfully", jobExecutionID), "workflow_manager")
-				return nil
-
-			case types.JobStatusErrored:
-				job, err := wm.db.GetJobExecution(jobExecutionID)
-				if err != nil {
-					return fmt.Errorf("job execution failed (error details unavailable)")
-				}
-				return fmt.Errorf("job execution failed: %s", job.ErrorMessage)
-
-			case types.JobStatusCancelled:
-				return fmt.Errorf("job execution was cancelled")
-			}
-
-		case <-timeout:
-			wm.logger.Error(fmt.Sprintf("Job execution %d timed out", jobExecutionID), "workflow_manager")
-			return fmt.Errorf("job execution timed out")
-
-		case <-wm.ctx.Done():
-			wm.logger.Info(fmt.Sprintf("Workflow manager stopping, cancelling wait for job %d", jobExecutionID), "workflow_manager")
-			return fmt.Errorf("workflow manager stopped")
-		}
-	}
-}
-
-// handleWorkflowCompletion handles workflow completion
-func (wm *WorkflowManager) handleWorkflowCompletion(execution *WorkflowExecution, status string, errorMsg string) {
-	wm.logger.Info(fmt.Sprintf("Workflow %d completed with status: %s", execution.WorkflowJobID, status), "workflow_manager")
-
-	execution.mu.Lock()
-	execution.Status = status
-	execution.CompletedAt = time.Now()
-	execution.ErrorMessage = errorMsg
-	execution.mu.Unlock()
-
-	// Update workflow job status in database
-	var result map[string]interface{}
-	if status == "completed" {
-		result = map[string]interface{}{
-			"completed_jobs": execution.CompletedJobs,
-			"total_jobs":     len(execution.Definition.Jobs),
-		}
-	}
-
-	err := wm.db.UpdateWorkflowJobStatus(execution.WorkflowJobID, status, result, errorMsg)
-	if err != nil {
-		wm.logger.Error(fmt.Sprintf("Failed to update workflow job status: %v", err), "workflow_manager")
-	}
-
-	// Remove from active workflows
-	wm.mu.Lock()
-	delete(wm.activeWorkflows, execution.WorkflowJobID)
-	wm.mu.Unlock()
-
-	wm.logger.Info(fmt.Sprintf("Workflow execution %d finalized", execution.WorkflowJobID), "workflow_manager")
-}
+// Note: Dependency resolution and job orchestration moved to peer-side
+// Each peer evaluates its own execution constraints (NONE vs INPUTS_READY)
+// Workflow completion is determined by periodic status polling
 
 // parseWorkflowDefinition parses a workflow definition from JSON
 func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) (*types.WorkflowDefinition, error) {
@@ -611,22 +420,28 @@ func (wm *WorkflowManager) validateWorkflow(workflow *types.WorkflowDefinition) 
 	}
 
 	// Validate each job
+	localPeerID := wm.peerManager.GetPeerID()
 	for _, job := range workflow.Jobs {
-		// Check if service exists
-		service, err := wm.db.GetService(job.ServiceID)
-		if err != nil {
-			return fmt.Errorf("service %d not found for job '%s'", job.ServiceID, job.JobName)
-		}
+		// Only validate service exists locally if this job executes on the local peer
+		// For remote jobs, the service exists on the executor peer's database
+		if job.ExecutorPeerID == localPeerID {
+			// Check if service exists locally
+			service, err := wm.db.GetService(job.ServiceID)
+			if err != nil {
+				return fmt.Errorf("service %d not found locally for job '%s'", job.ServiceID, job.JobName)
+			}
 
-		if service == nil {
-			return fmt.Errorf("service %d not found for job '%s'", job.ServiceID, job.JobName)
-		}
+			if service == nil {
+				return fmt.Errorf("service %d not found locally for job '%s'", job.ServiceID, job.JobName)
+			}
 
-		// Validate service type matches
-		if service.ServiceType != job.ServiceType {
-			return fmt.Errorf("service type mismatch for job '%s': expected %s, got %s",
-				job.JobName, job.ServiceType, service.ServiceType)
+			// Validate service type matches
+			if service.ServiceType != job.ServiceType {
+				return fmt.Errorf("service type mismatch for job '%s': expected %s, got %s",
+					job.JobName, job.ServiceType, service.ServiceType)
+			}
 		}
+		// For remote jobs, skip local service validation - will be validated against remote peer later
 
 		// Validate interfaces
 		for _, iface := range job.Interfaces {
@@ -649,10 +464,9 @@ func (wm *WorkflowManager) validateWorkflow(workflow *types.WorkflowDefinition) 
 	// TODO: Validate job dependencies (no circular dependencies)
 	// TODO: Validate interface compatibility between jobs
 
-	// Validate peer connectivity and service availability
-	if err := wm.validatePeerConnectivityAndServices(workflow.Jobs); err != nil {
-		return fmt.Errorf("peer connectivity validation failed: %v", err)
-	}
+	// Note: Service availability validation is done on the executor peer when the job is submitted
+	// This avoids the issue of service IDs being local to each peer's database
+	// The executor peer will validate the service exists and return an error if not found
 
 	// Validate data transfer constraints
 	if err := wm.validateDataTransferConstraints(workflow.Jobs); err != nil {
@@ -686,24 +500,22 @@ func (wm *WorkflowManager) validatePeerConnectivityAndServices(jobs []*types.Wor
 
 	// Validate each peer-service pair
 	for _, check := range checks {
-		wm.logger.Info(fmt.Sprintf("Validating peer %s has service %d for job '%s'",
-			check.peerID[:8], check.serviceID, check.jobName), "workflow_manager")
+		wm.logger.Info(fmt.Sprintf("Validating peer %s has service '%s' for job '%s'",
+			check.peerID[:8], check.jobName, check.jobName), "workflow_manager")
 
-		// Get service details from database
-		service, err := wm.db.GetService(check.serviceID)
-		if err != nil || service == nil {
-			return fmt.Errorf("service %d not found in database for job '%s'", check.serviceID, check.jobName)
-		}
+		// Use the service name from the workflow definition (check.jobName)
+		// Note: check.serviceID is the executor peer's local service ID, not ours
+		// We should NOT look it up in our local database as service IDs are not global
 
 		// Try to connect to peer and query for this specific service
-		available, err := wm.verifyPeerServiceAvailability(check.peerID, check.serviceID, service.Name)
+		available, err := wm.verifyPeerServiceAvailability(check.peerID, check.serviceID, check.jobName)
 		if err != nil {
 			return fmt.Errorf("failed to verify peer %s for job '%s': %v", check.peerID[:8], check.jobName, err)
 		}
 
 		if !available {
-			return fmt.Errorf("service '%s' (ID: %d) is not available on peer %s for job '%s'",
-				service.Name, check.serviceID, check.peerID[:8], check.jobName)
+			return fmt.Errorf("service '%s' is not available on peer %s for job '%s'",
+				check.jobName, check.peerID[:8], check.jobName)
 		}
 
 		wm.logger.Info(fmt.Sprintf("Peer %s has service %d available for job '%s'",
@@ -978,4 +790,154 @@ func (wm *WorkflowManager) GetWorkflowStatus(workflowJobID int64) (*types.Workfl
 		StartedAt:     execution.StartedAt,
 		CompletedAt:   execution.CompletedAt,
 	}, nil
+}
+
+// startWorkflowStatusUpdater starts a periodic updater that requests status from executor peers
+func (wm *WorkflowManager) startWorkflowStatusUpdater() {
+	wm.wg.Add(1)
+	go func() {
+		defer wm.wg.Done()
+
+		// Check every 10 seconds
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		wm.logger.Info("Started workflow status updater", "workflow_manager")
+
+		for {
+			select {
+			case <-ticker.C:
+				wm.updateActiveWorkflowStatuses()
+			case <-wm.ctx.Done():
+				wm.logger.Info("Workflow status updater stopped", "workflow_manager")
+				return
+			}
+		}
+	}()
+}
+
+// updateActiveWorkflowStatuses requests status updates from all executor peers for active workflows
+func (wm *WorkflowManager) updateActiveWorkflowStatuses() {
+	wm.mu.RLock()
+	executions := make([]*WorkflowExecution, 0, len(wm.activeWorkflows))
+	for _, execution := range wm.activeWorkflows {
+		executions = append(executions, execution)
+	}
+	wm.mu.RUnlock()
+
+	// For each active workflow, request status from all executor peers
+	for _, execution := range executions {
+		execution.mu.RLock()
+		jobs := make(map[string]*database.JobExecution)
+		for jobName, jobExec := range execution.JobExecutions {
+			jobs[jobName] = jobExec
+		}
+		execution.mu.RUnlock()
+
+		// Request status for each job
+		for jobName, jobExec := range jobs {
+			wm.requestJobStatus(execution, jobName, jobExec)
+		}
+
+		// Check if workflow is complete
+		wm.checkWorkflowCompletion(execution)
+	}
+}
+
+// requestJobStatus requests status for a specific job from its executor peer
+func (wm *WorkflowManager) requestJobStatus(execution *WorkflowExecution, jobName string, jobExec *database.JobExecution) {
+	// Skip completed or errored jobs
+	if jobExec.Status == types.JobStatusCompleted || jobExec.Status == types.JobStatusErrored || jobExec.Status == types.JobStatusCancelled {
+		return
+	}
+
+	// Get job handler
+	jobHandler := wm.peerManager.GetQUICPeer().GetJobHandler()
+	if jobHandler == nil {
+		return
+	}
+
+	// Request status from executor peer
+	request := &types.JobStatusRequest{
+		JobExecutionID: jobExec.ID,
+		WorkflowJobID:  jobExec.WorkflowJobID,
+	}
+
+	response, err := jobHandler.SendJobStatusRequest(jobExec.ExecutorPeerID, request)
+	if err != nil {
+		wm.logger.Debug(fmt.Sprintf("Failed to request status for job '%s' from peer %s: %v", jobName, jobExec.ExecutorPeerID[:8], err), "workflow_manager")
+		return
+	}
+
+	if !response.Found {
+		wm.logger.Warn(fmt.Sprintf("Job '%s' (ID: %d) not found on executor peer %s", jobName, jobExec.ID, jobExec.ExecutorPeerID[:8]), "workflow_manager")
+		return
+	}
+
+	// Update job status in database if it changed
+	if response.Status != jobExec.Status {
+		wm.logger.Info(fmt.Sprintf("Job '%s' status updated: %s -> %s", jobName, jobExec.Status, response.Status), "workflow_manager")
+		err := wm.db.UpdateJobStatus(jobExec.ID, response.Status, response.ErrorMessage)
+		if err != nil {
+			wm.logger.Error(fmt.Sprintf("Failed to update job %d status: %v", jobExec.ID, err), "workflow_manager")
+		} else {
+			// Update in-memory status
+			jobExec.Status = response.Status
+			jobExec.ErrorMessage = response.ErrorMessage
+		}
+	}
+}
+
+// checkWorkflowCompletion checks if a workflow has completed and updates its status
+func (wm *WorkflowManager) checkWorkflowCompletion(execution *WorkflowExecution) {
+	execution.mu.RLock()
+	defer execution.mu.RUnlock()
+
+	// Count job statuses
+	var completed, errored, total int
+	total = len(execution.JobExecutions)
+
+	for _, jobExec := range execution.JobExecutions {
+		switch jobExec.Status {
+		case types.JobStatusCompleted:
+			completed++
+		case types.JobStatusErrored, types.JobStatusCancelled:
+			errored++
+		}
+	}
+
+	// Check if all jobs are done
+	if completed+errored == total {
+		var finalStatus string
+		var errorMsg string
+
+		if errored > 0 {
+			finalStatus = "failed"
+			errorMsg = fmt.Sprintf("%d of %d jobs failed", errored, total)
+		} else {
+			finalStatus = "completed"
+		}
+
+		wm.logger.Info(fmt.Sprintf("Workflow %d completed: %s (completed: %d, errored: %d, total: %d)",
+			execution.WorkflowJobID, finalStatus, completed, errored, total), "workflow_manager")
+
+		// Update workflow status in database
+		result := map[string]interface{}{
+			"completed_jobs": completed,
+			"errored_jobs":   errored,
+			"total_jobs":     total,
+		}
+
+		err := wm.db.UpdateWorkflowJobStatus(execution.WorkflowJobID, finalStatus, result, errorMsg)
+		if err != nil {
+			wm.logger.Error(fmt.Sprintf("Failed to update workflow job status: %v", err), "workflow_manager")
+		}
+
+		// Remove from active workflows
+		wm.mu.Lock()
+		delete(wm.activeWorkflows, execution.WorkflowJobID)
+		wm.mu.Unlock()
+
+		wm.logger.Info(fmt.Sprintf("Workflow execution %d finalized and removed from active workflows", execution.WorkflowJobID), "workflow_manager")
+	}
 }

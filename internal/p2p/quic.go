@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -391,6 +392,11 @@ func (q *QUICPeer) SetJobHandler(handler *JobMessageHandler) {
 	q.jobHandler = handler
 }
 
+// GetJobHandler returns the job message handler
+func (q *QUICPeer) GetJobHandler() *JobMessageHandler {
+	return q.jobHandler
+}
+
 // GetConnectionInfo returns connection info for a given remote address
 func (q *QUICPeer) GetConnectionInfo(remoteAddr string) *ConnectionInfo {
 	q.connMutex.RLock()
@@ -518,22 +524,57 @@ func (q *QUICPeer) handleConnection(conn *quic.Conn, remoteAddr string) {
 }
 
 func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
+	// Ensure stream is always closed when handler completes
+	// This is critical to prevent stream exhaustion (default QUIC limit: 100 concurrent streams)
+	defer stream.Close()
+
 	q.logger.Debug(fmt.Sprintf("Handling stream from %s", remoteAddr), "quic")
 
-	// Read message with buffer - don't wait for EOF
-	buffer := make([]byte, q.config.GetConfigInt("buffer_size", 65536, 1024, 1048576))
-	n, err := stream.Read(buffer)
-	if err != nil && (err != io.EOF || n == 0) {
-		// Only fail if we got an error other than EOF, or EOF with no data
-		q.logger.Error(fmt.Sprintf("Failed to read from stream %s: %v", remoteAddr, err), "quic")
+	// Read message - loop until we have complete data or error
+	// QUIC streams may not deliver all data in a single Read() call for large messages
+	maxMessageSize := q.config.GetConfigInt("max_message_size", 10*1024*1024, 65536, 100*1024*1024) // Default 10MB max
+	buffer := make([]byte, 0, 65536) // Start with 64KB capacity
+	readBuf := make([]byte, 65536)
+
+	for {
+		n, err := stream.Read(readBuf)
+		if n > 0 {
+			buffer = append(buffer, readBuf[:n]...)
+		}
+
+		if err != nil {
+			if err == io.EOF {
+				// Stream closed - we have all the data
+				break
+			}
+			// Real error
+			q.logger.Error(fmt.Sprintf("Failed to read from stream %s: %v", remoteAddr, err), "quic")
+			return
+		}
+
+		// Check if we have a complete JSON message by trying to unmarshal
+		var testMsg QUICMessage
+		if json.Unmarshal(buffer, &testMsg) == nil {
+			// Successfully parsed - we have complete message
+			break
+		}
+
+		// Check size limit
+		if len(buffer) > maxMessageSize {
+			q.logger.Error(fmt.Sprintf("Message from %s exceeds max size: %d bytes", remoteAddr, len(buffer)), "quic")
+			return
+		}
+	}
+
+	if len(buffer) == 0 {
+		q.logger.Error(fmt.Sprintf("No data read from stream %s", remoteAddr), "quic")
 		return
 	}
-	data := buffer[:n]
 
 	// Parse QUIC message
-	msg, err := UnmarshalQUICMessage(data)
+	msg, err := UnmarshalQUICMessage(buffer)
 	if err != nil {
-		q.logger.Error(fmt.Sprintf("Failed to parse message from %s: %v", remoteAddr, err), "quic")
+		q.logger.Error(fmt.Sprintf("Failed to parse message from %s (%d bytes): %v", remoteAddr, len(buffer), err), "quic")
 		return
 	}
 
@@ -630,28 +671,18 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		responseData, err := response.Marshal()
 		if err != nil {
 			q.logger.Error(fmt.Sprintf("Failed to marshal response to %s: %v", remoteAddr, err), "quic")
-			stream.Close()
 			return
 		}
 
 		_, err = stream.Write(responseData)
 		if err != nil {
 			q.logger.Error(fmt.Sprintf("Failed to write response to %s: %v", remoteAddr, err), "quic")
-			stream.Close()
 			return
 		}
 
 		q.logger.Debug(fmt.Sprintf("Sent %s response to %s", response.Type, remoteAddr), "quic")
-
-		// Close stream to flush write buffer and signal response complete (FIN bit)
-		// This is required by quic-go to ensure data is actually transmitted
-		if err := stream.Close(); err != nil {
-			q.logger.Warn(fmt.Sprintf("Failed to close stream to %s: %v", remoteAddr, err), "quic")
-		}
-	} else {
-		// No response to send, close stream anyway to free resources
-		stream.Close()
 	}
+	// Note: Stream is closed automatically by defer at function start
 }
 
 // Note: handleMetadataRequest and generateOurMetadata removed - DHT-only architecture
@@ -880,14 +911,8 @@ func (q *QUICPeer) SendMessage(addr string, message []byte) error {
 
 	q.logger.Debug(fmt.Sprintf("Sent message to %s: %s", addr, string(message)), "quic")
 
-	// Read response (optional)
-	buffer := make([]byte, q.config.GetConfigInt("buffer_size", 65536, 1024, 1048576))
-	n, err := stream.Read(buffer)
-	if err == nil {
-		response := string(buffer[:n])
-		q.logger.Debug(fmt.Sprintf("Received response from %s: %s", addr, response), "quic")
-	}
-
+	// Note: This is a one-way send - no response expected
+	// Use SendMessageWithResponse() if you need a response
 	return nil
 }
 
@@ -1230,18 +1255,28 @@ func (q *QUICPeer) handleRelaySessionQuery(msg *QUICMessage, remoteAddr string) 
 }
 
 // HandleRelayedMessage processes messages received via relay forwarding
-func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage) *QUICMessage {
-	q.logger.Debug(fmt.Sprintf("Handling relayed message: type=%s", msg.Type), "quic")
+func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage, sourcePeerID string) *QUICMessage {
+	q.logger.Debug(fmt.Sprintf("Handling relayed message: type=%s from peer=%s", msg.Type, sourcePeerID), "quic")
 
 	// Route based on message type
 	switch msg.Type {
 	case MessageTypeServiceRequest:
 		// Service search request forwarded via relay
 		if q.serviceQueryHandler != nil {
-			return q.serviceQueryHandler.HandleServiceSearchRequest(msg, "relayed")
+			return q.serviceQueryHandler.HandleServiceSearchRequest(msg, sourcePeerID)
 		}
 		q.logger.Warn("Received service_request via relay but handler not initialized", "quic")
 		return CreateServiceSearchResponse(nil, "service discovery not available")
+
+	case MessageTypeJobRequest, MessageTypeJobStatusRequest,
+		MessageTypeJobDataTransferRequest, MessageTypeJobCancel,
+		MessageTypeJobStatusUpdate, MessageTypeJobDataChunk, MessageTypeJobDataTransferComplete:
+		// Job-related messages forwarded via relay
+		if q.jobHandler != nil {
+			return q.jobHandler.HandleRelayedJobMessage(msg, sourcePeerID)
+		}
+		q.logger.Warn("Received job message via relay but job handler not initialized", "quic")
+		return nil
 
 	case MessageTypeRelayHolePunch:
 		// Hole punch coordination via relay

@@ -97,6 +97,20 @@ This will:
 			os.Exit(1)
 		}
 
+		// Initialize and start job system (workflows and jobs)
+		if err := peerManager.InitializeJobSystem(); err != nil {
+			logger.Error(fmt.Sprintf("Failed to initialize job system: %v", err), "cli")
+			os.Exit(1)
+		}
+		logger.Info("Job system initialized successfully", "cli")
+
+		if err := peerManager.StartJobSystem(); err != nil {
+			logger.Error(fmt.Sprintf("Failed to start job system: %v", err), "cli")
+			os.Exit(1)
+		}
+		logger.Info("Job system started successfully", "cli")
+		fmt.Println("✓ Job and workflow system ready")
+
 		// Print startup information
 		stats := peerManager.GetStats()
 		logger.Info(fmt.Sprintf("Node started with DHT Node ID: %s", stats["dht_node_id"]), "cli")

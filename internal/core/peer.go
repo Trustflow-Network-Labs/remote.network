@@ -822,10 +822,15 @@ func (pm *PeerManager) InitializeJobSystem() error {
 	pm.quic.SetJobHandler(jobHandler)
 	pm.logger.Info("JobMessageHandler created and set on QUIC peer", "core")
 
+	// Set dependencies for relay forwarding
+	jobHandler.SetDependencies(pm.dbManager, pm.metadataQuery, pm.GetPeerID())
+	pm.logger.Info("JobMessageHandler dependencies set (relay forwarding enabled)", "core")
+
 	// Set up callbacks for job operations
 	jobHandler.SetCallbacks(
 		pm.handleJobRequest,
 		pm.handleJobStatusUpdate,
+		pm.handleJobStatusRequest,
 		pm.handleJobDataTransferRequest,
 		pm.handleJobDataChunk,
 		pm.handleJobDataTransferComplete,
@@ -875,6 +880,14 @@ func (pm *PeerManager) GetWorkflowManager() *WorkflowManager {
 	return pm.workflowManager
 }
 
+// GetJobHandler returns the job message handler instance
+func (pm *PeerManager) GetJobHandler() *p2p.JobMessageHandler {
+	if pm.quic == nil {
+		return nil
+	}
+	return pm.quic.GetJobHandler()
+}
+
 // GetQUICPeer returns the QUIC peer instance
 func (pm *PeerManager) GetQUICPeer() *p2p.QUICPeer {
 	return pm.quic
@@ -912,8 +925,19 @@ func (pm *PeerManager) handleJobStatusUpdate(update *types.JobStatusUpdate, peer
 	return fmt.Errorf("job manager not initialized")
 }
 
+func (pm *PeerManager) handleJobStatusRequest(request *types.JobStatusRequest, peerID string) (*types.JobStatusResponse, error) {
+	pm.logger.Debug(fmt.Sprintf("Received job status request from peer %s for job %d", peerID[:8], request.JobExecutionID), "core")
+
+	// Delegate to JobManager
+	if pm.jobManager != nil {
+		return pm.jobManager.HandleJobStatusRequest(request, peerID)
+	}
+
+	return nil, fmt.Errorf("job manager not initialized")
+}
+
 func (pm *PeerManager) handleJobDataTransferRequest(request *types.JobDataTransferRequest, peerID string) (*types.JobDataTransferResponse, error) {
-	pm.logger.Info(fmt.Sprintf("Received job data transfer request from peer %s for job %d", peerID[:8], request.JobExecutionID), "core")
+	pm.logger.Info(fmt.Sprintf("Received job data transfer request from peer %s for workflow job %d", peerID[:8], request.WorkflowJobID), "core")
 
 	// Delegate to JobManager
 	if pm.jobManager != nil {
@@ -921,9 +945,9 @@ func (pm *PeerManager) handleJobDataTransferRequest(request *types.JobDataTransf
 	}
 
 	return &types.JobDataTransferResponse{
-		JobExecutionID: request.JobExecutionID,
-		Accepted:       false,
-		Message:        "job manager not initialized",
+		WorkflowJobID: request.WorkflowJobID,
+		Accepted:      false,
+		Message:       "job manager not initialized",
 	}, fmt.Errorf("job manager not initialized")
 }
 

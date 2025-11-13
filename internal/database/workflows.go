@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -220,6 +221,218 @@ func (sm *SQLiteManager) DeleteWorkflow(id int64) error {
 	}
 
 	sm.logger.Info(fmt.Sprintf("Workflow deleted successfully: ID %d", id), "database")
+	return nil
+}
+
+// BuildWorkflowDefinition converts workflow nodes and connections into execution format
+// This bridges the frontend workflow designer with the backend WorkflowManager
+func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID string) error {
+	sm.logger.Info(fmt.Sprintf("Building workflow definition for workflow %d", workflowID), "database")
+
+	// Get all workflow nodes
+	nodes, err := sm.GetWorkflowNodes(workflowID)
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to get workflow nodes: %v", err), "database")
+		return fmt.Errorf("failed to get workflow nodes: %v", err)
+	}
+
+	if len(nodes) == 0 {
+		return fmt.Errorf("workflow has no nodes")
+	}
+
+	// Get all connections
+	connections, err := sm.GetWorkflowConnections(workflowID)
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to get workflow connections: %v", err), "database")
+		return fmt.Errorf("failed to get workflow connections: %v", err)
+	}
+
+	sm.logger.Info(fmt.Sprintf("Found %d nodes and %d connections for workflow %d", len(nodes), len(connections), workflowID), "database")
+
+	// Build jobs array
+	type InterfacePeerDef struct {
+		PeerNodeID        string `json:"peer_node_id"`
+		PeerJobID         *int64 `json:"peer_job_id,omitempty"`
+		PeerPath          string `json:"peer_path"`
+		PeerMountFunction string `json:"peer_mount_function"` // PROVIDER or RECEIVER
+		DutyAcknowledged  bool   `json:"duty_acknowledged,omitempty"`
+	}
+
+	type InterfaceDef struct {
+		Type           string             `json:"type"` // STDIN, STDOUT, MOUNT
+		Path           string             `json:"path"`
+		InterfacePeers []InterfacePeerDef `json:"interface_peers"`
+	}
+
+	type JobDef struct {
+		Name                string         `json:"name"`
+		ServiceID           int64          `json:"service_id"`
+		ServiceType         string         `json:"service_type"`
+		ExecutorPeerID      string         `json:"executor_peer_id"`
+		Entrypoint          []string       `json:"entrypoint,omitempty"`
+		Commands            []string       `json:"commands,omitempty"`
+		ExecutionConstraint string         `json:"execution_constraint"`
+		Interfaces          []InterfaceDef `json:"interfaces"`
+	}
+
+	jobs := make([]JobDef, 0, len(nodes))
+
+	// Create a map of node ID to node for quick lookup
+	nodeMap := make(map[int64]*WorkflowNode)
+	for _, node := range nodes {
+		nodeMap[node.ID] = node
+	}
+
+	// Process each node
+	for _, node := range nodes {
+		sm.logger.Debug(fmt.Sprintf("Processing node %d (%s)", node.ID, node.ServiceName), "database")
+
+		job := JobDef{
+			Name:           node.ServiceName,
+			ServiceID:      node.ServiceID,
+			ServiceType:    node.ServiceType,
+			ExecutorPeerID: node.PeerID,
+			// ExecutionConstraint will be set after checking for incoming connections
+			Interfaces: []InterfaceDef{},
+		}
+
+		// Map to track interfaces by type to avoid duplicates
+		interfaceMap := make(map[string]*InterfaceDef)
+
+		// Track if this job has any incoming connections
+		hasIncomingConnections := false
+
+		// Process outgoing connections (this node is the source)
+		for _, conn := range connections {
+			if conn.FromNodeID != nil && *conn.FromNodeID == node.ID {
+				sm.logger.Debug(fmt.Sprintf("  Outgoing connection: %s -> %s", conn.FromInterfaceType, conn.ToInterfaceType), "database")
+
+				// This node outputs data via FromInterfaceType
+				interfaceType := conn.FromInterfaceType
+				if _, exists := interfaceMap[interfaceType]; !exists {
+					interfaceMap[interfaceType] = &InterfaceDef{
+						Type:           interfaceType,
+						Path:           "output" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/output/
+						InterfacePeers: []InterfacePeerDef{},
+					}
+				}
+
+				// Determine destination peer
+				var destPeerID string
+				var destJobID *int64
+
+				if conn.ToNodeID == nil {
+					// Destination is local peer (self-peer)
+					destPeerID = localPeerID
+					destJobID = nil
+				} else {
+					// Destination is another workflow node
+					destNode := nodeMap[*conn.ToNodeID]
+					if destNode != nil {
+						destPeerID = destNode.PeerID
+						destJobID = conn.ToNodeID
+					} else {
+						sm.logger.Warn(fmt.Sprintf("  Destination node %d not found, skipping connection", *conn.ToNodeID), "database")
+						continue
+					}
+				}
+
+				// Add destination as RECEIVER peer
+				interfaceMap[interfaceType].InterfacePeers = append(interfaceMap[interfaceType].InterfacePeers, InterfacePeerDef{
+					PeerNodeID:        destPeerID,
+					PeerJobID:         destJobID,
+					PeerPath:          "input" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/input/
+					PeerMountFunction: "RECEIVER",
+					DutyAcknowledged:  false,
+				})
+			}
+		}
+
+		// Process incoming connections (this node is the destination)
+		for _, conn := range connections {
+			if conn.ToNodeID != nil && *conn.ToNodeID == node.ID {
+				sm.logger.Debug(fmt.Sprintf("  Incoming connection: %s -> %s", conn.FromInterfaceType, conn.ToInterfaceType), "database")
+
+				// Mark that this job has incoming connections
+				hasIncomingConnections = true
+
+				// This node receives data via ToInterfaceType
+				interfaceType := conn.ToInterfaceType
+				if _, exists := interfaceMap[interfaceType]; !exists {
+					interfaceMap[interfaceType] = &InterfaceDef{
+						Type:           interfaceType,
+						Path:           "input" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/input/
+						InterfacePeers: []InterfacePeerDef{},
+					}
+				}
+
+				// Determine source peer
+				var srcPeerID string
+				var srcJobID *int64
+
+				if conn.FromNodeID == nil {
+					// Source is local peer (self-peer)
+					srcPeerID = localPeerID
+					srcJobID = nil
+				} else {
+					// Source is another workflow node
+					srcNode := nodeMap[*conn.FromNodeID]
+					if srcNode != nil {
+						srcPeerID = srcNode.PeerID
+						srcJobID = conn.FromNodeID
+					} else {
+						sm.logger.Warn(fmt.Sprintf("  Source node %d not found, skipping connection", *conn.FromNodeID), "database")
+						continue
+					}
+				}
+
+				// Add source as PROVIDER peer
+				interfaceMap[interfaceType].InterfacePeers = append(interfaceMap[interfaceType].InterfacePeers, InterfacePeerDef{
+					PeerNodeID:        srcPeerID,
+					PeerJobID:         srcJobID,
+					PeerPath:          "output" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/output/
+					PeerMountFunction: "PROVIDER",
+					DutyAcknowledged:  false,
+				})
+			}
+		}
+
+		// Convert interface map to array
+		for _, iface := range interfaceMap {
+			job.Interfaces = append(job.Interfaces, *iface)
+		}
+
+		// Set execution constraint based on whether job has incoming connections
+		if hasIncomingConnections {
+			job.ExecutionConstraint = "INPUTS_READY"
+		} else {
+			job.ExecutionConstraint = "NONE"
+		}
+
+		sm.logger.Debug(fmt.Sprintf("  Job %s has %d interfaces, constraint: %s", job.Name, len(job.Interfaces), job.ExecutionConstraint), "database")
+
+		jobs = append(jobs, job)
+	}
+
+	// Create workflow definition
+	definition := map[string]interface{}{
+		"jobs": jobs,
+	}
+
+	// Update workflow with new definition
+	workflow, err := sm.GetWorkflowByID(workflowID)
+	if err != nil {
+		return fmt.Errorf("failed to get workflow: %v", err)
+	}
+
+	workflow.Definition = definition
+
+	err = sm.UpdateWorkflow(workflowID, workflow)
+	if err != nil {
+		return fmt.Errorf("failed to update workflow definition: %v", err)
+	}
+
+	sm.logger.Info(fmt.Sprintf("Workflow definition built successfully: %d jobs", len(jobs)), "database")
 	return nil
 }
 

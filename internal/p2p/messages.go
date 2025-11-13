@@ -56,6 +56,8 @@ const (
 	MessageTypeJobRequest              MessageType = "job_request"
 	MessageTypeJobResponse             MessageType = "job_response"
 	MessageTypeJobStatusUpdate         MessageType = "job_status_update"
+	MessageTypeJobStatusRequest        MessageType = "job_status_request"
+	MessageTypeJobStatusResponse       MessageType = "job_status_response"
 	MessageTypeJobDataTransferRequest  MessageType = "job_data_transfer_request"
 	MessageTypeJobDataTransferResponse MessageType = "job_data_transfer_response"
 	MessageTypeJobDataChunk            MessageType = "job_data_chunk"
@@ -774,6 +776,16 @@ func CreateJobResponse(data interface{}) *QUICMessage {
 // CreateJobStatusUpdate creates a job status update message
 func CreateJobStatusUpdate(data interface{}) *QUICMessage {
 	return NewQUICMessage(MessageTypeJobStatusUpdate, data)
+}
+
+// CreateJobStatusRequest creates a job status request message
+func CreateJobStatusRequest(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobStatusRequest, data)
+}
+
+// CreateJobStatusResponse creates a job status response message
+func CreateJobStatusResponse(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobStatusResponse, data)
 }
 
 // CreateJobDataTransferRequest creates a data transfer request message

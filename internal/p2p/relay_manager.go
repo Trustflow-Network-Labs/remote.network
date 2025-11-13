@@ -11,6 +11,7 @@ import (
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -463,6 +464,9 @@ func (rm *RelayManager) listenForRelayedMessages(stream *quic.Stream, sessionID 
 		// Parse length
 		messageLength := int(lengthBuf[0])<<24 | int(lengthBuf[1])<<16 | int(lengthBuf[2])<<8 | int(lengthBuf[3])
 
+		// DEBUG: Log message length
+		rm.logger.Info(fmt.Sprintf("DEBUG: Received message length prefix: %d bytes", messageLength), "relay-manager")
+
 		if messageLength <= 0 || messageLength > 10*1024*1024 { // Max 10MB
 			rm.logger.Warn(fmt.Sprintf("Invalid message length from relay: %d bytes", messageLength), "relay-manager")
 			continue
@@ -487,10 +491,12 @@ func (rm *RelayManager) listenForRelayedMessages(stream *quic.Stream, sessionID 
 		// Parse and handle the message
 		msg, err := UnmarshalQUICMessage(messageBuf)
 		if err != nil {
-			rm.logger.Warn(fmt.Sprintf("Failed to unmarshal relayed message: %v", err), "relay-manager")
+			rm.logger.Warn(fmt.Sprintf("Failed to unmarshal relayed message (%d bytes): %v", len(messageBuf), err), "relay-manager")
 			continue
 		}
 
+		// DEBUG: Log received message type and size
+		rm.logger.Info(fmt.Sprintf("DEBUG: Successfully unmarshaled message type=%s, size=%d bytes", msg.Type, len(messageBuf)), "relay-manager")
 		rm.logger.Debug(fmt.Sprintf("Received relayed message via relay: type=%s", msg.Type), "relay-manager")
 
 		// Route message to appropriate handler based on type
@@ -506,21 +512,76 @@ func (rm *RelayManager) handleRelayedMessage(msg *QUICMessage) error {
 
 	// Extract source peer ID from request if available
 	var sourcePeerID string
-	if msg.Type == MessageTypeServiceRequest {
+	switch msg.Type {
+	case MessageTypeServiceRequest:
 		var request ServiceSearchRequest
 		if err := msg.GetDataAs(&request); err == nil {
 			sourcePeerID = request.SourcePeerID
 		}
+	case MessageTypeJobRequest:
+		var request types.JobExecutionRequest
+		if err := msg.GetDataAs(&request); err == nil {
+			sourcePeerID = request.OrderingPeerID
+		}
+	case MessageTypeJobStatusRequest:
+		// Status requests don't have a source peer ID field in the message
+		// The relay should have this from the forward data wrapper
+		// For now, we'll rely on the relay forwarding mechanism
+	case MessageTypeJobDataTransferRequest:
+		var request types.JobDataTransferRequest
+		if err := msg.GetDataAs(&request); err == nil {
+			sourcePeerID = request.SourcePeerID
+		}
+	case MessageTypeJobCancel:
+		// Cancel requests don't have a source peer ID field
+		// The relay should have this from the forward data wrapper
 	}
 
-	// Delegate to QUIC peer to handle the message
-	response := rm.quicPeer.HandleRelayedMessage(msg)
+	// Use a default identifier if source peer ID couldn't be extracted
+	if sourcePeerID == "" {
+		sourcePeerID = "unknown-relay-source"
+	}
+
+	// Recover from panics in message handlers and generate error responses
+	var response *QUICMessage
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				rm.logger.Error(fmt.Sprintf("PANIC while handling relayed message (type=%s): %v", msg.Type, r), "relay-manager")
+
+				// Generate appropriate error response based on message type
+				if sourcePeerID != "unknown-relay-source" {
+					switch msg.Type {
+					case MessageTypeJobRequest:
+						response = CreateJobResponse(&types.JobExecutionResponse{
+							Accepted: false,
+							Message:  fmt.Sprintf("Internal error while processing job request: %v", r),
+						})
+					case MessageTypeJobStatusRequest:
+						response = CreateJobStatusResponse(&types.JobStatusResponse{
+							Found: false,
+						})
+					case MessageTypeJobDataTransferRequest:
+						response = CreateJobDataTransferResponse(&types.JobDataTransferResponse{
+							Accepted: false,
+							Message:  fmt.Sprintf("Internal error while processing transfer request: %v", r),
+						})
+					case MessageTypeServiceRequest:
+						response = CreateServiceSearchResponse(nil, fmt.Sprintf("Internal error: %v", r))
+					}
+				}
+			}
+		}()
+
+		// Delegate to QUIC peer to handle the message
+		response = rm.quicPeer.HandleRelayedMessage(msg, sourcePeerID)
+	}()
 
 	if response != nil {
 		rm.logger.Debug(fmt.Sprintf("Message handled, response type: %s - routing back via relay", response.Type), "relay-manager")
 
 		// Send response back through relay
-		if sourcePeerID == "" {
+		if sourcePeerID == "unknown-relay-source" {
 			rm.logger.Warn("Cannot route response - source peer ID not available in request", "relay-manager")
 			return nil
 		}
@@ -530,7 +591,12 @@ func (rm *RelayManager) handleRelayedMessage(msg *QUICMessage) error {
 			return err
 		}
 
-		rm.logger.Info(fmt.Sprintf("Successfully sent %s response to %s via relay", response.Type, sourcePeerID[:8]), "relay-manager")
+		// Safe logging - check length before slicing
+		peerIDLog := sourcePeerID
+		if len(sourcePeerID) > 8 {
+			peerIDLog = sourcePeerID[:8]
+		}
+		rm.logger.Info(fmt.Sprintf("Successfully sent %s response to %s via relay", response.Type, peerIDLog), "relay-manager")
 	}
 
 	return nil

@@ -118,3 +118,29 @@ func (ap *AppPaths) GetDataPath(filename string) string {
 func (ap *AppPaths) GetTempPath(filename string) string {
 	return filepath.Join(ap.TempDir, filename)
 }
+
+// PathExistsWithContent checks if a path exists and contains files/data
+// Returns true if path exists and has content (for directories) or exists (for files)
+func PathExistsWithContent(path string) (bool, error) {
+	// Check if path exists
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	// If it's a file, just check existence
+	if !info.IsDir() {
+		return true, nil
+	}
+
+	// If it's a directory, check if it has content
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+
+	return len(entries) > 0, nil
+}

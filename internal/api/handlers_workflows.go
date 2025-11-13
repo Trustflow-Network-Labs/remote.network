@@ -220,6 +220,23 @@ func (s *APIServer) handleExecuteWorkflow(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Get local peer ID
+	localPeerID := s.peerManager.GetPeerID()
+	if localPeerID == "" {
+		s.logger.Error("Local peer ID not available", "api")
+		http.Error(w, "Local peer not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Build workflow definition from nodes and connections
+	s.logger.Info(fmt.Sprintf("Building workflow definition for workflow %d", id), "api")
+	err = s.dbManager.BuildWorkflowDefinition(id, localPeerID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to build workflow definition: %v", err), "api")
+		http.Error(w, fmt.Sprintf("Failed to build workflow definition: %v", err), http.StatusBadRequest)
+		return
+	}
+
 	// Get WorkflowManager from PeerManager
 	workflowManager := s.peerManager.GetWorkflowManager()
 	if workflowManager == nil {

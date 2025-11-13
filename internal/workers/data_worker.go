@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,7 +57,7 @@ func NewDataServiceWorker(db *database.SQLiteManager, cm *utils.ConfigManager, j
 		cm:                cm,
 		logger:            utils.NewLogsManager(cm),
 		jobHandler:        jobHandler,
-		chunkSize:         cm.GetConfigInt("job_data_chunk_size", 65536, 1024, 1048576), // Default 64KB
+		chunkSize:         cm.GetConfigInt("job_data_chunk_size", 1048576, 1024, 10485760), // Default 1MB (matches WebSocket upload performance)
 		incomingTransfers: make(map[string]*IncomingTransfer),
 	}
 }
@@ -71,6 +72,19 @@ func (dsw *DataServiceWorker) SetJobHandler(jobHandler *p2p.JobMessageHandler) {
 func (dsw *DataServiceWorker) SetPeerID(peerID string) {
 	dsw.peerID = peerID
 	dsw.logger.Info(fmt.Sprintf("Peer ID set for data service worker: %s", peerID[:8]), "data_worker")
+}
+
+// GetJobExecutionIDForTransfer returns the job execution ID associated with a transfer
+func (dsw *DataServiceWorker) GetJobExecutionIDForTransfer(transferID string) (int64, bool) {
+	dsw.transfersMu.RLock()
+	defer dsw.transfersMu.RUnlock()
+
+	transfer, exists := dsw.incomingTransfers[transferID]
+	if !exists {
+		return 0, false
+	}
+
+	return transfer.JobExecutionID, true
 }
 
 // ExecuteDataService executes a DATA service job
@@ -143,7 +157,7 @@ func (dsw *DataServiceWorker) ExecuteDataService(job *database.JobExecution, ser
 		if peer.PeerMountFunction == types.MountFunctionReceiver {
 			dsw.logger.Info(fmt.Sprintf("Transferring data to peer %s (path: %s)", peer.PeerNodeID[:8], peer.PeerPath), "data_worker")
 
-			err := dsw.transferDataToPeer(job.ID, filePath, peer, dataDetails)
+			err := dsw.transferDataToPeer(job, filePath, peer, dataDetails)
 			if err != nil {
 				dsw.logger.Error(fmt.Sprintf("Failed to transfer data to peer %s: %v", peer.PeerNodeID[:8], err), "data_worker")
 				return fmt.Errorf("failed to transfer data to peer %s: %v", peer.PeerNodeID[:8], err)
@@ -158,7 +172,13 @@ func (dsw *DataServiceWorker) ExecuteDataService(job *database.JobExecution, ser
 }
 
 // transferDataToPeer transfers data file to a peer
-func (dsw *DataServiceWorker) transferDataToPeer(jobExecutionID int64, filePath string, peer *database.JobInterfacePeer, dataDetails *database.DataServiceDetails) error {
+func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, filePath string, peer *database.JobInterfacePeer, dataDetails *database.DataServiceDetails) error {
+	// Check if destination is the local peer (self-transfer)
+	if peer.PeerNodeID == dsw.peerID {
+		dsw.logger.Info(fmt.Sprintf("Destination is local peer - handling data locally for job %d", job.ID), "data_worker")
+		return dsw.handleLocalDataTransfer(job.ID, filePath, peer, dataDetails)
+	}
+
 	// Open file for reading
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -179,7 +199,7 @@ func (dsw *DataServiceWorker) transferDataToPeer(jobExecutionID int64, filePath 
 		filePath, fileSize, totalChunks, peer.PeerNodeID[:8]), "data_worker")
 
 	// Generate transfer ID
-	transferID := dsw.GenerateTransferID(jobExecutionID, peer.PeerNodeID)
+	transferID := dsw.GenerateTransferID(job.ID, peer.PeerNodeID)
 
 	// Check if job handler is available for actual transfer
 	if dsw.jobHandler != nil {
@@ -197,9 +217,10 @@ func (dsw *DataServiceWorker) transferDataToPeer(jobExecutionID int64, filePath 
 			}
 		}
 
-		// Send transfer request
+		// Send transfer request using WorkflowJobID (shared identifier both peers understand)
 		transferRequest := &types.JobDataTransferRequest{
-			JobExecutionID:    jobExecutionID,
+			TransferID:        transferID, // Include transfer ID so both peers use the same one
+			WorkflowJobID:     job.WorkflowJobID,
 			InterfaceType:     types.InterfaceTypeStdout,
 			SourcePeerID:      dsw.peerID,
 			DestinationPeerID: peer.PeerNodeID,
@@ -277,7 +298,7 @@ func (dsw *DataServiceWorker) transferDataToPeer(jobExecutionID int64, filePath 
 	if dsw.jobHandler != nil {
 		transferComplete := &types.JobDataTransferComplete{
 			TransferID:       transferID,
-			JobExecutionID:   jobExecutionID,
+			JobExecutionID:   job.ID,
 			Success:          true,
 			BytesTransferred: bytesTransferred,
 			CompletedAt:      time.Now(),
@@ -328,14 +349,30 @@ func (dsw *DataServiceWorker) InitializeIncomingTransferWithPassphrase(transferI
 	dsw.logger.Info(fmt.Sprintf("Initializing incoming transfer %s: %s (%d bytes, %d chunks, encrypted: %v)",
 		transferID, targetPath, expectedSize, totalChunks, encrypted), "data_worker")
 
-	// Create target directory if it doesn't exist
-	targetDir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return fmt.Errorf("failed to create target directory: %v", err)
+	// Determine if targetPath is a directory (ends with separator) or a file
+	// Following libp2p pattern: directories end with "/" or "\"
+	isDir := strings.HasSuffix(targetPath, string(os.PathSeparator))
+
+	var actualFilePath string
+	if isDir {
+		// Create directory
+		if err := os.MkdirAll(targetPath, 0755); err != nil {
+			return fmt.Errorf("failed to create target directory: %v", err)
+		}
+		// Save file inside directory with transfer ID as filename
+		actualFilePath = filepath.Join(targetPath, transferID+".dat")
+		dsw.logger.Info(fmt.Sprintf("Target is directory, saving file as: %s", actualFilePath), "data_worker")
+	} else {
+		// Create parent directory
+		targetDir := filepath.Dir(targetPath)
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			return fmt.Errorf("failed to create parent directory: %v", err)
+		}
+		actualFilePath = targetPath
 	}
 
 	// Open or create target file
-	file, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	file, err := os.OpenFile(actualFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open target file: %v", err)
 	}
@@ -345,7 +382,7 @@ func (dsw *DataServiceWorker) InitializeIncomingTransferWithPassphrase(transferI
 		TransferID:     transferID,
 		JobExecutionID: jobExecutionID,
 		SourcePeerID:   sourcePeerID,
-		TargetPath:     targetPath,
+		TargetPath:     actualFilePath, // Use actual file path, not directory path
 		ExpectedHash:   expectedHash,
 		ExpectedSize:   expectedSize,
 		TotalChunks:    totalChunks,
@@ -400,10 +437,10 @@ func (dsw *DataServiceWorker) HandleDataChunk(chunk *types.JobDataChunk, peerID 
 
 	// Lock the transfer for chunk processing
 	transfer.mu.Lock()
-	defer transfer.mu.Unlock()
 
 	// Check if we already received this chunk
 	if transfer.ReceivedChunks[chunk.ChunkIndex] {
+		transfer.mu.Unlock()
 		dsw.logger.Warn(fmt.Sprintf("Duplicate chunk %d for transfer %s, ignoring", chunk.ChunkIndex, chunk.TransferID), "data_worker")
 		return nil
 	}
@@ -414,10 +451,12 @@ func (dsw *DataServiceWorker) HandleDataChunk(chunk *types.JobDataChunk, peerID 
 	// Write chunk data to file at correct offset
 	n, err := transfer.File.WriteAt(chunk.Data, offset)
 	if err != nil {
+		transfer.mu.Unlock()
 		return fmt.Errorf("failed to write chunk %d to file: %v", chunk.ChunkIndex, err)
 	}
 
 	if n != len(chunk.Data) {
+		transfer.mu.Unlock()
 		return fmt.Errorf("incomplete write: wrote %d bytes, expected %d", n, len(chunk.Data))
 	}
 
@@ -431,7 +470,12 @@ func (dsw *DataServiceWorker) HandleDataChunk(chunk *types.JobDataChunk, peerID 
 		transfer.BytesReceived, transfer.ExpectedSize), "data_worker")
 
 	// Check if transfer is complete
-	if len(transfer.ReceivedChunks) == transfer.TotalChunks {
+	isComplete := len(transfer.ReceivedChunks) == transfer.TotalChunks
+
+	// Unlock before finalizing to avoid deadlock (finalizeTransfer needs to acquire locks)
+	transfer.mu.Unlock()
+
+	if isComplete {
 		dsw.logger.Info(fmt.Sprintf("All chunks received for transfer %s, finalizing...", chunk.TransferID), "data_worker")
 		return dsw.finalizeTransfer(chunk.TransferID)
 	}
@@ -451,7 +495,6 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 
 	transfer.mu.Lock()
 	defer transfer.mu.Unlock()
-
 	// Close file
 	if err := transfer.File.Sync(); err != nil {
 		dsw.logger.Warn(fmt.Sprintf("Failed to sync file for transfer %s: %v", transferID, err), "data_worker")
@@ -505,8 +548,12 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 	// After decryption, the file is a tar.gz archive that needs to be extracted
 	dsw.logger.Info(fmt.Sprintf("Decompressing transfer %s", transferID), "data_worker")
 
-	// Create extraction directory next to the downloaded file
-	extractDir := transfer.TargetPath + "_extracted"
+	// Extract to the parent directory (e.g., if file is input/abc.dat, extract to input/)
+	// This puts the decompressed files directly in the input/ directory as expected
+	extractDir := filepath.Dir(transfer.TargetPath)
+	dsw.logger.Info(fmt.Sprintf("Extracting transfer %s to directory: %s", transferID, extractDir), "data_worker")
+
+	// Ensure extraction directory exists
 	if err := os.MkdirAll(extractDir, 0755); err != nil {
 		dsw.logger.Error(fmt.Sprintf("Failed to create extraction directory for transfer %s: %v", transferID, err), "data_worker")
 		os.Remove(transfer.TargetPath)
@@ -542,6 +589,22 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 	if transfer.Passphrase != "" {
 		transfer.Passphrase = ""
 		dsw.logger.Debug(fmt.Sprintf("Passphrase cleared from memory for transfer %s", transferID), "data_worker")
+	}
+
+	// Update job status to COMPLETED
+	if transfer.JobExecutionID > 0 {
+		job, err := dsw.db.GetJobExecution(transfer.JobExecutionID)
+		if err != nil {
+			dsw.logger.Error(fmt.Sprintf("Failed to get job execution %d for transfer %s: %v", transfer.JobExecutionID, transferID, err), "data_worker")
+		} else if job != nil && job.Status == "RUNNING" {
+			// Only update if job is still in RUNNING state
+			err = dsw.db.UpdateJobStatus(transfer.JobExecutionID, "COMPLETED", "")
+			if err != nil {
+				dsw.logger.Error(fmt.Sprintf("Failed to update job status for transfer %s: %v", transferID, err), "data_worker")
+			} else {
+				dsw.logger.Info(fmt.Sprintf("Updated job %d status to COMPLETED after transfer %s", transfer.JobExecutionID, transferID), "data_worker")
+			}
+		}
 	}
 
 	// Remove from active transfers
@@ -669,6 +732,132 @@ func (dsw *DataServiceWorker) CleanupStalledTransfers(timeout time.Duration) {
 			delete(dsw.incomingTransfers, transferID)
 		}
 	}
+}
+
+// handleLocalDataTransfer handles data transfer to the local peer (self)
+func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, filePath string, peer *database.JobInterfacePeer, dataDetails *database.DataServiceDetails) error {
+	dsw.logger.Info(fmt.Sprintf("Processing local data transfer for job %d", jobExecutionID), "data_worker")
+
+	// Get job execution to build hierarchical path
+	job, err := dsw.db.GetJobExecution(jobExecutionID)
+	if err != nil {
+		return fmt.Errorf("failed to get job execution: %v", err)
+	}
+
+	// Construct hierarchical path: workflows/{ordering_peer_id}/{workflow_job_id}/jobs/{job_id}/{template}
+	// This follows the libp2p distributed P2P pattern for clear file organization
+	appPaths := utils.GetAppPaths("remote-network")
+	hierarchicalPath := filepath.Join(
+		appPaths.DataDir,
+		"workflows",
+		job.OrderingPeerID[:8], // Use first 8 chars for readability
+		fmt.Sprintf("%d", job.WorkflowJobID),
+		"jobs",
+		fmt.Sprintf("%d", job.ID),
+		peer.PeerPath, // e.g., "input/" or "output/"
+	)
+
+	// Preserve directory indicator - filepath.Join() removes trailing separators
+	// Re-add it if the template indicated a directory
+	if strings.HasSuffix(peer.PeerPath, string(os.PathSeparator)) && !strings.HasSuffix(hierarchicalPath, string(os.PathSeparator)) {
+		hierarchicalPath += string(os.PathSeparator)
+	}
+
+	dsw.logger.Info(fmt.Sprintf("Resolved path template '%s' to hierarchical path: %s", peer.PeerPath, hierarchicalPath), "data_worker")
+
+	// Determine if hierarchicalPath is a directory (ends with separator) or a file
+	isDir := strings.HasSuffix(hierarchicalPath, string(os.PathSeparator))
+
+	var resolvedPath string
+	if isDir {
+		// Create directory
+		if err := os.MkdirAll(hierarchicalPath, 0755); err != nil {
+			return fmt.Errorf("failed to create destination directory: %v", err)
+		}
+		// Save file inside directory with source filename
+		resolvedPath = filepath.Join(hierarchicalPath, filepath.Base(filePath))
+		dsw.logger.Info(fmt.Sprintf("Target is directory, saving file as: %s", resolvedPath), "data_worker")
+	} else {
+		// Create parent directory
+		destDir := filepath.Dir(hierarchicalPath)
+		if err := os.MkdirAll(destDir, 0755); err != nil {
+			return fmt.Errorf("failed to create parent directory: %v", err)
+		}
+		resolvedPath = hierarchicalPath
+	}
+
+	// Copy the encrypted file to a temporary location first
+	tempFile := resolvedPath + ".encrypted.tmp"
+	if err := dsw.copyFile(filePath, tempFile); err != nil {
+		return fmt.Errorf("failed to copy file: %v", err)
+	}
+	defer os.Remove(tempFile) // Clean up temp file
+
+	dsw.logger.Info(fmt.Sprintf("Copied encrypted file to %s", tempFile), "data_worker")
+
+	// Validate hash on encrypted file
+	if dataDetails.Hash != "" {
+		if err := dsw.validateFileHash(tempFile, dataDetails.Hash); err != nil {
+			return fmt.Errorf("hash validation failed: %v", err)
+		}
+		dsw.logger.Info("Hash validation successful", "data_worker")
+	}
+
+	// Decrypt file if encrypted
+	var decryptedFile string
+	if dataDetails.EncryptionKeyID != nil {
+		encryptionKey, err := dsw.db.GetEncryptionKey(dataDetails.ServiceID)
+		if err != nil {
+			return fmt.Errorf("failed to get encryption key: %v", err)
+		}
+		if encryptionKey == nil {
+			return fmt.Errorf("encryption key not found for service %d", dataDetails.ServiceID)
+		}
+
+		dsw.logger.Info("Decrypting file", "data_worker")
+		if err := dsw.decryptFile(tempFile, encryptionKey.KeyData); err != nil {
+			return fmt.Errorf("decryption failed: %v", err)
+		}
+
+		// After decryption, the file extension changes from .encrypted.tmp to .tmp
+		decryptedFile = resolvedPath + ".tmp"
+		dsw.logger.Info(fmt.Sprintf("File decrypted to %s", decryptedFile), "data_worker")
+	} else {
+		// No encryption, just rename
+		decryptedFile = tempFile
+	}
+	defer os.Remove(decryptedFile) // Clean up decrypted temp file
+
+	// Decompress file (it's a tar.gz archive)
+	dsw.logger.Info(fmt.Sprintf("Decompressing file to %s", resolvedPath), "data_worker")
+	if err := utils.Decompress(decryptedFile, resolvedPath); err != nil {
+		return fmt.Errorf("decompression failed: %v", err)
+	}
+
+	dsw.logger.Info(fmt.Sprintf("Local data transfer completed successfully for job %d", jobExecutionID), "data_worker")
+	return nil
+}
+
+// copyFile copies a file from src to dst
+func (dsw *DataServiceWorker) copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return err
+	}
+
+	return destFile.Sync()
 }
 
 // Close closes the data service worker

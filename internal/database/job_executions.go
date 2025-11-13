@@ -51,6 +51,9 @@ type JobInterfacePeer struct {
 func (sm *SQLiteManager) InitJobExecutionsTable() error {
 	createTableSQL := `
 	-- Job executions table
+	-- Note: workflow_job_id is a soft reference (no FK constraint) to support distributed P2P execution
+	-- where job executions may occur on peers that don't have the workflow_jobs record locally.
+	-- Application-level validation ensures referential integrity when needed.
 	CREATE TABLE IF NOT EXISTS job_executions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		workflow_job_id INTEGER NOT NULL,
@@ -67,7 +70,6 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 		error_message TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY (workflow_job_id) REFERENCES workflow_jobs(id) ON DELETE CASCADE,
 		FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE
 	);
 
@@ -297,6 +299,66 @@ func (sm *SQLiteManager) GetReadyJobs() ([]*JobExecution, error) {
 	return jobs, nil
 }
 
+// GetJobsByStatus gets all job executions with a specific status
+func (sm *SQLiteManager) GetJobsByStatus(status string) ([]*JobExecution, error) {
+	rows, err := sm.db.Query(`
+		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
+		       status, entrypoint, commands, execution_constraint, constraint_detail,
+		       started_at, ended_at, error_message, created_at, updated_at
+		FROM job_executions
+		WHERE status = ?
+		ORDER BY created_at ASC
+	`, status)
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to get jobs with status %s: %v", status, err), "database")
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []*JobExecution
+	for rows.Next() {
+		var job JobExecution
+		var startedAt, endedAt sql.NullTime
+		var errorMsg sql.NullString
+
+		err := rows.Scan(
+			&job.ID,
+			&job.WorkflowJobID,
+			&job.ServiceID,
+			&job.ExecutorPeerID,
+			&job.OrderingPeerID,
+			&job.Status,
+			&job.Entrypoint,
+			&job.Commands,
+			&job.ExecutionConstraint,
+			&job.ConstraintDetail,
+			&startedAt,
+			&endedAt,
+			&errorMsg,
+			&job.CreatedAt,
+			&job.UpdatedAt,
+		)
+		if err != nil {
+			sm.logger.Error(fmt.Sprintf("Failed to scan job execution: %v", err), "database")
+			continue
+		}
+
+		if startedAt.Valid {
+			job.StartedAt = startedAt.Time
+		}
+		if endedAt.Valid {
+			job.EndedAt = endedAt.Time
+		}
+		if errorMsg.Valid {
+			job.ErrorMessage = errorMsg.String
+		}
+
+		jobs = append(jobs, &job)
+	}
+
+	return jobs, nil
+}
+
 // CreateJobInterface creates a new job interface
 func (sm *SQLiteManager) CreateJobInterface(iface *JobInterface) error {
 	result, err := sm.db.Exec(`
@@ -474,6 +536,8 @@ func (sm *SQLiteManager) MarkInterfacePeerAcknowledged(interfacePeerID int64) er
 }
 
 // GetJobExecutionsByWorkflowJob retrieves all job executions for a workflow job
+// Note: This uses workflow_job_id as a soft reference - the workflow_job record may not exist
+// locally for cross-peer executions, and that's expected in a distributed P2P system.
 func (sm *SQLiteManager) GetJobExecutionsByWorkflowJob(workflowJobID int64) ([]*JobExecution, error) {
 	rows, err := sm.db.Query(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
