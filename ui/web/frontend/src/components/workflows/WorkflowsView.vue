@@ -154,6 +154,13 @@
                 <button class="action-btn view-btn" @click="viewWorkflow(slotProps.data)">
                   <i class="pi pi-eye"></i> {{ $t('message.common.show') }}
                 </button>
+                <button
+                  class="action-btn executions-btn"
+                  @click="toggleExecutions(slotProps.data)"
+                  :class="{ active: activeWorkflowId === slotProps.data.id }"
+                >
+                  <i class="pi pi-history"></i> {{ $t('message.workflows.executions') }}
+                </button>
                 <button class="action-btn delete-btn" @click="confirmDeleteWorkflow(slotProps.data)">
                   <i class="pi pi-trash"></i> {{ $t('message.common.delete') }}
                 </button>
@@ -162,12 +169,79 @@
           </Column>
         </DataTable>
       </div>
+
+      <!-- Job Executions Section -->
+      <div v-if="activeWorkflowId" class="executions-section">
+        <div class="executions-header">
+          <div class="executions-title">
+            <i class="pi pi-history"></i> {{ $t('message.workflows.jobExecutions') }}
+            <span class="workflow-name">{{ activeWorkflowName }}</span>
+          </div>
+          <button class="close-btn" @click="closeExecutions">
+            <i class="pi pi-times"></i>
+          </button>
+        </div>
+
+        <div v-if="loadingExecutions" class="loading">
+          <ProgressSpinner style="width:40px;height:40px" strokeWidth="4" />
+        </div>
+
+        <div v-else-if="executions.length === 0" class="empty-executions">
+          <i class="pi pi-inbox"></i>
+          <p>{{ $t('message.workflows.noExecutions') }}</p>
+        </div>
+
+        <div v-else class="executions-list">
+          <div
+            v-for="execution in executions"
+            :key="execution.id"
+            class="execution-card"
+            :class="`status-${execution.status.toLowerCase()}`"
+          >
+            <div class="execution-header">
+              <div class="execution-id">#{{ execution.id }}</div>
+              <div class="execution-status">
+                <span :class="['status-badge', `status-${execution.status.toLowerCase()}`]">
+                  <i :class="getStatusIcon(execution.status)"></i>
+                  {{ execution.status }}
+                </span>
+              </div>
+            </div>
+            <div class="execution-details">
+              <div class="execution-detail">
+                <span class="label">{{ $t('message.workflows.executor') }}:</span>
+                <span class="value">{{ truncatePeerId(execution.executor_peer_id) }}</span>
+              </div>
+              <div class="execution-detail">
+                <span class="label">{{ $t('message.workflows.ordering') }}:</span>
+                <span class="value">{{ truncatePeerId(execution.ordering_peer_id) }}</span>
+              </div>
+              <div class="execution-detail" v-if="execution.started_at">
+                <span class="label">{{ $t('message.workflows.started') }}:</span>
+                <span class="value">{{ formatDateTime(execution.started_at) }}</span>
+              </div>
+              <div class="execution-detail" v-if="execution.ended_at">
+                <span class="label">{{ $t('message.workflows.duration') }}:</span>
+                <span class="value">{{ calculateDuration(execution.started_at, execution.ended_at) }}</span>
+              </div>
+              <div class="execution-detail" v-else-if="execution.started_at">
+                <span class="label">{{ $t('message.workflows.running') }}:</span>
+                <span class="value">{{ getRunningTime(execution.started_at) }}</span>
+              </div>
+            </div>
+            <div v-if="execution.error_message" class="execution-error">
+              <i class="pi pi-exclamation-triangle"></i>
+              {{ execution.error_message }}
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
   </AppLayout>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, onUnmounted, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useConfirm } from 'primevue/useconfirm'
@@ -185,6 +259,7 @@ import { FilterMatchMode } from '@primevue/core/api'
 import AppLayout from '../layout/AppLayout.vue'
 import { useWorkflowsStore } from '../../stores/workflows'
 import type { Workflow } from '../../stores/workflows'
+import { getApiUrl } from '../../utils/api'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -200,6 +275,27 @@ const workflowFilters = ref({
   name: { value: null, matchMode: FilterMatchMode.CONTAINS },
   description: { value: null, matchMode: FilterMatchMode.CONTAINS }
 })
+
+// Job Executions State
+interface JobExecution {
+  id: number
+  workflow_job_id: number
+  service_id: number
+  executor_peer_id: string
+  ordering_peer_id: string
+  status: string
+  started_at: string
+  ended_at: string
+  error_message: string
+  created_at: string
+  updated_at: string
+}
+
+const activeWorkflowId = ref<number | null>(null)
+const activeWorkflowName = ref<string>('')
+const executions = ref<JobExecution[]>([])
+const loadingExecutions = ref(false)
+let refreshInterval: number | null = null
 
 // Computed
 const draftCount = computed(() =>
@@ -307,8 +403,144 @@ function confirmDeleteSelected() {
   })
 }
 
+// Job Executions Methods
+async function loadExecutions(workflowId: number) {
+  if (!workflowId) return
+
+  loadingExecutions.value = true
+  try {
+    const response = await fetch(getApiUrl(`/api/workflows/${workflowId}/executions`), {
+      headers: {
+        'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
+      }
+    })
+
+    if (!response.ok) {
+      throw new Error('Failed to fetch executions')
+    }
+
+    const data = await response.json()
+    executions.value = data.executions || []
+  } catch (error) {
+    console.error('Error loading executions:', error)
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: t('message.workflows.executionsLoadError'),
+      life: 3000
+    })
+  } finally {
+    loadingExecutions.value = false
+  }
+}
+
+function toggleExecutions(workflow: Workflow) {
+  if (activeWorkflowId.value === workflow.id) {
+    closeExecutions()
+  } else {
+    activeWorkflowId.value = workflow.id
+    activeWorkflowName.value = workflow.name
+    loadExecutions(workflow.id)
+
+    // Set up auto-refresh every 3 seconds
+    if (refreshInterval) {
+      clearInterval(refreshInterval)
+    }
+    refreshInterval = window.setInterval(() => {
+      if (activeWorkflowId.value) {
+        loadExecutions(activeWorkflowId.value)
+      }
+    }, 3000)
+  }
+}
+
+function closeExecutions() {
+  activeWorkflowId.value = null
+  activeWorkflowName.value = ''
+  executions.value = []
+
+  if (refreshInterval) {
+    clearInterval(refreshInterval)
+    refreshInterval = null
+  }
+}
+
+function getStatusIcon(status: string): string {
+  const icons: Record<string, string> = {
+    IDLE: 'pi pi-circle',
+    READY: 'pi pi-clock',
+    RUNNING: 'pi pi-spin pi-spinner',
+    COMPLETED: 'pi pi-check-circle',
+    ERRORED: 'pi pi-times-circle',
+    CANCELLED: 'pi pi-ban'
+  }
+  return icons[status] || 'pi pi-circle'
+}
+
+function truncatePeerId(peerId: string): string {
+  if (!peerId || peerId.length <= 12) return peerId
+  return peerId.substring(0, 8) + '...'
+}
+
+function formatDateTime(dateStr: string): string {
+  if (!dateStr) return '-'
+  const date = new Date(dateStr)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMins = Math.floor(diffMs / 60000)
+
+  if (diffMins < 1) return 'Just now'
+  if (diffMins < 60) return `${diffMins} min${diffMins > 1 ? 's' : ''} ago`
+
+  const diffHours = Math.floor(diffMins / 60)
+  if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`
+
+  const diffDays = Math.floor(diffHours / 24)
+  return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`
+}
+
+function calculateDuration(startStr: string, endStr: string): string {
+  if (!startStr || !endStr) return '-'
+
+  const start = new Date(startStr)
+  const end = new Date(endStr)
+  const diffMs = end.getTime() - start.getTime()
+  const diffSecs = Math.floor(diffMs / 1000)
+
+  if (diffSecs < 60) return `${diffSecs}s`
+
+  const diffMins = Math.floor(diffSecs / 60)
+  const secs = diffSecs % 60
+
+  if (diffMins < 60) return `${diffMins}m ${secs}s`
+
+  const hours = Math.floor(diffMins / 60)
+  const mins = diffMins % 60
+  return `${hours}h ${mins}m`
+}
+
+function getRunningTime(startStr: string): string {
+  if (!startStr) return '-'
+  const start = new Date(startStr)
+  const now = new Date()
+  const diffMs = now.getTime() - start.getTime()
+  const diffSecs = Math.floor(diffMs / 1000)
+
+  if (diffSecs < 60) return `${diffSecs}s`
+
+  const diffMins = Math.floor(diffSecs / 60)
+  const secs = diffSecs % 60
+  return `${diffMins}m ${secs}s`
+}
+
 onMounted(async () => {
   await workflowsStore.fetchWorkflows()
+})
+
+onUnmounted(() => {
+  if (refreshInterval) {
+    clearInterval(refreshInterval)
+  }
 })
 </script>
 
@@ -598,6 +830,20 @@ onMounted(async () => {
       }
     }
 
+    &.executions-btn {
+      background-color: rgb(64, 96, 195);
+      color: #fff;
+
+      &:hover {
+        background-color: rgb(84, 116, 215);
+      }
+
+      &.active {
+        background-color: rgb(84, 116, 215);
+        box-shadow: 0 0 0 2px rgba(84, 116, 215, 0.5);
+      }
+    }
+
     &.delete-btn {
       background-color: #fff;
       color: rgb(27, 38, 54);
@@ -607,6 +853,231 @@ onMounted(async () => {
         color: rgb(205, 81, 36);
       }
     }
+  }
+}
+
+// Job Executions Section
+.executions-section {
+  margin-top: 2rem;
+  padding: 1.5rem;
+  background-color: rgb(27, 38, 54);
+  border-radius: 8px;
+  border: 2px solid rgb(49, 64, 92);
+
+  .executions-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid rgb(49, 64, 92);
+
+    .executions-title {
+      font-size: 1.5rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+
+      i {
+        color: rgb(64, 96, 195);
+      }
+
+      .workflow-name {
+        color: rgb(205, 81, 36);
+        margin-left: 0.5rem;
+        font-style: italic;
+      }
+    }
+
+    .close-btn {
+      background-color: transparent;
+      border: none;
+      color: #fff;
+      font-size: 1.25rem;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      transition: background-color 0.2s ease;
+
+      &:hover {
+        background-color: rgb(49, 64, 92);
+      }
+    }
+  }
+
+  .loading, .empty-executions {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 2rem;
+    color: vars.$color-text-secondary;
+
+    i {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+    }
+
+    p {
+      font-size: 1rem;
+      margin: 0;
+    }
+  }
+
+  .executions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .execution-card {
+    background-color: rgb(38, 49, 65);
+    border-radius: 6px;
+    padding: 1rem;
+    border-left: 4px solid rgb(64, 96, 195);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+
+    &:hover {
+      transform: translateX(4px);
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    }
+
+    &.status-idle {
+      border-left-color: #999;
+    }
+
+    &.status-ready {
+      border-left-color: #f59e0b;
+    }
+
+    &.status-running {
+      border-left-color: rgb(64, 96, 195);
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    &.status-completed {
+      border-left-color: rgba(86, 164, 82, 1);
+    }
+
+    &.status-errored {
+      border-left-color: #d32f2f;
+    }
+
+    &.status-cancelled {
+      border-left-color: #ff9800;
+    }
+
+    .execution-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+
+      .execution-id {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: rgb(205, 81, 36);
+      }
+
+      .execution-status {
+        .status-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.375rem;
+          padding: 0.375rem 0.75rem;
+          border-radius: 12px;
+          font-size: 0.75rem;
+          font-weight: 600;
+          text-transform: uppercase;
+
+          i {
+            font-size: 0.875rem;
+          }
+
+          &.status-idle {
+            background-color: #666;
+            color: #fff;
+          }
+
+          &.status-ready {
+            background-color: #f59e0b;
+            color: #fff;
+          }
+
+          &.status-running {
+            background-color: rgb(64, 96, 195);
+            color: #fff;
+          }
+
+          &.status-completed {
+            background-color: rgba(86, 164, 82, 1);
+            color: #fff;
+          }
+
+          &.status-errored {
+            background-color: #d32f2f;
+            color: #fff;
+          }
+
+          &.status-cancelled {
+            background-color: #ff9800;
+            color: #fff;
+          }
+        }
+      }
+    }
+
+    .execution-details {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+
+      .execution-detail {
+        display: flex;
+        gap: 0.5rem;
+        font-size: 0.875rem;
+
+        .label {
+          color: rgba(255, 255, 255, 0.7);
+          font-weight: 500;
+        }
+
+        .value {
+          color: #fff;
+          font-weight: 600;
+          font-family: 'Courier New', monospace;
+        }
+      }
+    }
+
+    .execution-error {
+      margin-top: 0.75rem;
+      padding: 0.75rem;
+      background-color: rgba(211, 47, 47, 0.1);
+      border-left: 3px solid #d32f2f;
+      border-radius: 4px;
+      color: #ff6b6b;
+      font-size: 0.875rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+
+      i {
+        flex-shrink: 0;
+        margin-top: 0.125rem;
+      }
+    }
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
   }
 }
 </style>

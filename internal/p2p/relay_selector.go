@@ -22,6 +22,8 @@ type RelayCandidate struct {
 	Metadata        *database.PeerMetadata
 	FailureCount    int       // Number of consecutive connection failures
 	LastFailure     time.Time // Timestamp of last connection failure
+	IsAvailable     bool      // False if ping/pong failed, true if responsive
+	UnavailableMsg  string    // Reason why relay is unavailable (e.g., "ping timeout")
 }
 
 // RelaySelector selects the best relay peer for NAT traversal
@@ -78,6 +80,8 @@ func (rs *RelaySelector) AddCandidate(metadata *database.PeerMetadata) error {
 		LastSeen:        metadata.LastSeen,
 		Metadata:        metadata,
 		Latency:         time.Duration(0), // Will be measured
+		IsAvailable:     true,               // Assume available until proven otherwise
+		UnavailableMsg:  "",
 	}
 
 	rs.candidates[metadata.NodeID] = candidate
@@ -150,15 +154,29 @@ func (rs *RelaySelector) MeasureLatency(candidate *RelayCandidate) (time.Duratio
 	// Send ping message via QUIC
 	err := rs.quicPeer.Ping(candidate.Endpoint)
 	if err != nil {
+		// Mark relay as unavailable when ping fails
+		rs.candidatesMutex.Lock()
+		if c, exists := rs.candidates[candidate.NodeID]; exists {
+			c.IsAvailable = false
+			c.UnavailableMsg = fmt.Sprintf("Ping timeout: %v", err)
+			c.LastFailure = time.Now()
+			c.FailureCount++
+		}
+		rs.candidatesMutex.Unlock()
+
+		rs.logger.Warn(fmt.Sprintf("Relay %s marked as unavailable: ping failed", candidate.NodeID[:8]), "relay-selector")
 		return 0, fmt.Errorf("failed to ping relay %s: %v", candidate.NodeID, err)
 	}
 
 	latency := time.Since(startTime)
 
-	// Update candidate latency
+	// Update candidate latency and mark as available (successful ping)
 	rs.candidatesMutex.Lock()
 	if c, exists := rs.candidates[candidate.NodeID]; exists {
 		c.Latency = latency
+		c.IsAvailable = true
+		c.UnavailableMsg = ""
+		c.FailureCount = 0 // Reset failure count on success
 	}
 	rs.candidatesMutex.Unlock()
 
@@ -299,6 +317,13 @@ func (rs *RelaySelector) SelectBestRelay() *RelayCandidate {
 			// Find preferred relay in candidates
 			for _, candidate := range rs.candidates {
 				if candidate.PeerID == preferredPeerID {
+					// Check if preferred relay is available
+					if !candidate.IsAvailable {
+						rs.logger.Warn(fmt.Sprintf("Preferred relay %s is unavailable (%s), using fallback selection",
+							preferredPeerID[:8], candidate.UnavailableMsg), "relay-selector")
+						break
+					}
+
 					// Check if preferred relay meets minimum criteria
 					if candidate.Latency == 0 {
 						rs.logger.Warn(fmt.Sprintf("Preferred relay %s has no latency measurement, skipping", preferredPeerID[:8]), "relay-selector")
@@ -346,6 +371,11 @@ func (rs *RelaySelector) SelectBestRelay() *RelayCandidate {
 	var bestScore float64 = -1
 
 	for _, candidate := range rs.candidates {
+		// Skip unavailable relays (ping failed/timeout)
+		if !candidate.IsAvailable {
+			continue
+		}
+
 		// Skip if latency not measured yet
 		if candidate.Latency == 0 {
 			continue

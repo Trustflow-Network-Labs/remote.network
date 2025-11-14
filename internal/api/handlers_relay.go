@@ -34,6 +34,8 @@ type RelayCandidateResponse struct {
 	LastSeen        int64   `json:"last_seen"`
 	IsConnected     bool    `json:"is_connected"`
 	IsPreferred     bool    `json:"is_preferred"`
+	IsAvailable     bool    `json:"is_available"`          // False if ping/pong failed
+	UnavailableMsg  string  `json:"unavailable_msg"`        // Reason why relay is unavailable
 }
 
 // ConnectRelayRequest represents a relay connection request
@@ -323,6 +325,8 @@ func (s *APIServer) handleRelayGetCandidates(w http.ResponseWriter, r *http.Requ
 			LastSeen:        candidate.LastSeen.Unix(),
 			IsConnected:     currentRelay != nil && currentRelay.NodeID == candidate.NodeID,
 			IsPreferred:     preferredRelayPeerID != "" && preferredRelayPeerID == candidate.PeerID, // Match by persistent peer_id
+			IsAvailable:     candidate.IsAvailable,
+			UnavailableMsg:  candidate.UnavailableMsg,
 		}
 
 		response = append(response, candResp)

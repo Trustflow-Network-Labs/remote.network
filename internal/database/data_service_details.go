@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -195,6 +196,8 @@ func (sm *SQLiteManager) AddEncryptionKey(key *EncryptionKey) error {
 
 // GetEncryptionKey retrieves an encryption key by service ID
 func (sm *SQLiteManager) GetEncryptionKey(serviceID int64) (*EncryptionKey, error) {
+	sm.logger.Debug(fmt.Sprintf("GetEncryptionKey: Looking up encryption key for service_id=%d", serviceID), "database")
+
 	query := `
 		SELECT id, service_id, passphrase_hash, key_data, created_at
 		FROM encryption_keys
@@ -212,12 +215,14 @@ func (sm *SQLiteManager) GetEncryptionKey(serviceID int64) (*EncryptionKey, erro
 
 	if err != nil {
 		if err == sql.ErrNoRows {
+			sm.logger.Warn(fmt.Sprintf("GetEncryptionKey: No encryption key found for service_id=%d (sql.ErrNoRows)", serviceID), "database")
 			return nil, nil
 		}
-		sm.logger.Error("Failed to get encryption key", "database")
+		sm.logger.Error(fmt.Sprintf("GetEncryptionKey: Database error for service_id=%d: %v", serviceID, err), "database")
 		return nil, err
 	}
 
+	sm.logger.Debug(fmt.Sprintf("GetEncryptionKey: Found encryption key id=%d for service_id=%d, key_data_len=%d", key.ID, serviceID, len(key.KeyData)), "database")
 	return &key, nil
 }
 

@@ -410,6 +410,7 @@ func (jm *JobManager) SubmitJob(request *types.JobExecutionRequest) (*database.J
 	// For local workflows, we validate the reference exists. For remote workflows (received
 	// from other peers), we accept that workflow_job may not exist in our local database.
 	isLocalWorkflow := request.OrderingPeerID == jm.peerManager.GetPeerID()
+	isLocalExecution := request.ExecutorPeerID == jm.peerManager.GetPeerID()
 
 	if isLocalWorkflow {
 		// Validate workflow_job exists for local workflows
@@ -426,15 +427,20 @@ func (jm *JobManager) SubmitJob(request *types.JobExecutionRequest) (*database.J
 			request.WorkflowJobID, request.OrderingPeerID[:8]), "job_manager")
 	}
 
-	// Validate that the requested service exists on this executor peer
-	// This is the correct place for service validation - on the peer that will execute the job
-	service, svcErr := jm.db.GetService(request.ServiceID)
-	if svcErr != nil || service == nil {
-		jm.logger.Error(fmt.Sprintf("Service ID %d not found on executor peer", request.ServiceID), "job_manager")
-		return nil, fmt.Errorf("service ID %d not found on executor peer", request.ServiceID)
+	// Validate that the requested service exists - but only for local execution
+	// For remote execution, the service exists on the remote peer, not locally
+	if isLocalExecution {
+		service, svcErr := jm.db.GetService(request.ServiceID)
+		if svcErr != nil || service == nil {
+			jm.logger.Error(fmt.Sprintf("Service ID %d not found on local executor peer", request.ServiceID), "job_manager")
+			return nil, fmt.Errorf("service ID %d not found on executor peer", request.ServiceID)
+		}
+		jm.logger.Info(fmt.Sprintf("Validated service '%s' (ID: %d) exists locally for execution",
+			service.Name, service.ID), "job_manager")
+	} else {
+		jm.logger.Info(fmt.Sprintf("Job will execute on remote peer %s (service ID %d validation skipped)",
+			request.ExecutorPeerID[:8], request.ServiceID), "job_manager")
 	}
-	jm.logger.Info(fmt.Sprintf("Validated service '%s' (ID: %d) exists locally for execution",
-		service.Name, service.ID), "job_manager")
 
 	// Create job execution
 	entrypointJSON, _ := database.MarshalStringSlice(request.Entrypoint)

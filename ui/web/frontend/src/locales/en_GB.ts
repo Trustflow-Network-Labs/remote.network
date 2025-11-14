@@ -170,6 +170,15 @@ export default {
       statusExecuting: 'Executing',
       statusCompleted: 'Completed',
       statusFailed: 'Failed',
+      // Workflow Executions
+      executions: 'Executions',
+      jobExecutions: 'Job Executions for',
+      executor: 'Executor',
+      ordering: 'Ordering Peer',
+      started: 'Started',
+      duration: 'Duration',
+      noExecutions: 'No executions found for this workflow',
+      executionsLoadError: 'Failed to load workflow executions',
       editor: {
         title: 'Workflow Editor',
         snapToGrid: 'Snap to Grid',

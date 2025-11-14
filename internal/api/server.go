@@ -423,6 +423,11 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			s.handleGetWorkflowJobs(w, r)
 			return
 		}
+		// Check if it's an executions request
+		if strings.HasSuffix(r.URL.Path, "/executions") {
+			s.handleGetWorkflowExecutions(w, r)
+			return
+		}
 		// Check if it's a nodes request
 		if strings.Contains(r.URL.Path, "/nodes") {
 			if strings.HasSuffix(r.URL.Path, "/gui-props") {

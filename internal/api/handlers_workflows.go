@@ -302,3 +302,38 @@ func (s *APIServer) handleGetWorkflowJobs(w http.ResponseWriter, r *http.Request
 		"total": len(jobs),
 	})
 }
+
+// handleGetWorkflowExecutions returns all job executions for a workflow
+func (s *APIServer) handleGetWorkflowExecutions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract workflow ID from path (/api/workflows/:id/executions)
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 4 || parts[3] != "executions" {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid workflow ID", http.StatusBadRequest)
+		return
+	}
+
+	executions, err := s.dbManager.GetJobExecutionsByWorkflowID(id)
+	if err != nil {
+		s.logger.Error("Failed to get workflow executions", "api")
+		http.Error(w, "Failed to retrieve workflow executions", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"executions": executions,
+		"total":      len(executions),
+	})
+}

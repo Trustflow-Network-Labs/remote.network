@@ -597,6 +597,69 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowJob(workflowJobID int64) ([]*
 	return jobs, nil
 }
 
+// GetJobExecutionsByWorkflowID retrieves all job executions for a workflow
+// This joins workflow_jobs and job_executions to get all executions for all jobs in a workflow
+func (sm *SQLiteManager) GetJobExecutionsByWorkflowID(workflowID int64) ([]*JobExecution, error) {
+	rows, err := sm.db.Query(`
+		SELECT
+			je.id, je.workflow_job_id, je.service_id, je.executor_peer_id, je.ordering_peer_id,
+			je.status, je.entrypoint, je.commands, je.execution_constraint, je.constraint_detail,
+			je.started_at, je.ended_at, je.error_message, je.created_at, je.updated_at
+		FROM job_executions je
+		INNER JOIN workflow_jobs wj ON je.workflow_job_id = wj.id
+		WHERE wj.workflow_id = ?
+		ORDER BY je.created_at DESC
+	`, workflowID)
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to get job executions for workflow: %v", err), "database")
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []*JobExecution
+	for rows.Next() {
+		var job JobExecution
+		var startedAt, endedAt sql.NullTime
+		var errorMsg sql.NullString
+
+		err := rows.Scan(
+			&job.ID,
+			&job.WorkflowJobID,
+			&job.ServiceID,
+			&job.ExecutorPeerID,
+			&job.OrderingPeerID,
+			&job.Status,
+			&job.Entrypoint,
+			&job.Commands,
+			&job.ExecutionConstraint,
+			&job.ConstraintDetail,
+			&startedAt,
+			&endedAt,
+			&errorMsg,
+			&job.CreatedAt,
+			&job.UpdatedAt,
+		)
+		if err != nil {
+			sm.logger.Error(fmt.Sprintf("Failed to scan job execution: %v", err), "database")
+			continue
+		}
+
+		if startedAt.Valid {
+			job.StartedAt = startedAt.Time
+		}
+		if endedAt.Valid {
+			job.EndedAt = endedAt.Time
+		}
+		if errorMsg.Valid {
+			job.ErrorMessage = errorMsg.String
+		}
+
+		jobs = append(jobs, &job)
+	}
+
+	return jobs, nil
+}
+
 // Helper function to marshal string slices to JSON
 func MarshalStringSlice(slice []string) (string, error) {
 	if slice == nil {

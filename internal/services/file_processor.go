@@ -266,7 +266,7 @@ func (fp *FileProcessor) generateEncryptionKey() (passphrase string, keyData []b
 	return passphrase, fullKeyData, nil
 }
 
-// encryptFile encrypts a file using AES-256-GCM
+// encryptFile encrypts a file using AES-256-GCM with streaming (memory-efficient for all file sizes)
 func (fp *FileProcessor) encryptFile(inputPath, outputPath string, keyData []byte) error {
 	// Extract salt and derive key
 	if len(keyData) < 48 {
@@ -276,11 +276,25 @@ func (fp *FileProcessor) encryptFile(inputPath, outputPath string, keyData []byt
 	// Key data format: [16 bytes salt][32 bytes key]
 	key := keyData[16:48]
 
-	// Read input file
-	plaintext, err := os.ReadFile(inputPath)
+	// Use streaming encryption for all files (consistent format, memory-efficient)
+	return fp.encryptFileStreaming(inputPath, outputPath, key)
+}
+
+// encryptFileStreaming encrypts a file in chunks (memory-efficient for all file sizes)
+func (fp *FileProcessor) encryptFileStreaming(inputPath, outputPath string, key []byte) error {
+	// Open input file
+	inputFile, err := os.Open(inputPath)
 	if err != nil {
-		return fmt.Errorf("failed to read input file: %w", err)
+		return fmt.Errorf("failed to open input file: %w", err)
 	}
+	defer inputFile.Close()
+
+	// Create output file
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
 
 	// Create AES cipher
 	block, err := aes.NewCipher(key)
@@ -300,18 +314,47 @@ func (fp *FileProcessor) encryptFile(inputPath, outputPath string, keyData []byt
 		return fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	// Encrypt data
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+	// Write nonce to output file first
+	if _, err := outputFile.Write(nonce); err != nil {
+		return fmt.Errorf("failed to write nonce: %w", err)
+	}
 
-	// Write encrypted data to output file
-	if err := os.WriteFile(outputPath, ciphertext, 0644); err != nil {
-		return fmt.Errorf("failed to write encrypted file: %w", err)
+	// Encrypt file in chunks (64KB chunks for streaming)
+	const chunkSize = 64 * 1024 // 64KB chunks
+	buffer := make([]byte, chunkSize)
+	counter := uint64(0) // Counter for GCM nonce variation
+
+	for {
+		n, err := inputFile.Read(buffer)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read chunk: %w", err)
+		}
+		if n == 0 {
+			break
+		}
+
+		// Create unique nonce for this chunk by XORing with counter
+		chunkNonce := make([]byte, len(nonce))
+		copy(chunkNonce, nonce)
+		for i := 0; i < 8 && i < len(chunkNonce); i++ {
+			chunkNonce[i] ^= byte(counter >> (i * 8))
+		}
+
+		// Encrypt chunk
+		cipherChunk := gcm.Seal(nil, chunkNonce, buffer[:n], nil)
+
+		// Write encrypted chunk to output
+		if _, err := outputFile.Write(cipherChunk); err != nil {
+			return fmt.Errorf("failed to write encrypted chunk: %w", err)
+		}
+
+		counter++
 	}
 
 	return nil
 }
 
-// DecryptFile decrypts a file using AES-256-GCM
+// DecryptFile decrypts a file using AES-256-GCM (backward compatible with old format)
 func (fp *FileProcessor) DecryptFile(encryptedPath, outputPath string, passphrase string) error {
 	// Get service ID from path (extract from filename)
 	// This is a simplified approach - in production, you'd pass serviceID as parameter
@@ -347,6 +390,19 @@ func (fp *FileProcessor) DecryptFile(encryptedPath, outputPath string, passphras
 	}
 	key := keyData[16:48]
 
+	// Try streaming decryption first (all new files use this format)
+	err = fp.decryptFileStreaming(encryptedPath, outputPath, key)
+	if err == nil {
+		return nil
+	}
+
+	// Fall back to in-memory decryption for old files encrypted before streaming format
+	fp.logger.Warn("Streaming decryption failed, trying legacy in-memory decryption format", "file_processor")
+	return fp.decryptFileInMemory(encryptedPath, outputPath, key)
+}
+
+// decryptFileInMemory decrypts a small file entirely in memory
+func (fp *FileProcessor) decryptFileInMemory(encryptedPath, outputPath string, key []byte) error {
 	// Read encrypted file
 	ciphertext, err := os.ReadFile(encryptedPath)
 	if err != nil {
@@ -381,6 +437,80 @@ func (fp *FileProcessor) DecryptFile(encryptedPath, outputPath string, passphras
 	// Write decrypted data to output file
 	if err := os.WriteFile(outputPath, plaintext, 0644); err != nil {
 		return fmt.Errorf("failed to write decrypted file: %w", err)
+	}
+
+	return nil
+}
+
+// decryptFileStreaming decrypts a large file in chunks
+func (fp *FileProcessor) decryptFileStreaming(encryptedPath, outputPath string, key []byte) error {
+	// Open encrypted file
+	encryptedFile, err := os.Open(encryptedPath)
+	if err != nil {
+		return fmt.Errorf("failed to open encrypted file: %w", err)
+	}
+	defer encryptedFile.Close()
+
+	// Create output file
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	// Create AES cipher
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	// Read base nonce from file
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(encryptedFile, nonce); err != nil {
+		return fmt.Errorf("failed to read nonce: %w", err)
+	}
+
+	// Decrypt file in chunks
+	const chunkSize = 64 * 1024 // 64KB plaintext chunks
+	gcmOverhead := gcm.Overhead() // GCM adds 16 bytes per chunk
+	encryptedChunkSize := chunkSize + gcmOverhead
+	buffer := make([]byte, encryptedChunkSize)
+	counter := uint64(0)
+
+	for {
+		n, err := encryptedFile.Read(buffer)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read encrypted chunk: %w", err)
+		}
+		if n == 0 {
+			break
+		}
+
+		// Create unique nonce for this chunk (same as encryption)
+		chunkNonce := make([]byte, len(nonce))
+		copy(chunkNonce, nonce)
+		for i := 0; i < 8 && i < len(chunkNonce); i++ {
+			chunkNonce[i] ^= byte(counter >> (i * 8))
+		}
+
+		// Decrypt chunk
+		plainChunk, err := gcm.Open(nil, chunkNonce, buffer[:n], nil)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt chunk %d: %w", counter, err)
+		}
+
+		// Write decrypted chunk to output
+		if _, err := outputFile.Write(plainChunk); err != nil {
+			return fmt.Errorf("failed to write decrypted chunk: %w", err)
+		}
+
+		counter++
 	}
 
 	return nil
