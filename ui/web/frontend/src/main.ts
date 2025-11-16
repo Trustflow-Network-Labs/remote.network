@@ -63,7 +63,6 @@ const connectionStore = useConnectionStore()
 api.setBaseURL(connectionStore.nodeEndpoint)
 
 if (authStore.isAuthenticated && authStore.token) {
-  console.log('[Main] User already authenticated, initializing WebSocket')
   initializeWebSocket(connectionStore.nodeEndpoint, authStore.token)
 }
 

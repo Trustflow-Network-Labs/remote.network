@@ -3,7 +3,6 @@ export function useClipboard() {
     try {
       if (navigator.clipboard) {
         await navigator.clipboard.writeText(text)
-        console.log('Copied!')
         return true
       } else {
         // Fallback for older browsers

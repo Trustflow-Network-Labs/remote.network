@@ -76,12 +76,10 @@ export class WebSocketService {
   // Connect to WebSocket server
   public connect(): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      console.log('[WebSocket] Already connected')
       return
     }
 
     if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
-      console.log('[WebSocket] Connection in progress')
       return
     }
 
@@ -91,8 +89,6 @@ export class WebSocketService {
     // Build WebSocket URL with token
     const wsUrl = this.baseUrl.replace('http://', 'ws://').replace('https://', 'wss://')
     const url = `${wsUrl}/api/ws?token=${encodeURIComponent(this.token)}`
-
-    console.log('[WebSocket] Connecting to:', wsUrl + '/api/ws')
 
     try {
       this.ws = new WebSocket(url)
@@ -109,7 +105,6 @@ export class WebSocketService {
 
   // Disconnect from WebSocket server
   public disconnect(): void {
-    console.log('[WebSocket] Disconnecting')
 
     // Clear reconnect timer
     if (this.reconnectTimer) {
@@ -172,7 +167,6 @@ export class WebSocketService {
 
   // Handle WebSocket open event
   private onOpen(): void {
-    console.log('[WebSocket] Connected')
     this.connectionState.value = ConnectionState.CONNECTED
     this.reconnecting.value = false
     this.reconnectAttempts = 0
@@ -191,7 +185,6 @@ export class WebSocketService {
 
       // Handle control messages
       if (message.type === MessageType.CONNECTED) {
-        console.log('[WebSocket] Server confirmed connection:', message.payload)
         return
       }
 
@@ -231,7 +224,6 @@ export class WebSocketService {
 
   // Handle WebSocket close event
   private onClose(event: CloseEvent): void {
-    console.log(`[WebSocket] Closed (code: ${event.code}, reason: ${event.reason})`)
 
     // Clear ping timer
     if (this.pingTimer) {
@@ -275,7 +267,7 @@ export class WebSocketService {
       this.maxReconnectDelay
     )
 
-    console.log(
+    console.warn(
       `[WebSocket] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`
     )
 

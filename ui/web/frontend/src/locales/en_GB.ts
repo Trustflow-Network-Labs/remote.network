@@ -196,6 +196,7 @@ export default {
       addDataService: 'Add Data Service',
       addLocalService: 'Add Local Service',
       searchRemoteService: 'Search Remote Service',
+      searchingRemoteServices: 'Searching remote services...',
       edit: 'Edit Service',
       delete: 'Delete Service',
       type: 'Service Type',

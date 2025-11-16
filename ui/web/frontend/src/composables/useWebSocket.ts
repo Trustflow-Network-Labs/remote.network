@@ -56,7 +56,6 @@ export function useWebSocketConnection(baseUrl: string, token: string | null) {
 
   onMounted(() => {
     if (token) {
-      console.log('[useWebSocketConnection] Initializing WebSocket connection')
       service = initializeWebSocket(baseUrl, token)
     } else {
       console.warn('[useWebSocketConnection] No token available, skipping WebSocket connection')

@@ -1276,26 +1276,27 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 	// Determine if hierarchicalPath is a directory (ends with separator) or a file
 	isDir := strings.HasSuffix(hierarchicalPath, string(os.PathSeparator))
 
-	var resolvedPath string
+	// Create the destination directory
+	var extractDir string
 	if isDir {
-		// Create directory
-		if err := os.MkdirAll(hierarchicalPath, 0755); err != nil {
+		// hierarchicalPath is the extraction directory (e.g., input/)
+		extractDir = hierarchicalPath
+		if err := os.MkdirAll(extractDir, 0755); err != nil {
 			return fmt.Errorf("failed to create destination directory: %v", err)
 		}
-		// Save file inside directory with source filename
-		resolvedPath = filepath.Join(hierarchicalPath, filepath.Base(filePath))
-		dsw.logger.Info(fmt.Sprintf("Target is directory, saving file as: %s", resolvedPath), "data_worker")
+		dsw.logger.Info(fmt.Sprintf("Extracting to directory: %s", extractDir), "data_worker")
 	} else {
-		// Create parent directory
-		destDir := filepath.Dir(hierarchicalPath)
-		if err := os.MkdirAll(destDir, 0755); err != nil {
+		// hierarchicalPath is a file path - extract to parent directory
+		extractDir = filepath.Dir(hierarchicalPath)
+		if err := os.MkdirAll(extractDir, 0755); err != nil {
 			return fmt.Errorf("failed to create parent directory: %v", err)
 		}
-		resolvedPath = hierarchicalPath
+		dsw.logger.Info(fmt.Sprintf("Extracting to parent directory: %s", extractDir), "data_worker")
 	}
 
-	// Copy the encrypted file to a temporary location first
-	tempFile := resolvedPath + ".encrypted.tmp"
+	// Use a temp file in the extraction directory for processing
+	// This matches the remote transfer behavior where the archive is in the same dir
+	tempFile := filepath.Join(extractDir, filepath.Base(filePath)) + ".tmp"
 	if err := dsw.copyFile(filePath, tempFile); err != nil {
 		return fmt.Errorf("failed to copy file: %v", err)
 	}
@@ -1327,22 +1328,24 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 			return fmt.Errorf("decryption failed: %v", err)
 		}
 
-		// After decryption, the file extension changes from .encrypted.tmp to .tmp
-		decryptedFile = resolvedPath + ".tmp"
-		dsw.logger.Info(fmt.Sprintf("File decrypted to %s", decryptedFile), "data_worker")
+		// decryptFile decrypts in place - file is still at tempFile
+		decryptedFile = tempFile
+		dsw.logger.Info(fmt.Sprintf("File decrypted in place at %s", decryptedFile), "data_worker")
 	} else {
-		// No encryption, just rename
+		// No encryption
 		decryptedFile = tempFile
 	}
 	defer os.Remove(decryptedFile) // Clean up decrypted temp file
 
 	// Decompress file (it's a tar.gz archive)
-	dsw.logger.Info(fmt.Sprintf("Decompressing file to %s", resolvedPath), "data_worker")
-	if err := utils.Decompress(decryptedFile, resolvedPath); err != nil {
+	// Extract directly to the extraction directory (e.g., input/)
+	// This matches remote transfer behavior where files are extracted directly without a containing folder
+	dsw.logger.Info(fmt.Sprintf("Decompressing file to %s", extractDir), "data_worker")
+	if err := utils.Decompress(decryptedFile, extractDir); err != nil {
 		return fmt.Errorf("decompression failed: %v", err)
 	}
 
-	dsw.logger.Info(fmt.Sprintf("Local data transfer completed successfully for job %d", jobExecutionID), "data_worker")
+	dsw.logger.Info(fmt.Sprintf("Local data transfer completed successfully for job %d to %s", jobExecutionID, extractDir), "data_worker")
 	return nil
 }
 

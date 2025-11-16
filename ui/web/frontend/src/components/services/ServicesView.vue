@@ -187,12 +187,13 @@
             </div>
           </div>
 
-          <div v-if="servicesStore.remoteLoading" class="loading">
+          <div v-if="servicesStore.remoteLoading && servicesStore.remoteServices.length === 0" class="loading">
             <ProgressSpinner style="width:50px;height:50px" strokeWidth="4" />
+            <p style="margin-top: 1rem;">{{ $t('message.services.searchingRemoteServices') }}</p>
           </div>
 
           <DataTable
-            v-else
+            v-if="servicesStore.remoteServices.length > 0"
             :value="servicesStore.remoteServices"
             :paginator="servicesStore.remoteServices.length > 10"
             :rows="10"
@@ -699,9 +700,11 @@ onMounted(async () => {
 
 .loading {
   display: flex;
+  flex-direction: column;
   justify-content: center;
   align-items: center;
   padding: vars.$spacing-xl;
+  text-align: center;
 }
 
 .empty-state {

@@ -127,27 +127,20 @@ async function handleEd25519File(event: Event) {
 
   try {
     // Load private key from file
-    console.log('Loading private key from file...')
     const privateKeyHex = await loadPrivateKeyFromFile(file)
-    console.log('Private key loaded, length:', privateKeyHex.length)
 
     // Authenticate with Ed25519
-    console.log('Authenticating with Ed25519...')
     const result = await authenticateEd25519(privateKeyHex)
-    console.log('Auth result:', result)
 
     if (result.success && result.token && result.peer_id) {
-      console.log('Authentication successful, updating store and redirecting...')
       // Update auth store
       authStore.setAuth(result.token, '', result.peer_id, 'ed25519')
 
       // Initialize WebSocket connection
       initializeWebSocket(connectionStore.nodeEndpoint, result.token)
-      console.log('WebSocket initialized')
 
       // Redirect to dashboard
       await router.push('/dashboard')
-      console.log('Redirected to dashboard')
     } else {
       console.error('Auth failed:', result.error)
       error.value = result.error || t('message.auth.authenticationFailed')

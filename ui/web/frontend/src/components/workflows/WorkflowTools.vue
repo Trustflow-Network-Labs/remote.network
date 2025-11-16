@@ -125,13 +125,14 @@
             />
           </div>
 
-          <div class="separator">{{ $t('message.workflows.servicesFound') }}:</div>
-
-          <div v-if="servicesStore.remoteLoading" class="loading">
-            <ProgressSpinner style="width:30px;height:30px" strokeWidth="4" />
+          <div class="separator">
+            {{ $t('message.workflows.servicesFound') }}:
+            <span v-if="servicesStore.remoteLoading" style="margin-left: 0.5rem;">
+              <ProgressSpinner style="width:20px;height:20px" strokeWidth="6" />
+            </span>
           </div>
 
-          <div v-else class="service-offers">
+          <div class="service-offers">
             <div
               v-for="service in filteredServices"
               :key="service.id"
@@ -250,12 +251,16 @@ const peerOptions = computed(() => {
   return options
 })
 
-// Combined services: local + remote from WebSocket search
+// Combined services: remote from WebSocket search (already includes local services)
 const filteredServices = computed(() => {
-  const combined = []
+  // Remote services from WebSocket search already include local services
+  // Backend sends local services immediately as part of search results
+  if (servicesStore.remoteServices && servicesStore.remoteServices.length > 0) {
+    return servicesStore.remoteServices
+  }
 
-  // Add local services (convert to RemoteService format with peer_id)
-  // Only include if local peer is selected or no specific peers selected
+  // Fallback: If no search has been performed, show local services only
+  // This handles the case when workflow editor first loads
   const includeLocal = selectedPeers.value.length === 0 ||
                        (authStore.peerId && selectedPeers.value.includes(authStore.peerId))
 
@@ -281,15 +286,10 @@ const filteredServices = computed(() => {
       )
     }
 
-    combined.push(...localServices)
+    return localServices
   }
 
-  // Add remote services from WebSocket search
-  if (servicesStore.remoteServices && servicesStore.remoteServices.length > 0) {
-    combined.push(...servicesStore.remoteServices)
-  }
-
-  return combined
+  return []
 })
 
 function toggleWorkflowDetails() {

@@ -101,14 +101,12 @@ export const useWorkflowsStore = defineStore('workflows', {
 
       try {
         const response = await api.getWorkflow(id)
-console.log(response)
         // Backend returns workflow directly for single workflow
         const workflow = response.workflow || response
         this.currentWorkflow = workflow
 
         // Fetch nodes for the workflow
         const nodesResponse = await api.getWorkflowNodes(id)
-console.log(nodesResponse)
         if (nodesResponse.nodes && this.currentWorkflow) {
           // Interfaces are already included in the workflow definition from remote service search
           // No need to query local database for each service - just use what's in the definition
@@ -136,7 +134,6 @@ console.log(nodesResponse)
             self_peer_y: 50
           }
         }
-console.log(this.currentWorkflow, this.currentUIState)
         return this.currentWorkflow
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
