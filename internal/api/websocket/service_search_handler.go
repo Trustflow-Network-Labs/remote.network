@@ -82,6 +82,98 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 		}).Info("Filtering search to specific peer IDs")
 	}
 
+	// Check if local services should be included in search results
+	// This happens when: (1) no peer filter (search all), or (2) localhost peer ID is in filter
+	var localServices []RemoteServiceInfo
+	includeLocalServices := peerIDFilter == nil || peerIDFilter[ssh.ourPeerID]
+
+	if includeLocalServices {
+		ssh.logger.WithField("our_peer_id", ssh.ourPeerID[:8]).Debug("Querying local services (localhost included in search)")
+
+		// Query local database for services
+		services, err := ssh.dbManager.GetAllServices()
+		if err != nil {
+			ssh.logger.WithError(err).Warn("Failed to query local services")
+		} else {
+			// Filter local services by criteria (query, type, status)
+			for _, service := range services {
+				// Apply activeOnly filter
+				if request.ActiveOnly && service.Status != "ACTIVE" {
+					continue
+				}
+
+				// Apply service type filter
+				if request.ServiceType != "" {
+					requestedTypes := strings.Split(request.ServiceType, ",")
+					matchesType := false
+					for _, t := range requestedTypes {
+						if strings.EqualFold(strings.TrimSpace(t), service.ServiceType) {
+							matchesType = true
+							break
+						}
+					}
+					if !matchesType {
+						continue
+					}
+				}
+
+				// Apply query filter (search in name and description)
+				if request.Query != "" {
+					queryLower := strings.ToLower(request.Query)
+					nameLower := strings.ToLower(service.Name)
+					descLower := strings.ToLower(service.Description)
+
+					if !strings.Contains(nameLower, queryLower) && !strings.Contains(descLower, queryLower) {
+						continue
+					}
+				}
+
+				// Get service interfaces
+				interfaces, err := ssh.dbManager.GetServiceInterfaces(service.ID)
+				var remoteInterfaces []RemoteServiceInterface
+				if err == nil && len(interfaces) > 0 {
+					remoteInterfaces = make([]RemoteServiceInterface, 0, len(interfaces))
+					for _, iface := range interfaces {
+						remoteInterfaces = append(remoteInterfaces, RemoteServiceInterface{
+							InterfaceType: iface.InterfaceType,
+							Path:          iface.Path,
+						})
+					}
+				}
+
+				// Convert to RemoteServiceInfo (local service but same format)
+				remoteService := RemoteServiceInfo{
+					ID:              service.ID,
+					Name:            service.Name,
+					Description:     service.Description,
+					ServiceType:     service.ServiceType,
+					Type:            service.Type,
+					Status:          service.Status,
+					PricingAmount:   service.PricingAmount,
+					PricingType:     service.PricingType,
+					PricingInterval: service.PricingInterval,
+					PricingUnit:     service.PricingUnit,
+					Capabilities:    service.Capabilities,
+					PeerID:          ssh.ourPeerID, // Mark as local service
+					Interfaces:      remoteInterfaces,
+				}
+
+				// Add data-specific fields for DATA services
+				if service.ServiceType == "DATA" {
+					dataDetails, err := ssh.dbManager.GetDataServiceDetails(service.ID)
+					if err == nil && dataDetails != nil {
+						remoteService.Hash = dataDetails.Hash
+						remoteService.SizeBytes = dataDetails.SizeBytes
+					}
+				}
+
+				localServices = append(localServices, remoteService)
+			}
+
+			ssh.logger.WithField("local_service_count", len(localServices)).Debug("Found matching local services")
+		}
+	}
+
 	// Build integrated query list: direct connections + relay-accessible NAT peers
 	type queryTarget struct {
 		peerAddr      string // For direct queries
@@ -133,6 +225,15 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 				"peer_id": peerID[:8],
 				"address": addr,
 			}).Debug("Skipping duplicate peer ID")
+			continue
+		}
+
+		// Skip localhost - local services are queried directly from database
+		if peerID == ssh.ourPeerID {
+			ssh.logger.WithFields(logrus.Fields{
+				"peer_id": peerID[:8],
+			}).Debug("Skipping localhost peer - services queried from local database")
+			peerIDsSeen[peerID] = true // Mark as seen to prevent duplicate processing
 			continue
 		}
 
@@ -231,6 +332,14 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 
 	// Process peers to check for relay accessibility or direct public connectivity
 	for _, peerID := range peersToCheckForRelay {
+		// Skip localhost - local services are queried directly from database
+		if peerID == ssh.ourPeerID {
+			ssh.logger.WithFields(logrus.Fields{
+				"peer_id": peerID[:8],
+			}).Debug("Skipping localhost peer from relay list - services queried from local database")
+			continue
+		}
+
 		// Check if this peer is already in the query target list
 		existingTargetIndex := -1
 		for i, target := range queryTargets {
@@ -500,6 +609,13 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 	unreachableCount := 0
 	fallbackCount := 0
 
+	// Send local services immediately if we have any
+	if len(localServices) > 0 {
+		ssh.logger.WithField("local_service_count", len(localServices)).Debug("Sending local services as first results")
+		ssh.sendPartialSearchResponse(client, localServices, false)
+		allServices = append(allServices, localServices...)
+	}
+
 	for i := 0; i < len(queryTargets); i++ {
 		select {
 		case result := <-results:
@@ -689,6 +805,23 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 			"peer_address": peerAddr,
 			"error":        err.Error(),
 		}).Warn("Failed to open stream for service query")
+
+		// Stream open failure often indicates a stale connection (connection exists locally
+		// but remote side has closed it, e.g., after relay reconnection). Clean it up to
+		// force fresh connection on next attempt.
+		ssh.logger.WithFields(logrus.Fields{
+			"peer_address": peerAddr,
+			"peer_id":      peerID,
+		}).Debug("Cleaning up potentially stale connection after stream open failure")
+
+		// Clean up stale connection to force fresh reconnection on retry
+		if cleanupErr := ssh.quicPeer.DisconnectFromPeer(peerAddr); cleanupErr != nil {
+			ssh.logger.WithFields(logrus.Fields{
+				"peer_address": peerAddr,
+				"error":        cleanupErr.Error(),
+			}).Debug("Connection cleanup completed (connection may have already been closed)")
+		}
+
 		return nil, fmt.Errorf("failed to open stream: %v", err)
 	}
 	defer stream.Close()
@@ -755,6 +888,19 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 		if servicePeerID == "" {
 			servicePeerID = peerAddr
 		}
+
+		// Convert interfaces from p2p format to API format
+		var interfaces []RemoteServiceInterface
+		if len(svc.Interfaces) > 0 {
+			interfaces = make([]RemoteServiceInterface, 0, len(svc.Interfaces))
+			for _, iface := range svc.Interfaces {
+				interfaces = append(interfaces, RemoteServiceInterface{
+					InterfaceType: iface.InterfaceType,
+					Path:          iface.Path,
+				})
+			}
+		}
+
 		services = append(services, RemoteServiceInfo{
 			ID:              svc.ID,
 			Name:            svc.Name,
@@ -770,6 +916,7 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 			Hash:            svc.Hash,
 			SizeBytes:       svc.SizeBytes,
 			PeerID:          servicePeerID,
+			Interfaces:      interfaces,
 		})
 	}
 
@@ -948,6 +1095,19 @@ func (ssh *ServiceSearchHandler) queryPeerViaRelay(ctx context.Context, targetPe
 	// Open stream with the parent context
 	stream, err := quicConn.OpenStreamSync(ctx)
 	if err != nil {
+		// Clean up stale connection after stream open failure
+		ssh.logger.WithFields(logrus.Fields{
+			"relay_addr": relayAddr,
+			"target_id":  targetPeerID[:8],
+		}).Debug("Cleaning up potentially stale relay connection after stream open failure")
+
+		if cleanupErr := ssh.quicPeer.DisconnectFromPeer(relayAddr); cleanupErr != nil {
+			ssh.logger.WithFields(logrus.Fields{
+				"relay_addr": relayAddr,
+				"error":      cleanupErr.Error(),
+			}).Debug("Relay connection cleanup completed")
+		}
+
 		return nil, fmt.Errorf("failed to open stream to relay: %v", err)
 	}
 	defer stream.Close()
@@ -1002,6 +1162,18 @@ func (ssh *ServiceSearchHandler) queryPeerViaRelay(ctx context.Context, targetPe
 	// Convert to RemoteServiceInfo
 	services := make([]RemoteServiceInfo, 0, len(searchResponse.Services))
 	for _, svc := range searchResponse.Services {
+		// Convert interfaces from p2p format to API format
+		var interfaces []RemoteServiceInterface
+		if len(svc.Interfaces) > 0 {
+			interfaces = make([]RemoteServiceInterface, 0, len(svc.Interfaces))
+			for _, iface := range svc.Interfaces {
+				interfaces = append(interfaces, RemoteServiceInterface{
+					InterfaceType: iface.InterfaceType,
+					Path:          iface.Path,
+				})
+			}
+		}
+
 		services = append(services, RemoteServiceInfo{
 			ID:              svc.ID,
 			Name:            svc.Name,
@@ -1017,6 +1189,7 @@ func (ssh *ServiceSearchHandler) queryPeerViaRelay(ctx context.Context, targetPe
 			Hash:            svc.Hash,
 			SizeBytes:       svc.SizeBytes,
 			PeerID:          targetPeerID,
+			Interfaces:      interfaces,
 		})
 	}
 
@@ -1090,6 +1263,23 @@ func (ssh *ServiceSearchHandler) queryPeerViaConnection(ctx context.Context, qui
 			"peer_id": peerID[:8],
 			"error":   err.Error(),
 		}).Warn("Failed to open stream on relay session connection")
+
+		// Stream open failure often indicates a stale connection (connection exists locally
+		// but remote side has closed it). Clean it up to force fresh connection on next attempt.
+		remoteAddr := quicConn.RemoteAddr().String()
+		ssh.logger.WithFields(logrus.Fields{
+			"peer_id":     peerID[:8],
+			"remote_addr": remoteAddr,
+		}).Debug("Cleaning up potentially stale relay session connection after stream open failure")
+
+		// Clean up stale connection to force fresh reconnection on retry
+		if cleanupErr := ssh.quicPeer.DisconnectFromPeer(remoteAddr); cleanupErr != nil {
+			ssh.logger.WithFields(logrus.Fields{
+				"remote_addr": remoteAddr,
+				"error":       cleanupErr.Error(),
+			}).Debug("Relay session connection cleanup completed (connection may have already been closed)")
+		}
+
 		return nil, fmt.Errorf("failed to open stream: %v", err)
 	}
 	defer stream.Close()
@@ -1148,6 +1338,18 @@ func (ssh *ServiceSearchHandler) queryPeerViaConnection(ctx context.Context, qui
 	// Convert to RemoteServiceInfo
 	services := make([]RemoteServiceInfo, 0, len(searchResponse.Services))
 	for _, svc := range searchResponse.Services {
+		// Convert interfaces from p2p format to API format
+		var interfaces []RemoteServiceInterface
+		if len(svc.Interfaces) > 0 {
+			interfaces = make([]RemoteServiceInterface, 0, len(svc.Interfaces))
+			for _, iface := range svc.Interfaces {
+				interfaces = append(interfaces, RemoteServiceInterface{
+					InterfaceType: iface.InterfaceType,
+					Path:          iface.Path,
+				})
+			}
+		}
+
 		services = append(services, RemoteServiceInfo{
 			ID:              svc.ID,
 			Name:            svc.Name,
@@ -1163,6 +1365,7 @@ func (ssh *ServiceSearchHandler) queryPeerViaConnection(ctx context.Context, qui
 			Hash:            svc.Hash,
 			SizeBytes:       svc.SizeBytes,
 			PeerID:          peerID, // Use peer ID for relay session queries
+			Interfaces:      interfaces,
 		})
 	}
 

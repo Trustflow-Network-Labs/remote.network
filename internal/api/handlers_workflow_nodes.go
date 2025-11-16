@@ -87,12 +87,19 @@ func (s *APIServer) handleGetWorkflowNodes(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	s.logger.Debug(fmt.Sprintf("Getting workflow nodes for workflow_id=%d", workflowID), "api")
+
+	// Get workflow nodes from the table (now includes interfaces)
+	// The workflow definition JSON is only built during execution via BuildWorkflowDefinition
+	// During editing, nodes are stored in workflow_nodes table
 	nodes, err := s.dbManager.GetWorkflowNodes(workflowID)
 	if err != nil {
 		s.logger.Error(fmt.Sprintf("Failed to get workflow nodes: %v", err), "api")
 		http.Error(w, "Failed to retrieve workflow nodes", http.StatusInternalServerError)
 		return
 	}
+
+	s.logger.Debug(fmt.Sprintf("Found %d workflow nodes for workflow_id=%d", len(nodes), workflowID), "api")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

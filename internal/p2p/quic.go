@@ -524,9 +524,14 @@ func (q *QUICPeer) handleConnection(conn *quic.Conn, remoteAddr string) {
 }
 
 func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
-	// Ensure stream is always closed when handler completes
-	// This is critical to prevent stream exhaustion (default QUIC limit: 100 concurrent streams)
-	defer stream.Close()
+	// Track whether stream should be closed when handler completes
+	// Some message types (relay receive streams, relay forwarding) keep streams open
+	shouldCloseStream := true
+	defer func() {
+		if shouldCloseStream {
+			stream.Close()
+		}
+	}()
 
 	q.logger.Debug(fmt.Sprintf("Handling stream from %s", remoteAddr), "quic")
 
@@ -621,14 +626,15 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		} else {
 			q.logger.Warn("Received relay_receive_stream_ready but relay mode is not enabled", "quic")
 		}
-		return // Don't close stream - it will be used for forwarding messages
+		shouldCloseStream = false // Keep stream open for forwarding messages
+		return
 	case MessageTypeRelayData:
 		q.handleRelayData(msg, remoteAddr, stream)
-		// Relay data is forwarded, stream managed by relay handler
+		shouldCloseStream = false // Stream managed by relay handler
 		return
 	case MessageTypeRelayForward:
 		q.handleRelayData(msg, remoteAddr, stream)
-		// Relay forward keeps stream open for response routing
+		shouldCloseStream = false // Keep stream open for response routing
 		return
 	case MessageTypeRelaySessionQuery:
 		response = q.handleRelaySessionQuery(msg, remoteAddr)
@@ -642,6 +648,7 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		} else {
 			q.logger.Warn("Received hole punch message but hole puncher is not initialized", "quic")
 		}
+		shouldCloseStream = false // HolePuncher manages stream lifecycle
 		return
 	case MessageTypeJobRequest, MessageTypeJobResponse, MessageTypeJobStatusUpdate,
 		MessageTypeJobDataTransferRequest, MessageTypeJobDataTransferResponse,
@@ -660,6 +667,7 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		} else {
 			q.logger.Warn("Received job message but job handler is not initialized", "quic")
 		}
+		shouldCloseStream = false // JobMessageHandler manages stream lifecycle
 		return
 	default:
 		q.logger.Warn(fmt.Sprintf("Unknown message type %s from %s", msg.Type, remoteAddr), "quic")

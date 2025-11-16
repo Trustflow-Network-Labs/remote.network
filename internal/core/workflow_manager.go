@@ -582,6 +582,16 @@ func (wm *WorkflowManager) verifyPeerServiceAvailability(peerID string, serviceI
 	ctx := context.WithValue(context.Background(), "timeout", 10*time.Second)
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
+		// Stream open failure often indicates a stale connection (connection exists locally
+		// but remote side has closed it). Clean it up to force fresh connection on next attempt.
+		peerAddr := conn.RemoteAddr().String()
+		wm.logger.Debug(fmt.Sprintf("Cleaning up potentially stale connection %s after stream open failure", peerAddr), "workflow_manager")
+
+		// Clean up stale connection to force fresh reconnection on retry
+		if cleanupErr := quicPeer.DisconnectFromPeer(peerAddr); cleanupErr != nil {
+			wm.logger.Debug(fmt.Sprintf("Connection cleanup completed for %s (connection may have already been closed)", peerAddr), "workflow_manager")
+		}
+
 		return false, fmt.Errorf("failed to open stream to peer: %v", err)
 	}
 	defer stream.Close()
@@ -649,6 +659,18 @@ func (wm *WorkflowManager) validateDataTransferConstraints(jobs []*types.Workflo
 		}
 
 		wm.logger.Debug(fmt.Sprintf("Validating data transfer constraints for DATA job '%s'", job.JobName), "workflow_manager")
+
+		// DATA services MUST have at least one STDOUT interface (they must transfer data somewhere)
+		hasStdout := false
+		for _, iface := range job.Interfaces {
+			if iface.Type == types.InterfaceTypeStdout {
+				hasStdout = true
+				break
+			}
+		}
+		if !hasStdout {
+			return fmt.Errorf("DATA job '%s' has no STDOUT interface - DATA services must transfer data to at least one destination", job.JobName)
+		}
 
 		// Check all STDOUT interfaces (where data goes)
 		for _, iface := range job.Interfaces {

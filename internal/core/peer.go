@@ -845,6 +845,19 @@ func (pm *PeerManager) InitializeJobSystem() error {
 		pm.logger.Info("JobHandler and PeerID set on DataServiceWorker", "core")
 	}
 
+	// Set up relay reconnection callback for transfer resumption
+	if pm.relayManager != nil {
+		pm.relayManager.SetRelayReconnectedCallback(func() {
+			pm.logger.Info("Relay reconnected - checking for active transfers to resume", "core")
+			pm.checkAndResumeActiveTransfers()
+		})
+		pm.logger.Info("Relay reconnection callback configured for transfer resumption", "core")
+	}
+
+	// Check for active transfers from previous session and attempt to resume them
+	pm.logger.Info("Checking for active transfers from previous session", "core")
+	pm.checkAndResumeActiveTransfers()
+
 	return nil
 }
 
@@ -986,6 +999,98 @@ func (pm *PeerManager) handleJobCancel(request *types.JobCancelRequest, peerID s
 		Cancelled:      false,
 		Message:        "job manager not initialized",
 	}, fmt.Errorf("job manager not initialized")
+}
+
+// checkAndResumeActiveTransfers checks for active transfers and resumes stalled ones
+func (pm *PeerManager) checkAndResumeActiveTransfers() {
+	// Get all active transfers from database
+	activeTransfers, err := pm.dbManager.GetActiveTransfers()
+	if err != nil {
+		pm.logger.Error(fmt.Sprintf("Failed to get active transfers: %v", err), "core")
+		return
+	}
+
+	if len(activeTransfers) == 0 {
+		pm.logger.Debug("No active transfers found", "core")
+		return
+	}
+
+	pm.logger.Info(fmt.Sprintf("Found %d active transfer(s) to potentially resume", len(activeTransfers)), "core")
+
+	// For each active sender transfer, check if we should resume
+	for _, transfer := range activeTransfers {
+		if transfer.Direction != "sender" {
+			pm.logger.Debug(fmt.Sprintf("Transfer %s is receiver-side, skipping (receiver is passive)", transfer.TransferID), "core")
+			continue // Only resume sender-side transfers (receiver is passive)
+		}
+
+		// Check if transfer is stalled (no activity for 30+ seconds)
+		if time.Since(transfer.LastActivity) < 30*time.Second {
+			pm.logger.Debug(fmt.Sprintf("Transfer %s is recent (last activity: %s ago), skipping",
+				transfer.TransferID, time.Since(transfer.LastActivity)), "core")
+			continue
+		}
+
+		pm.logger.Info(fmt.Sprintf("Found stalled transfer %s (last activity: %s ago, %d/%d chunks sent, %d acked)",
+			transfer.TransferID, time.Since(transfer.LastActivity), len(transfer.ChunksSent), transfer.TotalChunks, len(transfer.ChunksAcked)), "core")
+
+		// CRITICAL: Query DHT for fresh peer metadata before resuming
+		// NAT peers may have reconnected to different relay
+		pm.logger.Debug(fmt.Sprintf("Querying DHT for fresh metadata of peer %s before resuming transfer", transfer.DestinationPeerID[:8]), "core")
+
+		// Get peer's public key from known_peers
+		peer, err := pm.dbManager.KnownPeers.GetKnownPeer(transfer.DestinationPeerID, "")
+		if err != nil {
+			pm.logger.Error(fmt.Sprintf("Failed to get peer %s from known_peers: %v", transfer.DestinationPeerID[:8], err), "core")
+			// Mark very old transfers as failed
+			if time.Since(transfer.LastActivity) > 5*time.Minute {
+				pm.dbManager.FailTransfer(transfer.TransferID, fmt.Sprintf("Cannot get peer info: %v", err))
+			}
+			continue
+		}
+
+		// Fetch fresh metadata from DHT
+		metadata, err := pm.metadataFetcher.GetPeerMetadata(peer.PublicKey)
+		if err != nil {
+			pm.logger.Warn(fmt.Sprintf("Failed to fetch metadata for peer %s: %v", transfer.DestinationPeerID[:8], err), "core")
+			// Don't fail transfer yet - might just be temporary DHT issue
+			// Only fail if it's been >5 minutes
+			if time.Since(transfer.LastActivity) > 5*time.Minute {
+				pm.dbManager.FailTransfer(transfer.TransferID, fmt.Sprintf("Cannot fetch peer metadata: %v", err))
+			}
+			continue
+		}
+
+		// Check if peer is using relay and if relay changed
+		if metadata.NetworkInfo.UsingRelay {
+			pm.logger.Debug(fmt.Sprintf("Peer %s is using relay: %s (session: %s)",
+				transfer.DestinationPeerID[:8], metadata.NetworkInfo.ConnectedRelay[:8], metadata.NetworkInfo.RelaySessionID), "core")
+
+			// Note: We don't have the old relay session ID stored in transfer record
+			// But the connection attempt will use the fresh metadata, so it will work
+			pm.logger.Info(fmt.Sprintf("Peer %s relay info refreshed from DHT", transfer.DestinationPeerID[:8]), "core")
+		}
+
+		// Attempt to resume transfer
+		if pm.jobManager != nil && pm.jobManager.dataWorker != nil {
+			pm.logger.Info(fmt.Sprintf("Attempting to resume transfer %s to peer %s",
+				transfer.TransferID, transfer.DestinationPeerID[:8]), "core")
+
+			err := pm.jobManager.dataWorker.ResumeTransfer(transfer, metadata)
+			if err != nil {
+				pm.logger.Error(fmt.Sprintf("Failed to resume transfer %s: %v", transfer.TransferID, err), "core")
+
+				// Mark very old transfers as failed
+				if time.Since(transfer.LastActivity) > 5*time.Minute {
+					pm.dbManager.FailTransfer(transfer.TransferID, fmt.Sprintf("Resume failed: %v", err))
+				}
+			} else {
+				pm.logger.Info(fmt.Sprintf("Successfully initiated resume for transfer %s", transfer.TransferID), "core")
+			}
+		} else {
+			pm.logger.Warn("JobManager or DataWorker not available, cannot resume transfers", "core")
+		}
+	}
 }
 
 func (pm *PeerManager) Stop() error {

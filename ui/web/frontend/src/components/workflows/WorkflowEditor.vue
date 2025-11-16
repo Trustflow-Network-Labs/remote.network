@@ -272,6 +272,7 @@ async function addServiceToWorkflow(service: any, x: number, y: number) {
       order: serviceCards.value.length,
       gui_x: x,
       gui_y: y,
+      interfaces: service.interfaces || [], // Include service interfaces from remote service search
       pricing_amount: service.pricing_amount,
       pricing_type: service.pricing_type,
       pricing_interval: service.pricing_interval,

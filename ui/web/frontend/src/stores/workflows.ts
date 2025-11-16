@@ -101,28 +101,24 @@ export const useWorkflowsStore = defineStore('workflows', {
 
       try {
         const response = await api.getWorkflow(id)
+console.log(response)
         // Backend returns workflow directly for single workflow
         const workflow = response.workflow || response
         this.currentWorkflow = workflow
 
         // Fetch nodes for the workflow
         const nodesResponse = await api.getWorkflowNodes(id)
+console.log(nodesResponse)
         if (nodesResponse.nodes && this.currentWorkflow) {
-          // Fetch interfaces for each job
-          const jobsWithInterfaces = await Promise.all(
-            nodesResponse.nodes.map(async (node: WorkflowJob) => {
-              if (node.service_id) {
-                try {
-                  const interfacesResponse = await api.getServiceInterfaces(node.service_id)
-                  node.interfaces = interfacesResponse.interfaces || []
-                } catch (interfaceError) {
-                  node.interfaces = []
-                }
-              }
-              return node
-            })
-          )
-          this.currentWorkflow.jobs = jobsWithInterfaces
+          // Interfaces are already included in the workflow definition from remote service search
+          // No need to query local database for each service - just use what's in the definition
+          this.currentWorkflow.jobs = nodesResponse.nodes.map((node: WorkflowJob) => {
+            // Ensure interfaces array exists (fallback to empty array)
+            if (!node.interfaces) {
+              node.interfaces = []
+            }
+            return node
+          })
         }
 
         // Fetch UI state
@@ -140,8 +136,8 @@ export const useWorkflowsStore = defineStore('workflows', {
             self_peer_y: 50
           }
         }
-
-        return workflow
+console.log(this.currentWorkflow, this.currentUIState)
+        return this.currentWorkflow
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
         throw error
@@ -205,14 +201,10 @@ export const useWorkflowsStore = defineStore('workflows', {
         const response = await api.addWorkflowNode(workflowId, job)
         const node = response.node || response
 
-        // Fetch service interfaces for the job
-        if (node.service_id) {
-          try {
-            const interfacesResponse = await api.getServiceInterfaces(node.service_id)
-            node.interfaces = interfacesResponse.interfaces || []
-          } catch (interfaceError) {
-            node.interfaces = []
-          }
+        // Interfaces should already be included in the job from service search
+        // If not present, initialize empty array
+        if (!node.interfaces) {
+          node.interfaces = []
         }
 
         if (this.currentWorkflow?.id === workflowId) {

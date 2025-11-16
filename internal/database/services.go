@@ -22,9 +22,10 @@ type OfferedService struct {
 	PricingType     string                 `json:"pricing_type"`     // "ONE_TIME", "RECURRING"
 	PricingInterval int                    `json:"pricing_interval"` // number of units
 	PricingUnit     string                 `json:"pricing_unit"`     // "SECONDS", "MINUTES", "HOURS", "DAYS", "WEEKS", "MONTHS", "YEARS"
-	Pricing         float64                `json:"pricing"`          // Legacy field for backwards compatibility
-	CreatedAt       time.Time              `json:"created_at"`
-	UpdatedAt       time.Time              `json:"updated_at"`
+	Pricing         float64                 `json:"pricing"`          // Legacy field for backwards compatibility
+	CreatedAt       time.Time               `json:"created_at"`
+	UpdatedAt       time.Time               `json:"updated_at"`
+	Interfaces      []*ServiceInterface     `json:"interfaces,omitempty" db:"-"` // Service interfaces (populated on demand, not stored in services table)
 }
 
 // ServiceInterface represents an available interface (STDIN, STDOUT, MOUNT) for a service

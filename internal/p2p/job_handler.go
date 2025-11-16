@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -106,6 +107,15 @@ func (jmh *JobMessageHandler) HandleJobMessage(msg *QUICMessage, stream *quic.St
 	case MessageTypeJobDataTransferComplete:
 		return jmh.handleJobDataTransferComplete(msg, stream, peerID)
 
+	case MessageTypeJobDataChunkAck:
+		return jmh.handleJobDataChunkAck(msg, stream, peerID)
+
+	case MessageTypeJobDataTransferResume:
+		return jmh.handleJobDataTransferResume(msg, stream, peerID)
+
+	case MessageTypeJobDataTransferStall:
+		return jmh.handleJobDataTransferStall(msg, stream, peerID)
+
 	case MessageTypeJobCancel:
 		return jmh.handleJobCancel(msg, stream, peerID)
 
@@ -152,6 +162,24 @@ func (jmh *JobMessageHandler) HandleRelayedJobMessage(msg *QUICMessage, sourcePe
 	case MessageTypeJobDataTransferComplete:
 		if err := jmh.handleJobDataTransferComplete(msg, nil, sourcePeerID); err != nil {
 			jmh.logger.Error(fmt.Sprintf("Failed to handle relayed transfer complete: %v", err), "job_handler")
+		}
+		return nil
+
+	case MessageTypeJobDataChunkAck:
+		if err := jmh.handleJobDataChunkAck(msg, nil, sourcePeerID); err != nil {
+			jmh.logger.Error(fmt.Sprintf("Failed to handle relayed chunk ack: %v", err), "job_handler")
+		}
+		return nil
+
+	case MessageTypeJobDataTransferResume:
+		if err := jmh.handleJobDataTransferResume(msg, nil, sourcePeerID); err != nil {
+			jmh.logger.Error(fmt.Sprintf("Failed to handle relayed transfer resume: %v", err), "job_handler")
+		}
+		return nil
+
+	case MessageTypeJobDataTransferStall:
+		if err := jmh.handleJobDataTransferStall(msg, nil, sourcePeerID); err != nil {
+			jmh.logger.Error(fmt.Sprintf("Failed to handle relayed transfer stall: %v", err), "job_handler")
 		}
 		return nil
 
@@ -533,6 +561,131 @@ func (jmh *JobMessageHandler) handleJobDataTransferComplete(msg *QUICMessage, _ 
 	return nil
 }
 
+// handleJobDataChunkAck handles incoming chunk acknowledgments from receiver
+func (jmh *JobMessageHandler) handleJobDataChunkAck(msg *QUICMessage, _ *quic.Stream, peerID string) error {
+	var ack types.JobDataChunkAck
+	if err := msg.GetDataAs(&ack); err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse chunk ACK: %v", err), "job_handler")
+		return err
+	}
+
+	jmh.logger.Debug(fmt.Sprintf("Received chunk ACK from peer %s for transfer %s (%d chunks)",
+		peerID, ack.TransferID, len(ack.ChunkIndexes)), "job_handler")
+
+	// Get current transfer state from database
+	transfer, err := jmh.dbManager.GetTransferByID(ack.TransferID)
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to get transfer %s: %v", ack.TransferID, err), "job_handler")
+		return err
+	}
+
+	// Merge new ACKed chunks with existing ones
+	ackedMap := make(map[int]bool)
+	for _, idx := range transfer.ChunksAcked {
+		ackedMap[idx] = true
+	}
+	for _, idx := range ack.ChunkIndexes {
+		ackedMap[idx] = true
+	}
+
+	// Convert back to slice
+	ackedList := make([]int, 0, len(ackedMap))
+	for idx := range ackedMap {
+		ackedList = append(ackedList, idx)
+	}
+
+	// Update database with new ACKed chunks
+	err = jmh.dbManager.UpdateTransferProgress(ack.TransferID, transfer.ChunksSent, transfer.ChunksReceived, ackedList, transfer.BytesTransferred)
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to update transfer progress: %v", err), "job_handler")
+		return err
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Updated transfer %s: %d chunks acked (total: %d/%d)",
+		ack.TransferID, len(ack.ChunkIndexes), len(ackedList), transfer.TotalChunks), "job_handler")
+
+	return nil
+}
+
+// handleJobDataTransferResume handles incoming transfer resume requests from receiver
+func (jmh *JobMessageHandler) handleJobDataTransferResume(msg *QUICMessage, _ *quic.Stream, peerID string) error {
+	var resume types.JobDataTransferResume
+	if err := msg.GetDataAs(&resume); err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse transfer resume request: %v", err), "job_handler")
+		return err
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Received transfer resume request from peer %s for transfer %s (last known chunk: %d, %d chunks received)",
+		peerID, resume.TransferID, resume.LastKnownChunk, len(resume.ReceivedChunks)), "job_handler")
+
+	// Get transfer from database
+	transfer, err := jmh.dbManager.GetTransferByID(resume.TransferID)
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to get transfer %s: %v", resume.TransferID, err), "job_handler")
+		return err
+	}
+
+	// Verify this is our transfer (we're the sender)
+	if transfer.Direction != "sender" || transfer.SourcePeerID != jmh.ourPeerID {
+		jmh.logger.Warn(fmt.Sprintf("Resume request for transfer %s, but we're not the sender", resume.TransferID), "job_handler")
+		return fmt.Errorf("not the sender for this transfer")
+	}
+
+	// Calculate missing chunks (chunks receiver hasn't received yet)
+	receivedMap := make(map[int]bool)
+	for _, idx := range resume.ReceivedChunks {
+		receivedMap[idx] = true
+	}
+
+	missingChunks := make([]int, 0)
+	for i := 0; i < transfer.TotalChunks; i++ {
+		if !receivedMap[i] {
+			missingChunks = append(missingChunks, i)
+		}
+	}
+
+	if len(missingChunks) == 0 {
+		jmh.logger.Info(fmt.Sprintf("Transfer %s: receiver has all chunks, no resume needed", resume.TransferID), "job_handler")
+		return nil
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Transfer %s: receiver is missing %d/%d chunks, will resend them",
+		resume.TransferID, len(missingChunks), transfer.TotalChunks), "job_handler")
+
+	// Note: We log the resume request but don't resend chunks here directly
+	// The actual resumption will be handled by the periodic checkAndResumeActiveTransfers()
+	// which already has the proper logic for reading files and resending chunks
+
+	// Update the transfer's received chunks based on what the receiver told us
+	// This helps the automatic resumption logic know what to skip
+	err = jmh.dbManager.UpdateTransferProgress(resume.TransferID, transfer.ChunksSent, resume.ReceivedChunks, transfer.ChunksAcked, transfer.BytesTransferred)
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to update transfer progress with receiver state: %v", err), "job_handler")
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Updated transfer %s state with receiver's chunk list, automatic resumption will handle resending", resume.TransferID), "job_handler")
+
+	return nil
+}
+
+// handleJobDataTransferStall handles incoming transfer stall notifications from receiver
+func (jmh *JobMessageHandler) handleJobDataTransferStall(msg *QUICMessage, _ *quic.Stream, peerID string) error {
+	var stall types.JobDataTransferStall
+	if err := msg.GetDataAs(&stall); err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse transfer stall notification: %v", err), "job_handler")
+		return err
+	}
+
+	jmh.logger.Warn(fmt.Sprintf("Received transfer stall notification from peer %s for transfer %s: %s (last chunk sent: %d)",
+		peerID, stall.TransferID, stall.Reason, stall.LastChunkSent), "job_handler")
+
+	// TODO: Phase 3 - Implement sender-side stall handling
+	// This will trigger retry mechanism to resume sending
+	jmh.logger.Warn(fmt.Sprintf("Transfer stall handler not yet implemented (transfer %s)", stall.TransferID), "job_handler")
+
+	return nil
+}
+
 // handleJobCancel handles incoming job cancellation requests
 func (jmh *JobMessageHandler) handleJobCancel(msg *QUICMessage, stream *quic.Stream, peerID string) error {
 	if jmh.onJobCancel == nil {
@@ -760,6 +913,73 @@ func (jmh *JobMessageHandler) SendJobDataTransferComplete(peerID string, complet
 	return nil
 }
 
+// SendJobDataChunkAck sends a chunk acknowledgment to a peer
+func (jmh *JobMessageHandler) SendJobDataChunkAck(peerID string, ack *types.JobDataChunkAck) error {
+	jmh.logger.Debug(fmt.Sprintf("Sending chunk ACK to peer %s for transfer %s (%d chunks)",
+		peerID, ack.TransferID, len(ack.ChunkIndexes)), "job_handler")
+
+	// Create message
+	msg := CreateJobDataChunkAck(ack)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to marshal chunk ACK: %v", err), "job_handler")
+		return err
+	}
+
+	// Try direct connection first, fallback to relay
+	err = jmh.quicPeer.SendMessageToPeer(peerID, msgBytes)
+	if err != nil {
+		return jmh.sendMessageViaRelay(peerID, msgBytes, "job_data_chunk_ack")
+	}
+
+	return nil
+}
+
+// SendJobDataTransferResume sends a transfer resume request to a peer
+func (jmh *JobMessageHandler) SendJobDataTransferResume(peerID string, resume *types.JobDataTransferResume) error {
+	jmh.logger.Info(fmt.Sprintf("Sending transfer resume request to peer %s for transfer %s (last known chunk: %d)",
+		peerID, resume.TransferID, resume.LastKnownChunk), "job_handler")
+
+	// Create message
+	msg := CreateJobDataTransferResume(resume)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to marshal transfer resume request: %v", err), "job_handler")
+		return err
+	}
+
+	// Try direct connection first, fallback to relay
+	err = jmh.quicPeer.SendMessageToPeer(peerID, msgBytes)
+	if err != nil {
+		return jmh.sendMessageViaRelay(peerID, msgBytes, "job_data_transfer_resume")
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Sent transfer resume request to peer %s for transfer %s", peerID, resume.TransferID), "job_handler")
+	return nil
+}
+
+// SendJobDataTransferStall sends a transfer stall notification to a peer
+func (jmh *JobMessageHandler) SendJobDataTransferStall(peerID string, stall *types.JobDataTransferStall) error {
+	jmh.logger.Warn(fmt.Sprintf("Sending transfer stall notification to peer %s for transfer %s: %s",
+		peerID, stall.TransferID, stall.Reason), "job_handler")
+
+	// Create message
+	msg := CreateJobDataTransferStall(stall)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to marshal transfer stall notification: %v", err), "job_handler")
+		return err
+	}
+
+	// Try direct connection first, fallback to relay
+	err = jmh.quicPeer.SendMessageToPeer(peerID, msgBytes)
+	if err != nil {
+		return jmh.sendMessageViaRelay(peerID, msgBytes, "job_data_transfer_stall")
+	}
+
+	return nil
+}
+
 // SendJobCancel sends a job cancellation request to a peer
 func (jmh *JobMessageHandler) SendJobCancel(peerID string, request *types.JobCancelRequest) (*types.JobCancelResponse, error) {
 	jmh.logger.Info(fmt.Sprintf("Sending job cancel request to peer %s for job %d", peerID, request.JobExecutionID), "job_handler")
@@ -846,15 +1066,15 @@ func (jmh *JobMessageHandler) sendDataTransferRequestViaRelay(peerID string, req
 }
 
 // getRelayInfo retrieves relay connection info for a peer with caching
-// Cache expires after 5 minutes to allow for session changes
+// Cache expires after 1 minute to quickly detect relay/session changes
 func (jmh *JobMessageHandler) getRelayInfo(peerID string) (relayAddress string, relaySessionID string, err error) {
 	// Check cache first
 	jmh.relayCacheMu.RLock()
 	cached, exists := jmh.relayCache[peerID]
 	jmh.relayCacheMu.RUnlock()
 
-	// Use cached data if it exists and is fresh (< 5 minutes old)
-	if exists && time.Since(cached.CachedAt) < 5*time.Minute {
+	// Use cached data if it exists and is fresh (< 1 minute old)
+	if exists && time.Since(cached.CachedAt) < 1*time.Minute {
 		jmh.logger.Debug(fmt.Sprintf("Using cached relay info for peer %s (age: %v)", peerID[:8], time.Since(cached.CachedAt)), "job_handler")
 		return cached.RelayAddress, cached.RelaySessionID, nil
 	}
@@ -901,6 +1121,18 @@ func (jmh *JobMessageHandler) getRelayInfo(peerID string) (relayAddress string, 
 	return metadata.NetworkInfo.RelayAddress, metadata.NetworkInfo.RelaySessionID, nil
 }
 
+// invalidateRelayCache invalidates cached relay info for a peer
+// This should be called when relay communication fails to force a fresh metadata query
+func (jmh *JobMessageHandler) invalidateRelayCache(peerID string) {
+	jmh.relayCacheMu.Lock()
+	defer jmh.relayCacheMu.Unlock()
+
+	if _, exists := jmh.relayCache[peerID]; exists {
+		delete(jmh.relayCache, peerID)
+		jmh.logger.Debug(fmt.Sprintf("Invalidated relay cache for peer %s", peerID[:8]), "job_handler")
+	}
+}
+
 // sendMessageViaRelay sends a one-way message via relay (no response expected)
 func (jmh *JobMessageHandler) sendMessageViaRelay(peerID string, messageBytes []byte, messageType string) error {
 	jmh.logger.Debug(fmt.Sprintf("Sending %s to peer %s via relay", messageType, peerID[:8]), "job_handler")
@@ -945,6 +1177,16 @@ func (jmh *JobMessageHandler) sendMessageViaRelay(peerID string, messageBytes []
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
+		// Stream open failure often indicates a stale connection (connection exists locally
+		// but remote side has closed it). Clean it up to force fresh connection on next attempt.
+		relayAddr := conn.RemoteAddr().String()
+		jmh.logger.Debug(fmt.Sprintf("Cleaning up potentially stale relay connection %s after stream open failure", relayAddr), "job_handler")
+
+		// Clean up stale connection to force fresh reconnection on retry
+		if cleanupErr := jmh.quicPeer.DisconnectFromPeer(relayAddr); cleanupErr != nil {
+			jmh.logger.Debug(fmt.Sprintf("Relay connection cleanup completed for %s (connection may have already been closed)", relayAddr), "job_handler")
+		}
+
 		return fmt.Errorf("failed to open stream to relay: %v", err)
 	}
 	defer stream.Close()
@@ -959,6 +1201,7 @@ func (jmh *JobMessageHandler) sendMessageViaRelay(peerID string, messageBytes []
 }
 
 // sendMessageWithResponseViaRelay sends a message via relay and waits for response
+// Automatically retries once with fresh relay metadata if the first attempt fails with timeout
 func (jmh *JobMessageHandler) sendMessageWithResponseViaRelay(peerID string, messageBytes []byte, messageType string) ([]byte, error) {
 	jmh.logger.Info(fmt.Sprintf("Sending %s to peer %s via relay", messageType, peerID[:8]), "job_handler")
 
@@ -967,6 +1210,55 @@ func (jmh *JobMessageHandler) sendMessageWithResponseViaRelay(peerID string, mes
 		return nil, fmt.Errorf("relay dependencies not set")
 	}
 
+	// Try sending with retry logic
+	response, err := jmh.trySendWithRetry(peerID, messageBytes, messageType)
+	return response, err
+}
+
+// trySendWithRetry attempts to send a message via relay with one retry on cache-related failures
+func (jmh *JobMessageHandler) trySendWithRetry(peerID string, messageBytes []byte, messageType string) ([]byte, error) {
+	// First attempt
+	response, err := jmh.doSendMessageWithResponse(peerID, messageBytes, messageType)
+	if err == nil {
+		return response, nil
+	}
+
+	// Check if error is related to stale relay info (deadline exceeded or connection issues)
+	if isRelayCacheError(err) {
+		jmh.logger.Info(fmt.Sprintf("Relay communication failed, invalidating cache and retrying for peer %s: %v", peerID[:8], err), "job_handler")
+
+		// Invalidate cache to force fresh metadata query
+		jmh.invalidateRelayCache(peerID)
+
+		// Retry once with fresh relay info
+		response, retryErr := jmh.doSendMessageWithResponse(peerID, messageBytes, messageType)
+		if retryErr == nil {
+			jmh.logger.Info(fmt.Sprintf("Retry successful for peer %s after cache invalidation", peerID[:8]), "job_handler")
+			return response, nil
+		}
+
+		// Both attempts failed
+		return nil, fmt.Errorf("failed after retry: %v", retryErr)
+	}
+
+	// Non-cache-related error, don't retry
+	return nil, err
+}
+
+// isRelayCacheError determines if an error is likely due to stale relay cache
+func isRelayCacheError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "deadline exceeded") ||
+	       strings.Contains(errStr, "no data received") ||
+	       strings.Contains(errStr, "connection reset") ||
+	       strings.Contains(errStr, "Application error")
+}
+
+// doSendMessageWithResponse performs the actual relay forward without retry logic
+func (jmh *JobMessageHandler) doSendMessageWithResponse(peerID string, messageBytes []byte, messageType string) ([]byte, error) {
 	// Get relay info with caching (avoids slow DHT queries)
 	relayAddress, relaySessionID, err := jmh.getRelayInfo(peerID)
 	if err != nil {
@@ -999,6 +1291,16 @@ func (jmh *JobMessageHandler) sendMessageWithResponseViaRelay(peerID string, mes
 	// Open stream
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
+		// Stream open failure often indicates a stale connection (connection exists locally
+		// but remote side has closed it). Clean it up to force fresh connection on next attempt.
+		relayAddr := conn.RemoteAddr().String()
+		jmh.logger.Debug(fmt.Sprintf("Cleaning up potentially stale relay connection %s after stream open failure", relayAddr), "job_handler")
+
+		// Clean up stale connection to force fresh reconnection on retry
+		if cleanupErr := jmh.quicPeer.DisconnectFromPeer(relayAddr); cleanupErr != nil {
+			jmh.logger.Debug(fmt.Sprintf("Relay connection cleanup completed for %s (connection may have already been closed)", relayAddr), "job_handler")
+		}
+
 		return nil, fmt.Errorf("failed to open stream to relay: %v", err)
 	}
 	defer stream.Close()
@@ -1039,6 +1341,7 @@ func (jmh *JobMessageHandler) sendMessageWithResponseViaRelay(peerID string, mes
 }
 
 // sendJobRequestViaRelay sends a job execution request via relay forwarding
+// Automatically retries once with fresh relay metadata if the first attempt fails with timeout
 func (jmh *JobMessageHandler) sendJobRequestViaRelay(peerID string, jobRequestBytes []byte) (*types.JobExecutionResponse, error) {
 	jmh.logger.Info(fmt.Sprintf("Attempting to send job request to peer %s via relay", peerID[:8]), "job_handler")
 
@@ -1047,6 +1350,43 @@ func (jmh *JobMessageHandler) sendJobRequestViaRelay(peerID string, jobRequestBy
 		return nil, fmt.Errorf("relay dependencies not set - call SetDependencies first")
 	}
 
+	// Try sending with retry logic
+	response, err := jmh.trySendJobRequestWithRetry(peerID, jobRequestBytes)
+	return response, err
+}
+
+// trySendJobRequestWithRetry attempts to send a job request with one retry on cache-related failures
+func (jmh *JobMessageHandler) trySendJobRequestWithRetry(peerID string, jobRequestBytes []byte) (*types.JobExecutionResponse, error) {
+	// First attempt
+	response, err := jmh.doSendJobRequest(peerID, jobRequestBytes)
+	if err == nil {
+		return response, nil
+	}
+
+	// Check if error is related to stale relay info
+	if isRelayCacheError(err) {
+		jmh.logger.Info(fmt.Sprintf("Job request failed, invalidating cache and retrying for peer %s: %v", peerID[:8], err), "job_handler")
+
+		// Invalidate cache to force fresh metadata query
+		jmh.invalidateRelayCache(peerID)
+
+		// Retry once with fresh relay info
+		response, retryErr := jmh.doSendJobRequest(peerID, jobRequestBytes)
+		if retryErr == nil {
+			jmh.logger.Info(fmt.Sprintf("Job request retry successful for peer %s after cache invalidation", peerID[:8]), "job_handler")
+			return response, nil
+		}
+
+		// Both attempts failed
+		return nil, fmt.Errorf("failed after retry: %v", retryErr)
+	}
+
+	// Non-cache-related error, don't retry
+	return nil, err
+}
+
+// doSendJobRequest performs the actual job request send without retry logic
+func (jmh *JobMessageHandler) doSendJobRequest(peerID string, jobRequestBytes []byte) (*types.JobExecutionResponse, error) {
 	// Get relay info with caching (avoids slow DHT queries)
 	relayAddress, relaySessionID, err := jmh.getRelayInfo(peerID)
 	if err != nil {
@@ -1082,6 +1422,16 @@ func (jmh *JobMessageHandler) sendJobRequestViaRelay(peerID string, jobRequestBy
 	// Open stream
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
+		// Stream open failure often indicates a stale connection (connection exists locally
+		// but remote side has closed it). Clean it up to force fresh connection on next attempt.
+		relayAddr := conn.RemoteAddr().String()
+		jmh.logger.Debug(fmt.Sprintf("Cleaning up potentially stale relay connection %s after stream open failure", relayAddr), "job_handler")
+
+		// Clean up stale connection to force fresh reconnection on retry
+		if cleanupErr := jmh.quicPeer.DisconnectFromPeer(relayAddr); cleanupErr != nil {
+			jmh.logger.Debug(fmt.Sprintf("Relay connection cleanup completed for %s (connection may have already been closed)", relayAddr), "job_handler")
+		}
+
 		return nil, fmt.Errorf("failed to open stream to relay: %v", err)
 	}
 	defer stream.Close()

@@ -51,8 +51,9 @@ type JobInterfacePeer struct {
 func (sm *SQLiteManager) InitJobExecutionsTable() error {
 	createTableSQL := `
 	-- Job executions table
-	-- Note: workflow_job_id is a soft reference (no FK constraint) to support distributed P2P execution
-	-- where job executions may occur on peers that don't have the workflow_jobs record locally.
+	-- Note: workflow_job_id and service_id are soft references (no FK constraints) to support
+	-- distributed P2P execution where job executions may occur on peers that don't have the
+	-- workflow_jobs or services records locally (services exist on remote executor peers).
 	-- Application-level validation ensures referential integrity when needed.
 	CREATE TABLE IF NOT EXISTS job_executions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,8 +70,7 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 		ended_at DATETIME,
 		error_message TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_job_executions_workflow_job_id ON job_executions(workflow_job_id);

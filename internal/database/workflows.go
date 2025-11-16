@@ -397,6 +397,19 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 			}
 		}
 
+		// DATA services MUST have a STDOUT interface (for output)
+		// Create it automatically if it doesn't exist (even without connections)
+		if node.ServiceType == "DATA" {
+			if _, exists := interfaceMap["STDOUT"]; !exists {
+				sm.logger.Debug(fmt.Sprintf("  Auto-creating STDOUT interface for DATA service '%s' (no connections yet)", node.ServiceName), "database")
+				interfaceMap["STDOUT"] = &InterfaceDef{
+					Type:           "STDOUT",
+					Path:           "output" + string(os.PathSeparator),
+					InterfacePeers: []InterfacePeerDef{}, // Empty initially - user must connect it
+				}
+			}
+		}
+
 		// Convert interface map to array
 		for _, iface := range interfaceMap {
 			job.Interfaces = append(job.Interfaces, *iface)

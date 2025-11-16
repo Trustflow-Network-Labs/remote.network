@@ -50,6 +50,9 @@ type RelayManager struct {
 	// Periodic re-evaluation
 	evaluationTicker *time.Ticker
 	evaluationStop   chan struct{}
+
+	// Callbacks
+	onRelayReconnected func() // Called after successful relay (re)connection
 }
 
 // NewRelayManager creates a new relay manager for NAT peers
@@ -399,6 +402,11 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 
 	// Start keepalive
 	go rm.sendKeepalives()
+
+	// Trigger relay reconnection callback (for transfer resumption, etc.)
+	if rm.onRelayReconnected != nil {
+		go rm.onRelayReconnected() // Run async to avoid blocking connection
+	}
 
 	return nil
 }
@@ -1144,6 +1152,11 @@ func (rm *RelayManager) GetPreferredRelay(myPeerID string) (string, error) {
 	}
 
 	return preferredPeerID, nil
+}
+
+// SetRelayReconnectedCallback sets a callback to be called after successful relay (re)connection
+func (rm *RelayManager) SetRelayReconnectedCallback(callback func()) {
+	rm.onRelayReconnected = callback
 }
 
 // RecordIngressTraffic records bytes received through the relay

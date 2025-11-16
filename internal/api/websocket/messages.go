@@ -256,4 +256,11 @@ type RemoteServiceInfo struct {
 	SizeBytes       int64                  `json:"size_bytes,omitempty"`
 	PeerID          string                 `json:"peer_id"` // ID of peer offering this service
 	PeerName        string                 `json:"peer_name,omitempty"`
+	Interfaces      []RemoteServiceInterface `json:"interfaces,omitempty"` // Service interfaces
+}
+
+// RemoteServiceInterface represents a service interface from a remote peer
+type RemoteServiceInterface struct {
+	InterfaceType string `json:"interface_type"` // STDIN, STDOUT, MOUNT
+	Path          string `json:"path,omitempty"`
 }

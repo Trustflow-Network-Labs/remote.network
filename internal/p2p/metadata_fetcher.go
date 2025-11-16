@@ -79,6 +79,12 @@ func (mf *MetadataFetcher) GetPeerMetadata(publicKey []byte) (*database.PeerMeta
 	mf.logger.Info(fmt.Sprintf("✅ Successfully decoded metadata from DHT (node_id: %s, topic: %s, version: %d, is_relay: %v, relay_endpoint: %s, files=%d, apps=%d)",
 		metadata.NodeID, metadata.Topic, metadata.Version, metadata.NetworkInfo.IsRelay, metadata.NetworkInfo.RelayEndpoint, metadata.FilesCount, metadata.AppsCount), "metadata-fetcher")
 
+	// Log relay connection info if peer is using relay (important for debugging NAT peer connectivity)
+	if metadata.NetworkInfo.UsingRelay {
+		mf.logger.Debug(fmt.Sprintf("Peer using relay: connected_relay=%s, session_id=%s, relay_address=%s",
+			metadata.NetworkInfo.ConnectedRelay, metadata.NetworkInfo.RelaySessionID, metadata.NetworkInfo.RelayAddress), "metadata-fetcher")
+	}
+
 	return metadata, nil
 }
 

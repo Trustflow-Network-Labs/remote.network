@@ -49,6 +49,13 @@ type ServiceSearchResult struct {
 	Capabilities   map[string]interface{} `json:"capabilities,omitempty"`
 	Hash           string                 `json:"hash,omitempty"`      // For DATA services
 	SizeBytes      int64                  `json:"size_bytes,omitempty"` // For DATA services
+	Interfaces     []ServiceInterface     `json:"interfaces,omitempty"` // Service interfaces (STDIN, STDOUT, MOUNT)
+}
+
+// ServiceInterface represents a service interface for remote service info
+type ServiceInterface struct {
+	InterfaceType string `json:"interface_type"` // STDIN, STDOUT, MOUNT
+	Path          string `json:"path,omitempty"`
 }
 
 // ServiceSearchResponse represents the response to a service search query
@@ -105,6 +112,18 @@ func (sqh *ServiceQueryHandler) HandleServiceSearchRequest(msg *QUICMessage, rem
 			if err == nil && details != nil {
 				result.Hash = details.Hash
 				result.SizeBytes = details.SizeBytes
+			}
+		}
+
+		// Get service interfaces (STDIN, STDOUT, MOUNT)
+		interfaces, err := sqh.dbManager.GetServiceInterfaces(service.ID)
+		if err == nil && len(interfaces) > 0 {
+			result.Interfaces = make([]ServiceInterface, 0, len(interfaces))
+			for _, iface := range interfaces {
+				result.Interfaces = append(result.Interfaces, ServiceInterface{
+					InterfaceType: iface.InterfaceType,
+					Path:          iface.Path,
+				})
 			}
 		}
 

@@ -62,6 +62,9 @@ const (
 	MessageTypeJobDataTransferResponse MessageType = "job_data_transfer_response"
 	MessageTypeJobDataChunk            MessageType = "job_data_chunk"
 	MessageTypeJobDataTransferComplete MessageType = "job_data_transfer_complete"
+	MessageTypeJobDataChunkAck         MessageType = "job_data_chunk_ack"
+	MessageTypeJobDataTransferResume   MessageType = "job_data_transfer_resume"
+	MessageTypeJobDataTransferStall    MessageType = "job_data_transfer_stall"
 	MessageTypeJobCancel               MessageType = "job_cancel"
 
 	// Legacy support
@@ -806,6 +809,21 @@ func CreateJobDataChunk(data interface{}) *QUICMessage {
 // CreateJobDataTransferComplete creates a transfer complete message
 func CreateJobDataTransferComplete(data interface{}) *QUICMessage {
 	return NewQUICMessage(MessageTypeJobDataTransferComplete, data)
+}
+
+// CreateJobDataChunkAck creates a chunk acknowledgment message
+func CreateJobDataChunkAck(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobDataChunkAck, data)
+}
+
+// CreateJobDataTransferResume creates a transfer resume request message
+func CreateJobDataTransferResume(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobDataTransferResume, data)
+}
+
+// CreateJobDataTransferStall creates a transfer stall notification message
+func CreateJobDataTransferStall(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobDataTransferStall, data)
 }
 
 // CreateJobCancel creates a job cancellation message

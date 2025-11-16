@@ -24,6 +24,17 @@ func (s *APIServer) handleGetServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enhance each service with its interfaces
+	for i := range services {
+		interfaces, err := s.dbManager.GetServiceInterfaces(services[i].ID)
+		if err == nil {
+			services[i].Interfaces = interfaces
+		} else {
+			// If error, just set empty array (don't fail the whole request)
+			services[i].Interfaces = []*database.ServiceInterface{}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"services": services,

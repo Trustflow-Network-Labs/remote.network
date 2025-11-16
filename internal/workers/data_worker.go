@@ -1,6 +1,7 @@
 package workers
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
@@ -40,18 +41,23 @@ type IncomingTransfer struct {
 
 // DataServiceWorker handles DATA service job execution
 type DataServiceWorker struct {
-	db               *database.SQLiteManager
-	cm               *utils.ConfigManager
-	logger           *utils.LogsManager
-	jobHandler       *p2p.JobMessageHandler
-	peerID           string // Local peer ID
-	chunkSize        int    // Size of data chunks for streaming
+	db                *database.SQLiteManager
+	cm                *utils.ConfigManager
+	logger            *utils.LogsManager
+	jobHandler        *p2p.JobMessageHandler
+	peerID            string // Local peer ID
+	chunkSize         int    // Size of data chunks for streaming
 	incomingTransfers map[string]*IncomingTransfer // transferID -> transfer state
-	transfersMu      sync.RWMutex
+	transfersMu       sync.RWMutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	monitoringStarted bool
+	monitoringMu      sync.Mutex
 }
 
 // NewDataServiceWorker creates a new DATA service worker
 func NewDataServiceWorker(db *database.SQLiteManager, cm *utils.ConfigManager, jobHandler *p2p.JobMessageHandler) *DataServiceWorker {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &DataServiceWorker{
 		db:                db,
 		cm:                cm,
@@ -59,6 +65,8 @@ func NewDataServiceWorker(db *database.SQLiteManager, cm *utils.ConfigManager, j
 		jobHandler:        jobHandler,
 		chunkSize:         cm.GetConfigInt("job_data_chunk_size", 1048576, 1024, 10485760), // Default 1MB (matches WebSocket upload performance)
 		incomingTransfers: make(map[string]*IncomingTransfer),
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 }
 
@@ -72,6 +80,94 @@ func (dsw *DataServiceWorker) SetJobHandler(jobHandler *p2p.JobMessageHandler) {
 func (dsw *DataServiceWorker) SetPeerID(peerID string) {
 	dsw.peerID = peerID
 	dsw.logger.Info(fmt.Sprintf("Peer ID set for data service worker: %s", peerID[:8]), "data_worker")
+}
+
+// Start starts background monitoring for the data service worker
+func (dsw *DataServiceWorker) Start() {
+	dsw.monitoringMu.Lock()
+	if dsw.monitoringStarted {
+		dsw.monitoringMu.Unlock()
+		return
+	}
+	dsw.monitoringStarted = true
+	dsw.monitoringMu.Unlock()
+
+	dsw.logger.Info("Starting data service worker monitoring", "data_worker")
+
+	// Start transfer monitoring goroutine
+	go dsw.MonitorTransfers()
+}
+
+
+// MonitorTransfers monitors active transfers and requests resumption for stalled receiver-side transfers
+func (dsw *DataServiceWorker) MonitorTransfers() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	dsw.logger.Info("Transfer monitoring started (checking every 30 seconds)", "data_worker")
+
+	for {
+		select {
+		case <-ticker.C:
+			// Get stalled transfers (no activity for 30+ seconds)
+			stalledTransfers, err := dsw.db.GetStalledTransfers(30 * time.Second)
+			if err != nil {
+				dsw.logger.Error(fmt.Sprintf("Failed to get stalled transfers: %v", err), "data_worker")
+				continue
+			}
+
+			if len(stalledTransfers) == 0 {
+				continue
+			}
+
+			dsw.logger.Info(fmt.Sprintf("Found %d stalled transfers, checking for resumption", len(stalledTransfers)), "data_worker")
+
+			// Process each stalled transfer
+			for _, transfer := range stalledTransfers {
+				// Only resume receiver-side transfers (sender-side is handled by peer manager)
+				if transfer.Direction != "receiver" {
+					continue
+				}
+
+				// Skip if transfer is already paused or failed
+				if transfer.Status == "paused" || transfer.Status == "failed" {
+					continue
+				}
+
+				dsw.logger.Info(fmt.Sprintf("Requesting resume for stalled receiver transfer %s (last activity: %s ago)",
+					transfer.TransferID, time.Since(transfer.LastActivity)), "data_worker")
+
+				// Send resume request to sender
+				if err := dsw.sendResumeRequest(transfer); err != nil {
+					dsw.logger.Error(fmt.Sprintf("Failed to send resume request for transfer %s: %v", transfer.TransferID, err), "data_worker")
+					continue
+				}
+
+				dsw.logger.Info(fmt.Sprintf("Resume request sent for transfer %s", transfer.TransferID), "data_worker")
+			}
+
+		case <-dsw.ctx.Done():
+			dsw.logger.Info("Transfer monitoring stopped", "data_worker")
+			return
+		}
+	}
+}
+
+// sendResumeRequest sends a resume request to the sender for a stalled receiver-side transfer
+func (dsw *DataServiceWorker) sendResumeRequest(transfer *database.DataTransfer) error {
+	if dsw.jobHandler == nil {
+		return fmt.Errorf("job handler not set")
+	}
+
+	// Create resume request with list of received chunks
+	resume := &types.JobDataTransferResume{
+		TransferID:     transfer.TransferID,
+		ReceivedChunks: transfer.ChunksReceived,
+		LastKnownChunk: len(transfer.ChunksReceived) - 1,
+	}
+
+	// Send to the source peer (sender)
+	return dsw.jobHandler.SendJobDataTransferResume(transfer.SourcePeerID, resume)
 }
 
 // GetJobExecutionIDForTransfer returns the job execution ID associated with a transfer
@@ -201,22 +297,22 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 	// Generate transfer ID
 	transferID := dsw.GenerateTransferID(job.ID, peer.PeerNodeID)
 
+	// Get encryption key if data is encrypted
+	var keyData string
+	var encrypted bool
+	if dataDetails.EncryptionKeyID != nil {
+		encryptionKey, err := dsw.db.GetEncryptionKey(dataDetails.ServiceID)
+		if err != nil {
+			dsw.logger.Warn(fmt.Sprintf("Failed to get encryption key for service %d: %v - proceeding without encryption", dataDetails.ServiceID, err), "data_worker")
+		} else if encryptionKey != nil {
+			keyData = encryptionKey.KeyData
+			encrypted = true
+			dsw.logger.Info(fmt.Sprintf("Including encryption key for transfer %s", transferID), "data_worker")
+		}
+	}
+
 	// Check if job handler is available for actual transfer
 	if dsw.jobHandler != nil {
-		// Get encryption key if data is encrypted
-		var keyData string
-		var encrypted bool
-		if dataDetails.EncryptionKeyID != nil {
-			encryptionKey, err := dsw.db.GetEncryptionKey(dataDetails.ServiceID)
-			if err != nil {
-				dsw.logger.Warn(fmt.Sprintf("Failed to get encryption key for service %d: %v - proceeding without encryption", dataDetails.ServiceID, err), "data_worker")
-			} else if encryptionKey != nil {
-				keyData = encryptionKey.KeyData
-				encrypted = true
-				dsw.logger.Info(fmt.Sprintf("Including encryption key for transfer %s", transferID), "data_worker")
-			}
-		}
-
 		// Send transfer request using WorkflowJobID (shared identifier both peers understand)
 		transferRequest := &types.JobDataTransferRequest{
 			TransferID:        transferID, // Include transfer ID so both peers use the same one
@@ -247,14 +343,47 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 		dsw.logger.Info(fmt.Sprintf("Transfer request accepted by peer %s for transfer ID %s", peer.PeerNodeID[:8], transferID), "data_worker")
 	}
 
-	// Transfer data in chunks
+	// Create transfer record in database for state persistence
+	transfer := &database.DataTransfer{
+		TransferID:        transferID,
+		JobExecutionID:    job.ID,
+		SourcePeerID:      dsw.peerID,
+		DestinationPeerID: peer.PeerNodeID,
+		FilePath:          filePath,
+		TotalChunks:       totalChunks,
+		ChunkSize:         dsw.chunkSize,
+		TotalBytes:        fileSize,
+		FileHash:          dataDetails.Hash,
+		Encrypted:         encrypted,
+		ChunksSent:        make([]int, 0),
+		ChunksReceived:    make([]int, 0),
+		ChunksAcked:       make([]int, 0),
+		BytesTransferred:  0,
+		Status:            "active",
+		Direction:         "sender",
+		LastActivity:      time.Now(),
+		LastCheckpoint:    time.Now(),
+	}
+
+	err = dsw.db.CreateDataTransfer(transfer)
+	if err != nil {
+		dsw.logger.Error(fmt.Sprintf("Failed to create transfer record: %v", err), "data_worker")
+		return fmt.Errorf("failed to create transfer record: %v", err)
+	}
+
+	dsw.logger.Info(fmt.Sprintf("Created transfer record %s in database", transferID), "data_worker")
+
+	// Transfer data in chunks with retry and ACK tracking
 	buffer := make([]byte, dsw.chunkSize)
 	chunkIndex := 0
 	bytesTransferred := int64(0)
+	chunksSent := make(map[int]bool)
+	chunksAcked := make(map[int]bool)
 
 	for {
 		n, err := file.Read(buffer)
 		if err != nil && err != io.EOF {
+			dsw.db.FailTransfer(transferID, fmt.Sprintf("failed to read file chunk: %v", err))
 			return fmt.Errorf("failed to read file chunk: %v", err)
 		}
 
@@ -264,7 +393,7 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 
 		isLast := chunkIndex == totalChunks-1
 
-		// Send data chunk
+		// Send data chunk (with retry on failure)
 		if dsw.jobHandler != nil {
 			chunk := &types.JobDataChunk{
 				TransferID:  transferID,
@@ -277,11 +406,32 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 			dsw.logger.Info(fmt.Sprintf("Sending chunk %d/%d (%d bytes) for transfer %s",
 				chunkIndex+1, totalChunks, n, transferID), "data_worker")
 
-			// Send chunk via job handler
-			err := dsw.jobHandler.SendJobDataChunk(peer.PeerNodeID, chunk)
-			if err != nil {
-				return fmt.Errorf("failed to send chunk %d: %v", chunkIndex, err)
+			// Retry logic: try up to 3 times with exponential backoff
+			sent := false
+			for attempt := 0; attempt < 3; attempt++ {
+				err := dsw.jobHandler.SendJobDataChunk(peer.PeerNodeID, chunk)
+				if err == nil {
+					sent = true
+					break
+				}
+
+				dsw.logger.Warn(fmt.Sprintf("Failed to send chunk %d (attempt %d/3): %v", chunkIndex, attempt+1, err), "data_worker")
+
+				if attempt < 2 {
+					// Exponential backoff: 100ms, 200ms, 400ms
+					backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
+					time.Sleep(backoff)
+				}
 			}
+
+			if !sent {
+				// Mark transfer as failed after retries exhausted
+				dsw.db.FailTransfer(transferID, fmt.Sprintf("failed to send chunk %d after 3 attempts", chunkIndex))
+				return fmt.Errorf("failed to send chunk %d after 3 attempts", chunkIndex)
+			}
+
+			// Track sent chunk
+			chunksSent[chunkIndex] = true
 		} else {
 			dsw.logger.Info(fmt.Sprintf("Would send chunk %d/%d (%d bytes) for transfer %s (job handler not available)",
 				chunkIndex+1, totalChunks, n, transferID), "data_worker")
@@ -289,6 +439,31 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 
 		bytesTransferred += int64(n)
 		chunkIndex++
+
+		// Update progress every 20 chunks (checkpoint)
+		if chunkIndex%20 == 0 || isLast {
+			sentList := make([]int, 0, len(chunksSent))
+			for idx := range chunksSent {
+				sentList = append(sentList, idx)
+			}
+			ackedList := make([]int, 0, len(chunksAcked))
+			for idx := range chunksAcked {
+				ackedList = append(ackedList, idx)
+			}
+
+			err = dsw.db.UpdateTransferProgress(transferID, sentList, nil, ackedList, bytesTransferred)
+			if err != nil {
+				dsw.logger.Error(fmt.Sprintf("Failed to update transfer progress: %v", err), "data_worker")
+			}
+
+			err = dsw.db.UpdateTransferCheckpoint(transferID)
+			if err != nil {
+				dsw.logger.Error(fmt.Sprintf("Failed to update transfer checkpoint: %v", err), "data_worker")
+			}
+
+			dsw.logger.Debug(fmt.Sprintf("Checkpoint saved for transfer %s: %d chunks sent, %d bytes",
+				transferID, chunkIndex, bytesTransferred), "data_worker")
+		}
 
 		// Small delay to avoid overwhelming the receiver
 		time.Sleep(10 * time.Millisecond)
@@ -317,8 +492,171 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 		dsw.logger.Info(fmt.Sprintf("Transfer %s simulated: %d bytes (job handler not available)", transferID, bytesTransferred), "data_worker")
 	}
 
+	// Mark transfer as completed in database
+	err = dsw.db.CompleteTransfer(transferID)
+	if err != nil {
+		dsw.logger.Error(fmt.Sprintf("Failed to mark transfer as completed: %v", err), "data_worker")
+	} else {
+		dsw.logger.Info(fmt.Sprintf("Transfer %s marked as completed in database", transferID), "data_worker")
+	}
+
 	dsw.logger.Info(fmt.Sprintf("Transfer %s completed: %d bytes in %d chunks",
 		transferID, bytesTransferred, chunkIndex), "data_worker")
+
+	return nil
+}
+
+// ResumeTransfer resumes a stalled file transfer using fresh peer metadata
+func (dsw *DataServiceWorker) ResumeTransfer(transfer *database.DataTransfer, peerMetadata *database.PeerMetadata) error {
+	dsw.logger.Info(fmt.Sprintf("Resuming transfer %s to peer %s (metadata refreshed from DHT)",
+		transfer.TransferID, transfer.DestinationPeerID[:8]), "data_worker")
+
+	// Verify file still exists
+	if _, err := os.Stat(transfer.FilePath); os.IsNotExist(err) {
+		return fmt.Errorf("source file no longer exists: %s", transfer.FilePath)
+	}
+
+	// Open file for reading
+	file, err := os.Open(transfer.FilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %v", err)
+	}
+	defer file.Close()
+
+	// Calculate missing chunks (chunks not acknowledged yet)
+	ackedMap := make(map[int]bool)
+	for _, idx := range transfer.ChunksAcked {
+		ackedMap[idx] = true
+	}
+
+	missingChunks := make([]int, 0)
+	for i := 0; i < transfer.TotalChunks; i++ {
+		if !ackedMap[i] {
+			missingChunks = append(missingChunks, i)
+		}
+	}
+
+	if len(missingChunks) == 0 {
+		dsw.logger.Info(fmt.Sprintf("Transfer %s has all chunks acked, marking as completed", transfer.TransferID), "data_worker")
+		return dsw.db.CompleteTransfer(transfer.TransferID)
+	}
+
+	dsw.logger.Info(fmt.Sprintf("Transfer %s resuming: %d/%d chunks still need to be sent",
+		transfer.TransferID, len(missingChunks), transfer.TotalChunks), "data_worker")
+
+	// Update transfer to active status
+	if err := dsw.db.ResumeTransfer(transfer.TransferID); err != nil {
+		dsw.logger.Warn(fmt.Sprintf("Failed to update transfer status to active: %v", err), "data_worker")
+	}
+
+	// Resend missing chunks
+	buffer := make([]byte, dsw.chunkSize)
+	chunksSent := make(map[int]bool)
+
+	for _, idx := range transfer.ChunksSent {
+		chunksSent[idx] = true
+	}
+
+	sentCount := 0
+	for _, chunkIndex := range missingChunks {
+		// Calculate offset for this chunk
+		offset := int64(chunkIndex) * int64(dsw.chunkSize)
+
+		// Seek to chunk position
+		if _, err := file.Seek(offset, 0); err != nil {
+			return fmt.Errorf("failed to seek to chunk %d: %v", chunkIndex, err)
+		}
+
+		// Read chunk data
+		n, err := file.Read(buffer)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read chunk %d: %v", chunkIndex, err)
+		}
+
+		if n == 0 {
+			break
+		}
+
+		isLast := chunkIndex == transfer.TotalChunks-1
+
+		// Send chunk via job handler (with fresh peer metadata for routing)
+		if dsw.jobHandler != nil {
+			chunk := &types.JobDataChunk{
+				TransferID:  transfer.TransferID,
+				ChunkIndex:  chunkIndex,
+				TotalChunks: transfer.TotalChunks,
+				Data:        buffer[:n],
+				IsLast:      isLast,
+			}
+
+			dsw.logger.Debug(fmt.Sprintf("Resending chunk %d/%d (%d bytes) for transfer %s",
+				chunkIndex+1, transfer.TotalChunks, n, transfer.TransferID), "data_worker")
+
+			// Retry logic: try up to 3 times with exponential backoff
+			sent := false
+			for attempt := 0; attempt < 3; attempt++ {
+				err := dsw.jobHandler.SendJobDataChunk(transfer.DestinationPeerID, chunk)
+				if err == nil {
+					sent = true
+					break
+				}
+
+				dsw.logger.Warn(fmt.Sprintf("Failed to send chunk %d (attempt %d/3): %v", chunkIndex, attempt+1, err), "data_worker")
+
+				if attempt < 2 {
+					backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
+					time.Sleep(backoff)
+				}
+			}
+
+			if !sent {
+				dsw.logger.Error(fmt.Sprintf("Failed to send chunk %d after 3 attempts during resume", chunkIndex), "data_worker")
+				return fmt.Errorf("failed to send chunk %d after 3 attempts", chunkIndex)
+			}
+
+			// Track sent chunk
+			chunksSent[chunkIndex] = true
+			sentCount++
+		}
+
+		// Update progress every 20 chunks
+		if sentCount%20 == 0 {
+			sentList := make([]int, 0, len(chunksSent))
+			for idx := range chunksSent {
+				sentList = append(sentList, idx)
+			}
+
+			err = dsw.db.UpdateTransferProgress(transfer.TransferID, sentList, nil, transfer.ChunksAcked, transfer.BytesTransferred)
+			if err != nil {
+				dsw.logger.Error(fmt.Sprintf("Failed to update transfer progress: %v", err), "data_worker")
+			}
+
+			err = dsw.db.UpdateTransferCheckpoint(transfer.TransferID)
+			if err != nil {
+				dsw.logger.Error(fmt.Sprintf("Failed to update transfer checkpoint: %v", err), "data_worker")
+			}
+
+			dsw.logger.Debug(fmt.Sprintf("Resume progress saved for transfer %s: %d chunks sent",
+				transfer.TransferID, sentCount), "data_worker")
+		}
+
+		// Small delay to avoid overwhelming the receiver
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Final progress update
+	sentList := make([]int, 0, len(chunksSent))
+	for idx := range chunksSent {
+		sentList = append(sentList, idx)
+	}
+
+	err = dsw.db.UpdateTransferProgress(transfer.TransferID, sentList, nil, transfer.ChunksAcked, transfer.BytesTransferred)
+	if err != nil {
+		dsw.logger.Error(fmt.Sprintf("Failed to update final transfer progress: %v", err), "data_worker")
+	}
+
+	dsw.logger.Info(fmt.Sprintf("Transfer %s resumed: sent %d missing chunks, waiting for ACKs",
+		transfer.TransferID, sentCount), "data_worker")
 
 	return nil
 }
@@ -438,6 +776,14 @@ func (dsw *DataServiceWorker) HandleDataChunk(chunk *types.JobDataChunk, peerID 
 	// Lock the transfer for chunk processing
 	transfer.mu.Lock()
 
+	// Update TotalChunks from chunk message (sender knows the actual count)
+	// This handles cases where receiver's initial calculation was based on different chunk size
+	if transfer.TotalChunks != chunk.TotalChunks {
+		dsw.logger.Info(fmt.Sprintf("Updating transfer %s total chunks from %d to %d (using sender's actual chunk count)",
+			chunk.TransferID, transfer.TotalChunks, chunk.TotalChunks), "data_worker")
+		transfer.TotalChunks = chunk.TotalChunks
+	}
+
 	// Check if we already received this chunk
 	if transfer.ReceivedChunks[chunk.ChunkIndex] {
 		transfer.mu.Unlock()
@@ -472,7 +818,83 @@ func (dsw *DataServiceWorker) HandleDataChunk(chunk *types.JobDataChunk, peerID 
 	// Check if transfer is complete
 	isComplete := len(transfer.ReceivedChunks) == transfer.TotalChunks
 
-	// Unlock before finalizing to avoid deadlock (finalizeTransfer needs to acquire locks)
+	// Create or update transfer record in database
+	receivedList := make([]int, 0, len(transfer.ReceivedChunks))
+	for idx := range transfer.ReceivedChunks {
+		receivedList = append(receivedList, idx)
+	}
+
+	// Check if transfer exists in database
+	_, err = dsw.db.GetTransferByID(chunk.TransferID)
+	if err != nil {
+		// Transfer doesn't exist in database yet, create it
+		newTransfer := &database.DataTransfer{
+			TransferID:        chunk.TransferID,
+			JobExecutionID:    transfer.JobExecutionID,
+			SourcePeerID:      transfer.SourcePeerID,
+			DestinationPeerID: dsw.peerID,
+			FilePath:          transfer.TargetPath,
+			TotalChunks:       transfer.TotalChunks,
+			ChunkSize:         dsw.chunkSize,
+			TotalBytes:        transfer.ExpectedSize,
+			FileHash:          transfer.ExpectedHash,
+			Encrypted:         transfer.Encrypted,
+			ChunksSent:        make([]int, 0),
+			ChunksReceived:    receivedList,
+			ChunksAcked:       make([]int, 0),
+			BytesTransferred:  transfer.BytesReceived,
+			Status:            "active",
+			Direction:         "receiver",
+			LastActivity:      time.Now(),
+			LastCheckpoint:    time.Now(),
+		}
+
+		err = dsw.db.CreateDataTransfer(newTransfer)
+		if err != nil {
+			dsw.logger.Error(fmt.Sprintf("Failed to create transfer record: %v", err), "data_worker")
+		} else {
+			dsw.logger.Debug(fmt.Sprintf("Created transfer record in database for %s", chunk.TransferID), "data_worker")
+		}
+	} else {
+		// Update existing transfer
+		err = dsw.db.UpdateTransferProgress(chunk.TransferID, nil, receivedList, nil, transfer.BytesReceived)
+		if err != nil {
+			dsw.logger.Error(fmt.Sprintf("Failed to update transfer progress: %v", err), "data_worker")
+		}
+	}
+
+	// Send batch ACK every 10-20 chunks (random between 10-20 to avoid synchronization)
+	chunkCount := len(transfer.ReceivedChunks)
+	shouldSendAck := (chunkCount%15 == 0) // Send ACK every 15 chunks on average
+
+	// Always send ACK on last chunk
+	if isComplete {
+		shouldSendAck = true
+	}
+
+	if shouldSendAck && dsw.jobHandler != nil {
+		// Unlock before sending ACK to avoid blocking
+		transfer.mu.Unlock()
+
+		ack := &types.JobDataChunkAck{
+			TransferID:   chunk.TransferID,
+			ChunkIndexes: receivedList,
+			Timestamp:    time.Now(),
+		}
+
+		err := dsw.jobHandler.SendJobDataChunkAck(peerID, ack)
+		if err != nil {
+			dsw.logger.Warn(fmt.Sprintf("Failed to send chunk ACK: %v", err), "data_worker")
+		} else {
+			dsw.logger.Debug(fmt.Sprintf("Sent ACK for %d chunks to peer %s", len(receivedList), peerID[:8]), "data_worker")
+		}
+
+		// Re-lock after sending ACK (will be unlocked below)
+		transfer.mu.Lock()
+	}
+
+	// Always unlock before finalizing or returning
+	// finalizeTransfer will acquire its own locks
 	transfer.mu.Unlock()
 
 	if isComplete {
@@ -528,8 +950,15 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 	}
 
 	// Decrypt file if encrypted (AFTER hash validation)
-	if transfer.Encrypted && transfer.Passphrase != "" {
-		dsw.logger.Info(fmt.Sprintf("Decrypting transfer %s with passphrase", transferID), "data_worker")
+	if transfer.Encrypted {
+		if transfer.Passphrase == "" {
+			dsw.logger.Error(fmt.Sprintf("Transfer %s marked as encrypted but passphrase is EMPTY!", transferID), "data_worker")
+			os.Remove(transfer.TargetPath)
+			delete(dsw.incomingTransfers, transferID)
+			return fmt.Errorf("encrypted transfer missing passphrase")
+		}
+
+		dsw.logger.Info(fmt.Sprintf("Decrypting transfer %s", transferID), "data_worker")
 
 		err := dsw.decryptFile(transfer.TargetPath, transfer.Passphrase)
 		if err != nil {
@@ -607,6 +1036,13 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 		}
 	}
 
+	// Mark transfer as completed in database
+	if err := dsw.db.CompleteTransfer(transferID); err != nil {
+		dsw.logger.Error(fmt.Sprintf("Failed to mark transfer as completed in database: %v", err), "data_worker")
+	} else {
+		dsw.logger.Info(fmt.Sprintf("Transfer %s marked as completed in database", transferID), "data_worker")
+	}
+
 	// Remove from active transfers
 	delete(dsw.incomingTransfers, transferID)
 
@@ -628,7 +1064,7 @@ func (dsw *DataServiceWorker) decryptFile(filePath string, keyData string) error
 	hexKeyData := parts[1]
 	decodedKeyData, err := hex.DecodeString(hexKeyData)
 	if err != nil {
-		return fmt.Errorf("failed to decode key data: %v", err)
+		return fmt.Errorf("failed to decode hex key data: %v", err)
 	}
 
 	// Extract AES key from keyData format: [16 bytes salt][32 bytes derived key]
@@ -643,6 +1079,52 @@ func (dsw *DataServiceWorker) decryptFile(filePath string, keyData string) error
 		return fmt.Errorf("failed to read encrypted file: %v", err)
 	}
 
+	// Use streaming decryption to match file_processor's streaming encryption
+	tempOutputPath := filePath + ".decrypted"
+	err = dsw.decryptFileStreaming(filePath, tempOutputPath, key)
+	if err != nil {
+		return fmt.Errorf("streaming decryption failed: %v", err)
+	}
+
+	// Replace encrypted file with decrypted file
+	if err := os.Remove(filePath); err != nil {
+		os.Remove(tempOutputPath)
+		return fmt.Errorf("failed to remove encrypted file: %v", err)
+	}
+	if err := os.Rename(tempOutputPath, filePath); err != nil {
+		return fmt.Errorf("failed to rename decrypted file: %v", err)
+	}
+
+	// Get final file size for logging
+	fileInfo, _ := os.Stat(filePath)
+	decryptedSize := int64(0)
+	if fileInfo != nil {
+		decryptedSize = fileInfo.Size()
+	}
+
+	dsw.logger.Info(fmt.Sprintf("Successfully decrypted file: %s (%d bytes encrypted -> %d bytes decrypted)",
+		filePath, len(ciphertext), decryptedSize), "data_worker")
+
+	return nil
+}
+
+// decryptFileStreaming decrypts a file that was encrypted with streaming encryption (64KB chunks)
+// This matches the file_processor.encryptFileStreaming format
+func (dsw *DataServiceWorker) decryptFileStreaming(inputPath, outputPath string, key []byte) error {
+	// Open encrypted input file
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		return fmt.Errorf("failed to open input file: %v", err)
+	}
+	defer inputFile.Close()
+
+	// Create decrypted output file
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %v", err)
+	}
+	defer outputFile.Close()
+
 	// Create AES cipher
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -655,27 +1137,53 @@ func (dsw *DataServiceWorker) decryptFile(filePath string, keyData string) error
 		return fmt.Errorf("failed to create GCM: %v", err)
 	}
 
-	// Extract nonce from ciphertext
-	// File format from file_processor.encryptFile: [nonce][encrypted data]
-	nonceSize := gcm.NonceSize()
-	if len(ciphertext) < nonceSize {
-		return fmt.Errorf("ciphertext too short: expected at least %d bytes, got %d", nonceSize, len(ciphertext))
-	}
-	nonce, encryptedData := ciphertext[:nonceSize], ciphertext[nonceSize:]
-
-	// Decrypt data
-	plaintext, err := gcm.Open(nil, nonce, encryptedData, nil)
-	if err != nil {
-		return fmt.Errorf("decryption failed (wrong passphrase or corrupted data): %v", err)
+	// Read base nonce (first 12 bytes)
+	baseNonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(inputFile, baseNonce); err != nil {
+		return fmt.Errorf("failed to read nonce: %v", err)
 	}
 
-	// Write decrypted data back to the same file
-	if err := os.WriteFile(filePath, plaintext, 0644); err != nil {
-		return fmt.Errorf("failed to write decrypted file: %v", err)
-	}
+	// Decrypt file in chunks matching encryption chunk size (64KB chunks)
+	// Each encrypted chunk has 16 bytes of GCM authentication tag overhead
+	const plaintextChunkSize = 64 * 1024 // 64KB plaintext
+	const gcmOverhead = 16                // GCM authentication tag size
+	const encryptedChunkSize = plaintextChunkSize + gcmOverhead
 
-	dsw.logger.Info(fmt.Sprintf("Successfully decrypted file: %s (%d bytes encrypted -> %d bytes decrypted)",
-		filePath, len(ciphertext), len(plaintext)), "data_worker")
+	buffer := make([]byte, encryptedChunkSize)
+	counter := uint64(0)
+	totalDecrypted := int64(0)
+
+	for {
+		// Read encrypted chunk
+		n, err := inputFile.Read(buffer)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read chunk: %v", err)
+		}
+		if n == 0 {
+			break
+		}
+
+		// Create chunk nonce by XORing base nonce with counter (matches encryption)
+		chunkNonce := make([]byte, len(baseNonce))
+		copy(chunkNonce, baseNonce)
+		for i := 0; i < 8 && i < len(chunkNonce); i++ {
+			chunkNonce[i] ^= byte(counter >> (i * 8))
+		}
+
+		// Decrypt chunk
+		plainChunk, err := gcm.Open(nil, chunkNonce, buffer[:n], nil)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt chunk %d: %v", counter, err)
+		}
+
+		// Write decrypted chunk to output
+		if _, err := outputFile.Write(plainChunk); err != nil {
+			return fmt.Errorf("failed to write decrypted chunk: %v", err)
+		}
+
+		totalDecrypted += int64(len(plainChunk))
+		counter++
+	}
 
 	return nil
 }
@@ -750,7 +1258,7 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 	hierarchicalPath := filepath.Join(
 		appPaths.DataDir,
 		"workflows",
-		job.OrderingPeerID[:8], // Use first 8 chars for readability
+		job.OrderingPeerID, // Full peer ID to prevent collisions
 		fmt.Sprintf("%d", job.WorkflowJobID),
 		"jobs",
 		fmt.Sprintf("%d", job.ID),
@@ -863,6 +1371,9 @@ func (dsw *DataServiceWorker) copyFile(src, dst string) error {
 // Close closes the data service worker
 func (dsw *DataServiceWorker) Close() {
 	dsw.logger.Info("Closing data service worker", "data_worker")
+
+	// Stop monitoring goroutines
+	dsw.cancel()
 
 	// Close all active transfers
 	dsw.transfersMu.Lock()

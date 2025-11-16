@@ -74,6 +74,11 @@ func (jm *JobManager) Start() error {
 	// Start worker pool
 	jm.workerPool.Start()
 
+	// Start data service worker monitoring
+	if jm.dataWorker != nil {
+		jm.dataWorker.Start()
+	}
+
 	// Start status update worker
 	jm.startStatusUpdateWorker()
 
@@ -670,7 +675,7 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 	hierarchicalPath := filepath.Join(
 		appPaths.DataDir,
 		"workflows",
-		job.OrderingPeerID[:8], // Use first 8 chars for readability
+		job.OrderingPeerID, // Full peer ID to prevent collisions
 		fmt.Sprintf("%d", job.WorkflowJobID),
 		"jobs",
 		fmt.Sprintf("%d", job.ID),
@@ -691,7 +696,7 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 	// Initialize transfer in data worker with proper metadata
 	if jm.dataWorker != nil {
 		// Calculate expected chunks
-		chunkSize := jm.cm.GetConfigInt("job_data_chunk_size", 65536, 1024, 1048576)
+		chunkSize := jm.cm.GetConfigInt("job_data_chunk_size", 1048576, 1024, 10485760)
 		totalChunks := int((request.SizeBytes + int64(chunkSize) - 1) / int64(chunkSize))
 
 		// Use transfer ID from request (sender generates it)

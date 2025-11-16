@@ -132,3 +132,25 @@ type JobDataTransferComplete struct {
 	ErrorMessage      string `json:"error_message,omitempty"`
 	CompletedAt       time.Time `json:"completed_at"`
 }
+
+// JobDataChunkAck represents batch acknowledgment of received chunks (receiver → sender)
+type JobDataChunkAck struct {
+	TransferID   string    `json:"transfer_id"`
+	ChunkIndexes []int     `json:"chunk_indexes"` // Batch of received chunks (10-20 chunks)
+	Timestamp    time.Time `json:"timestamp"`
+}
+
+// JobDataTransferResume represents a request to resume a transfer
+type JobDataTransferResume struct {
+	TransferID     string `json:"transfer_id"`
+	ReceivedChunks []int  `json:"received_chunks"`           // Which chunks receiver has
+	RequestChunks  []int  `json:"request_chunks,omitempty"`  // Specific chunks to resend
+	LastKnownChunk int    `json:"last_known_chunk"`          // Last chunk receiver processed
+}
+
+// JobDataTransferStall represents notification that a transfer has stalled
+type JobDataTransferStall struct {
+	TransferID    string `json:"transfer_id"`
+	LastChunkSent int    `json:"last_chunk_sent"` // Last chunk sender successfully sent
+	Reason        string `json:"reason"`           // Why the stall occurred
+}

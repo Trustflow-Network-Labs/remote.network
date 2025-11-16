@@ -71,6 +71,11 @@ func NewSQLiteManager(cm *utils.ConfigManager) (*SQLiteManager, error) {
 		return nil, fmt.Errorf("failed to initialize job executions table: %v", err)
 	}
 
+	// Initialize data transfers table
+	if err := sqlm.InitDataTransfersTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize data transfers table: %v", err)
+	}
+
 	return sqlm, nil
 }
 
