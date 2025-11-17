@@ -355,3 +355,83 @@ func (cm *ConfigManager) SetConfig(key string, value interface{}) {
 
 	cm.configs[key] = strValue
 }
+
+// SaveConfig persists the current configuration to disk
+func (cm *ConfigManager) SaveConfig() error {
+	cm.configMutex.RLock()
+	defer cm.configMutex.RUnlock()
+
+	// Open the config file for writing
+	file, err := os.OpenFile(cm.configsPath, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open config file for writing: %v", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+
+	// First, read the original file to preserve structure and comments
+	originalFile, err := os.Open(cm.configsPath)
+	if err != nil {
+		return fmt.Errorf("failed to open config file for reading: %v", err)
+	}
+	defer originalFile.Close()
+
+	scanner := bufio.NewScanner(originalFile)
+	writtenKeys := make(map[string]bool)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmedLine := strings.TrimSpace(line)
+
+		// Check if this is a section header
+		if strings.HasPrefix(trimmedLine, "[") && strings.HasSuffix(trimmedLine, "]") {
+			writer.WriteString(line + "\n")
+			continue
+		}
+
+		// Check if this is a comment or empty line
+		if trimmedLine == "" || strings.HasPrefix(trimmedLine, "#") {
+			writer.WriteString(line + "\n")
+			continue
+		}
+
+		// Check if this is a key=value line
+		if equal := strings.Index(line, "="); equal >= 0 {
+			key := strings.TrimSpace(line[:equal])
+			if len(key) > 0 {
+				// Write the updated value if it exists in config
+				if value, exists := cm.configs[key]; exists {
+					writer.WriteString(fmt.Sprintf("%s = %s\n", key, value))
+					writtenKeys[key] = true
+				} else {
+					// Keep original line if key not in config
+					writer.WriteString(line + "\n")
+				}
+				continue
+			}
+		}
+
+		// Default: write line as-is
+		writer.WriteString(line + "\n")
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error scanning config file: %v", err)
+	}
+
+	// Write any new keys that weren't in the original file
+	// Add them under a [misc] section
+	hasNewKeys := false
+	for key, value := range cm.configs {
+		if !writtenKeys[key] && key != "file" {
+			if !hasNewKeys {
+				writer.WriteString("\n# Auto-generated settings\n")
+				hasNewKeys = true
+			}
+			writer.WriteString(fmt.Sprintf("%s = %s\n", key, value))
+		}
+	}
+
+	return writer.Flush()
+}

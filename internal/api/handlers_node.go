@@ -118,6 +118,11 @@ func (s *APIServer) handleNodeRestart(w http.ResponseWriter, r *http.Request) {
 			restartArgs = append(restartArgs, "--config", configPath)
 		}
 
+		// Add passphrase file flag if it exists in config (auto-created or user-provided)
+		if autoPassphraseFile := s.config.GetConfigWithDefault("auto_passphrase_file", ""); autoPassphraseFile != "" {
+			restartArgs = append(restartArgs, "--passphrase-file", autoPassphraseFile)
+		}
+
 		// Check if relay mode is enabled
 		if s.config.GetConfigBool("relay_mode", false) {
 			restartArgs = append(restartArgs, "--relay")

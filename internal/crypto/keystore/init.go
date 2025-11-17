@@ -9,10 +9,18 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/zalando/go-keyring"
 	"golang.org/x/term"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
+)
+
+const (
+	// OS Keyring service name for storing the keystore passphrase
+	keyringService = "remote-network-keystore"
+	// OS Keyring user/key name
+	keyringUser = "remote-network-keystore-passphrase"
 )
 
 // InitOrLoadKeystore initializes or loads the encrypted keystore
@@ -159,16 +167,9 @@ func createFreshKeystore(keystorePath string, passphraseFile string, config *uti
 	}, nil
 }
 
-// getPassphrase prompts the user for a passphrase or reads from file/config
+// getPassphrase prompts the user for a passphrase or reads from file/keyring
 func getPassphrase(passphraseFile string, isNewKeystore bool, config *utils.ConfigManager) (string, error) {
-	// Priority 1: Check config for keystore_passphrase
-	if config != nil {
-		if configPassphrase, exists := config.GetConfig("keystore_passphrase"); exists && configPassphrase != "" {
-			return configPassphrase, nil
-		}
-	}
-
-	// Priority 2: Check if passphrase file is provided
+	// Priority 1: Check if passphrase file is provided via CLI flag (for automated deployments)
 	if passphraseFile != "" {
 		passphrase, err := os.ReadFile(passphraseFile)
 		if err != nil {
@@ -177,11 +178,75 @@ func getPassphrase(passphraseFile string, isNewKeystore bool, config *utils.Conf
 		return strings.TrimSpace(string(passphrase)), nil
 	}
 
-	// Priority 3: Interactive passphrase prompt
-	if isNewKeystore {
-		return promptNewPassphrase()
+	// Priority 2: Check if auto-created passphrase file exists in config
+	// This takes precedence over keyring because if keyring failed once, it will likely fail again
+	autoPassphraseFile := config.GetConfigWithDefault("auto_passphrase_file", "")
+	if autoPassphraseFile != "" {
+		if passphrase, err := os.ReadFile(autoPassphraseFile); err == nil {
+			fmt.Printf("✓ Passphrase loaded from file: %s\n", autoPassphraseFile)
+			return strings.TrimSpace(string(passphrase)), nil
+		}
 	}
-	return promptPassphrase()
+
+	// Priority 3: Try to get passphrase from OS keyring
+	passphrase, err := keyring.Get(keyringService, keyringUser)
+	if err == nil && passphrase != "" {
+		fmt.Println("✓ Passphrase loaded from OS keyring")
+		return passphrase, nil
+	}
+
+	// Priority 4: Interactive passphrase prompt
+	var promptedPassphrase string
+	if isNewKeystore {
+		promptedPassphrase, err = promptNewPassphrase()
+	} else {
+		promptedPassphrase, err = promptPassphrase()
+	}
+	if err != nil {
+		return "", err
+	}
+
+	// Try to save passphrase to OS keyring for future use
+	if err := keyring.Set(keyringService, keyringUser, promptedPassphrase); err != nil {
+		// Keyring save failed - auto-create passphrase file as fallback
+		fmt.Printf("⚠️  Warning: Could not save passphrase to OS keyring: %v\n", err)
+
+		// Get app paths for config directory
+		paths := utils.GetAppPaths("")
+		autoPassphraseFile := filepath.Join(paths.ConfigDir, "keystore-passphrase.txt")
+
+		// Create passphrase file with secure permissions
+		if err := os.WriteFile(autoPassphraseFile, []byte(promptedPassphrase), 0600); err != nil {
+			fmt.Printf("⚠️  Warning: Could not auto-create passphrase file: %v\n", err)
+			fmt.Println("   You will need to enter the passphrase on next startup")
+		} else {
+			// Save the path to config for restart persistence
+			config.SetConfig("auto_passphrase_file", autoPassphraseFile)
+
+			// Persist config to disk so it's available on next startup
+			if err := config.SaveConfig(); err != nil {
+				fmt.Printf("⚠️  Warning: Could not persist config to disk: %v\n", err)
+				fmt.Println("   Passphrase file created but you may need to enter passphrase on next startup")
+			}
+
+			fmt.Println("")
+			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			fmt.Println("✓ Passphrase saved to file for automatic node restarts")
+			fmt.Printf("  Location: %s\n", autoPassphraseFile)
+			fmt.Println("")
+			fmt.Println("Security notes:")
+			fmt.Println("  • File permissions set to 0600 (owner read/write only)")
+			fmt.Println("  • Node will auto-load passphrase on restart (including UI restarts)")
+			fmt.Println("  • To use manual passphrase file instead:")
+			fmt.Printf("    ./remote-network start --passphrase-file /path/to/your/passphrase.txt\n")
+			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			fmt.Println("")
+		}
+	} else {
+		fmt.Println("✓ Passphrase saved to OS keyring for future logins")
+	}
+
+	return promptedPassphrase, nil
 }
 
 // promptPassphrase prompts for a passphrase (for unlocking)

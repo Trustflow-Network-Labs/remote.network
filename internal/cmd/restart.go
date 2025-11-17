@@ -92,6 +92,11 @@ var restartCmd = &cobra.Command{
 			startArgs = append(startArgs, "--config", configPath)
 		}
 
+		// Add passphrase file flag if it exists in config (auto-created or user-provided)
+		if autoPassphraseFile := config.GetConfigWithDefault("auto_passphrase_file", ""); autoPassphraseFile != "" {
+			startArgs = append(startArgs, "--passphrase-file", autoPassphraseFile)
+		}
+
 		// Add relay flag if provided
 		if relayMode {
 			startArgs = append(startArgs, "--relay")

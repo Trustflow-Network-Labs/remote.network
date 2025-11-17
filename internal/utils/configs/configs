@@ -85,12 +85,6 @@ nat_hairpinning_timeout = 2s
 #  - NAT nodes: Disconnect from relay, re-select relay, reconnect, then republish with new relay info
 network_monitor_interval_minutes = 5
 
-[keystore]
-# Keystore passphrase (optional - for automated/background startup)
-# Set this to your keystore passphrase to avoid interactive prompts
-# Leave empty to use --passphrase-file flag or interactive prompt
-keystore_passphrase = KEYSTORE_PASSPHRASE
-
 [relay]
 # Relay Service Configuration
 relay_mode = false
