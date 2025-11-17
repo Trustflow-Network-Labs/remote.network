@@ -107,6 +107,14 @@ class APIClient {
   }
 
   /**
+   * Get node capabilities (Docker availability, etc.)
+   */
+  async getNodeCapabilities() {
+    const response = await this.client.get('/api/node/capabilities')
+    return response.data
+  }
+
+  /**
    * Get list of known peers
    */
   async getPeers() {

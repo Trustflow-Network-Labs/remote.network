@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,13 @@ type NodeStatusResponse struct {
 	Uptime     int64                  `json:"uptime_seconds"`
 	Stats      map[string]interface{} `json:"stats"`
 	KnownPeers int                    `json:"known_peers"`
+}
+
+// NodeCapabilitiesResponse represents node capabilities (Docker, etc.)
+type NodeCapabilitiesResponse struct {
+	DockerAvailable bool   `json:"docker_available"`
+	DockerVersion   string `json:"docker_version,omitempty"`
+	ColimaStatus    string `json:"colima_status,omitempty"` // macOS only
 }
 
 // handleNodeStatus returns the current node status
@@ -62,6 +70,46 @@ func (s *APIServer) handleNodeStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleNodeCapabilities returns the node's capabilities (Docker availability, etc.)
+func (s *APIServer) handleNodeCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get Docker availability from config
+	dockerAvailable := s.config.GetConfigBool("docker_dependencies_available", false)
+
+	response := NodeCapabilitiesResponse{
+		DockerAvailable: dockerAvailable,
+	}
+
+	// Optionally get Docker version if available
+	if dockerAvailable {
+		if output, err := exec.Command("docker", "version", "--format", "{{.Server.Version}}").Output(); err == nil {
+			response.DockerVersion = string(output)
+		}
+
+		// On macOS, check Colima status
+		if output, err := exec.Command("colima", "status").CombinedOutput(); err == nil {
+			status := string(output)
+			if containsString(status, "running") {
+				response.ColimaStatus = "running"
+			} else {
+				response.ColimaStatus = "stopped"
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// containsString checks if a string contains a substring (case-insensitive)
+func containsString(s, substr string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
 // RestartResponse represents the response from restart endpoint

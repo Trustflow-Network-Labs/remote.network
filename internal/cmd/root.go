@@ -14,14 +14,15 @@ import (
 )
 
 var (
-	configPath      string
-	relayMode       bool
-	enableDHTStore  bool
-	passphraseFile  string
-	config          *utils.ConfigManager
-	logger          *utils.LogsManager
-	peerManager     *core.PeerManager
-	keyPair         *crypto.KeyPair // Loaded from keystore, used by start command
+	configPath           string
+	relayMode            bool
+	enableDHTStore       bool
+	passphraseFile       string
+	installDependencies  bool
+	config               *utils.ConfigManager
+	logger               *utils.LogsManager
+	peerManager          *core.PeerManager
+	keyPair              *crypto.KeyPair // Loaded from keystore, used by start command
 )
 
 var rootCmd = &cobra.Command{
@@ -115,4 +116,5 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&relayMode, "relay", "r", false, "enable relay mode (requires public IP)")
 	rootCmd.PersistentFlags().BoolVarP(&enableDHTStore, "store", "s", true, "enable BEP_44 DHT storage for serving mutable data to other peers")
 	rootCmd.PersistentFlags().StringVarP(&passphraseFile, "passphrase-file", "p", "", "path to file containing keystore passphrase (for automated deployments)")
+	rootCmd.PersistentFlags().BoolVarP(&installDependencies, "install-dependencies", "i", false, "install missing Docker dependencies (checks on every startup)")
 }

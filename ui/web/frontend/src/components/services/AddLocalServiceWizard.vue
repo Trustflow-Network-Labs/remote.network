@@ -299,7 +299,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useToast } from 'primevue/usetoast'
 
@@ -317,6 +317,7 @@ import Button from 'primevue/button'
 import SplitButton from 'primevue/splitbutton'
 
 import { useServicesStore } from '../../stores/services'
+import { api } from '../../services/api'
 
 const props = defineProps<{
   visible: boolean
@@ -334,6 +335,13 @@ const servicesStore = useServicesStore()
 // Wizard state
 const activeStep = ref('1')
 const isCreating = ref(false)
+
+// Node capabilities
+const nodeCapabilities = ref({
+  dockerAvailable: false,
+  dockerVersion: '',
+  colimaStatus: ''
+})
 
 // Service data
 const serviceData = ref({
@@ -385,26 +393,35 @@ const pricingUnits = computed(() => [
 ])
 
 // Service types with descriptions
-const serviceTypes = computed(() => [
-  {
-    value: 'DATA',
-    label: t('message.services.types.data'),
-    description: t('message.services.wizard.dataDescription'),
-    icon: 'pi pi-database'
-  },
-  {
-    value: 'DOCKER',
-    label: t('message.services.types.docker'),
-    description: t('message.services.wizard.dockerDescription'),
-    icon: 'pi pi-box'
-  },
-  {
+const serviceTypes = computed(() => {
+  const types = [
+    {
+      value: 'DATA',
+      label: t('message.services.types.data'),
+      description: t('message.services.wizard.dataDescription'),
+      icon: 'pi pi-database'
+    }
+  ]
+
+  // Only show DOCKER type if Docker dependencies are available
+  if (nodeCapabilities.value.dockerAvailable) {
+    types.push({
+      value: 'DOCKER',
+      label: t('message.services.types.docker'),
+      description: t('message.services.wizard.dockerDescription'),
+      icon: 'pi pi-box'
+    })
+  }
+
+  types.push({
     value: 'STANDALONE',
     label: t('message.services.types.standalone'),
     description: t('message.services.wizard.standaloneDescription'),
     icon: 'pi pi-cog'
-  }
-])
+  })
+
+  return types
+})
 
 // File picker menu items for SplitButton dropdown
 const filePickerMenuItems = computed(() => [
@@ -549,6 +566,20 @@ function resetWizard() {
 function closeDialog() {
   emit('update:visible', false)
 }
+
+// Fetch node capabilities on component mount
+onMounted(async () => {
+  try {
+    const response = await api.getNodeCapabilities()
+    if (response) {
+      nodeCapabilities.value = response
+    }
+  } catch (error) {
+    console.error('Failed to fetch node capabilities:', error)
+    // Default to Docker unavailable if fetch fails
+    nodeCapabilities.value.dockerAvailable = false
+  }
+})
 </script>
 
 <style scoped lang="scss">

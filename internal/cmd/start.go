@@ -5,10 +5,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/core"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/dependencies"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -25,6 +27,63 @@ This will:
 - Begin announcing presence to the network`,
 	Run: func(cmd *cobra.Command, args []string) {
 		logger.Info("Starting Remote Network Node...", "cli")
+
+		// Check Docker dependencies
+		depManager := dependencies.NewDependencyManager(config, logger)
+		dependenciesChecked := config.GetConfigBool("dependencies_checked", false)
+		dockerAvailable := false
+
+		if !dependenciesChecked || installDependencies {
+			// First startup or user explicitly requested installation
+			logger.Info("Checking Docker dependencies (full check)...", "cli")
+			dockerAvailable = depManager.CheckAndInstallDependencies()
+
+			// Mark as checked and save status
+			config.SetConfig("dependencies_checked", true)
+			config.SetConfig("docker_dependencies_available", dockerAvailable)
+			if err := config.SaveConfig(); err != nil {
+				logger.Warn(fmt.Sprintf("Failed to save dependency check status: %v", err), "cli")
+			}
+		} else {
+			// Subsequent startups - quick check and start services
+			logger.Info("Checking Docker dependencies...", "cli")
+			missing := depManager.GetMissingDependencies()
+
+			if len(missing) == 0 {
+				fmt.Println("✅ All Docker dependencies are installed")
+				dockerAvailable = true
+
+				// Start Docker/Colima services if not running
+				logger.Info("Initializing Docker services...", "cli")
+				if err := depManager.InitializeDependencies(); err != nil {
+					logger.Warn(fmt.Sprintf("Failed to initialize Docker services: %v", err), "cli")
+					fmt.Printf("⚠️  Warning: Docker services failed to start: %v\n", err)
+					fmt.Println("You can try manually starting Docker/Colima or run with --install-dependencies")
+					dockerAvailable = false
+				} else {
+					logger.Info("Docker services initialized successfully", "cli")
+					fmt.Println("✅ Docker services are running")
+				}
+
+				// Update availability status
+				config.SetConfig("docker_dependencies_available", dockerAvailable)
+				if err := config.SaveConfig(); err != nil {
+					logger.Warn(fmt.Sprintf("Failed to save dependency status: %v", err), "cli")
+				}
+			} else {
+				fmt.Printf("⚠️  Missing Docker dependencies: %s\n", strings.Join(missing, ", "))
+				fmt.Println("Docker services will be disabled. To install, run:")
+				fmt.Println("  ./remote-network start --install-dependencies")
+				logger.Info(fmt.Sprintf("Docker dependencies missing: %s", strings.Join(missing, ", ")), "cli")
+				dockerAvailable = false
+
+				// Update status
+				config.SetConfig("docker_dependencies_available", false)
+				if err := config.SaveConfig(); err != nil {
+					logger.Warn(fmt.Sprintf("Failed to save dependency status: %v", err), "cli")
+				}
+			}
+		}
 
 		// Initialize peer manager with keys loaded from keystore in PersistentPreRun
 		var err error
