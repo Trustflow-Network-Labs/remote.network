@@ -143,9 +143,17 @@ func (sm *SQLiteManager) InitServicesTable() error {
 		image_name TEXT NOT NULL,
 		image_tag TEXT,
 		dockerfile_path TEXT,
+		compose_path TEXT,
+		source TEXT CHECK(source IN ('registry', 'git', 'local')) DEFAULT 'registry',
+		git_repo_url TEXT,
+		git_commit_hash TEXT,
+		local_context_path TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE
 	);
+
+	CREATE INDEX IF NOT EXISTS idx_docker_service_details_service_id ON docker_service_details(service_id);
+	CREATE INDEX IF NOT EXISTS idx_docker_service_details_source ON docker_service_details(source);
 
 	CREATE TABLE IF NOT EXISTS standalone_service_details (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,

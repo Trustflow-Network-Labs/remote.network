@@ -1,7 +1,7 @@
 <template>
   <Dialog
     :visible="visible"
-    @update:visible="(val) => emit('update:visible', val)"
+    @update:visible="(val: boolean) => emit('update:visible', val)"
     :header="$t('message.services.addLocalService')"
     :modal="true"
     :style="{ width: '700px' }"
@@ -112,7 +112,7 @@
                   :key="type.value"
                   class="service-type-card"
                   :class="{ 'selected': serviceData.serviceType === type.value }"
-                  @click="serviceData.serviceType = type.value"
+                  @click="serviceData.serviceType = type.value as 'DATA' | 'DOCKER' | 'STANDALONE'"
                 >
                   <i :class="type.icon" class="type-icon"></i>
                   <div class="type-label">{{ type.label }}</div>
@@ -193,47 +193,132 @@
             <div v-else-if="serviceData.serviceType === 'DOCKER'" class="config-section">
               <h4>{{ $t('message.services.wizard.dockerConfig') }}</h4>
 
+              <!-- Docker Source Selection -->
               <div class="field">
-                <label for="docker-image">{{ $t('message.services.wizard.dockerImage') }} *</label>
-                <InputText
-                  id="docker-image"
-                  v-model="serviceData.dockerImage"
-                  :placeholder="$t('message.services.wizard.dockerImagePlaceholder')"
-                  class="w-full"
-                />
+                <label>{{ $t('message.services.wizard.dockerSource') }} *</label>
+                <div class="docker-source-selection">
+                  <div
+                    v-for="source in dockerSources"
+                    :key="source.value"
+                    class="docker-source-card"
+                    :class="{ 'selected': serviceData.dockerSource === source.value }"
+                    @click="serviceData.dockerSource = source.value as 'registry' | 'git' | 'local'"
+                  >
+                    <i :class="source.icon" class="source-icon"></i>
+                    <div class="source-label">{{ source.label }}</div>
+                  </div>
+                </div>
               </div>
 
-              <div class="field">
-                <label for="docker-ports">{{ $t('message.services.wizard.ports') }}</label>
-                <InputText
-                  id="docker-ports"
-                  v-model="serviceData.dockerPorts"
-                  :placeholder="$t('message.services.wizard.portsPlaceholder')"
-                  class="w-full"
-                />
-                <small class="field-help">{{ $t('message.services.wizard.portsHelp') }}</small>
+              <!-- Registry Configuration -->
+              <div v-if="serviceData.dockerSource === 'registry'" class="source-config">
+                <div class="field">
+                  <label for="docker-image">{{ $t('message.services.wizard.imageName') }} *</label>
+                  <InputText
+                    id="docker-image"
+                    v-model="serviceData.dockerImageName"
+                    :placeholder="$t('message.services.wizard.imageNamePlaceholder')"
+                    class="w-full"
+                    :class="{ 'p-invalid': errors.dockerImageName }"
+                  />
+                  <small class="field-help">{{ $t('message.services.wizard.imageNameHelp') }}</small>
+                  <small v-if="errors.dockerImageName" class="p-error">{{ errors.dockerImageName }}</small>
+                </div>
+
+                <div class="field">
+                  <label for="docker-tag">{{ $t('message.services.wizard.imageTag') }}</label>
+                  <InputText
+                    id="docker-tag"
+                    v-model="serviceData.dockerImageTag"
+                    :placeholder="$t('message.services.wizard.imageTagPlaceholder')"
+                    class="w-full"
+                  />
+                </div>
+
+                <div class="field">
+                  <label for="docker-username">{{ $t('message.services.wizard.registryUsername') }}</label>
+                  <InputText
+                    id="docker-username"
+                    v-model="serviceData.dockerUsername"
+                    :placeholder="$t('message.services.wizard.usernameOptional')"
+                    class="w-full"
+                  />
+                  <small class="field-help">{{ $t('message.services.wizard.registryAuthHelp') }}</small>
+                </div>
+
+                <div class="field">
+                  <label for="docker-password">{{ $t('message.services.wizard.registryPassword') }}</label>
+                  <InputText
+                    id="docker-password"
+                    v-model="serviceData.dockerPassword"
+                    type="password"
+                    :placeholder="$t('message.services.wizard.passwordOptional')"
+                    class="w-full"
+                  />
+                </div>
               </div>
 
-              <div class="field">
-                <label for="docker-volumes">{{ $t('message.services.wizard.volumes') }}</label>
-                <Textarea
-                  id="docker-volumes"
-                  v-model="serviceData.dockerVolumes"
-                  :placeholder="$t('message.services.wizard.volumesPlaceholder')"
-                  class="w-full"
-                  rows="3"
-                />
+              <!-- Git Repository Configuration -->
+              <div v-else-if="serviceData.dockerSource === 'git'" class="source-config">
+                <div class="field">
+                  <label for="git-repo">{{ $t('message.services.wizard.gitRepoUrl') }} *</label>
+                  <InputText
+                    id="git-repo"
+                    v-model="serviceData.dockerGitRepo"
+                    :placeholder="$t('message.services.wizard.gitRepoPlaceholder')"
+                    class="w-full"
+                    :class="{ 'p-invalid': errors.dockerGitRepo }"
+                  />
+                  <small v-if="errors.dockerGitRepo" class="p-error">{{ errors.dockerGitRepo }}</small>
+                </div>
+
+                <div class="field">
+                  <label for="git-branch">{{ $t('message.services.wizard.gitBranch') }}</label>
+                  <InputText
+                    id="git-branch"
+                    v-model="serviceData.dockerGitBranch"
+                    :placeholder="$t('message.services.wizard.gitBranchPlaceholder')"
+                    class="w-full"
+                  />
+                </div>
+
+                <div class="field">
+                  <label for="git-username">{{ $t('message.services.wizard.gitUsername') }}</label>
+                  <InputText
+                    id="git-username"
+                    v-model="serviceData.dockerGitUsername"
+                    :placeholder="$t('message.services.wizard.usernameOptional')"
+                    class="w-full"
+                  />
+                  <small class="field-help">{{ $t('message.services.wizard.gitAuthHelp') }}</small>
+                </div>
+
+                <div class="field">
+                  <label for="git-password">{{ $t('message.services.wizard.gitPassword') }}</label>
+                  <InputText
+                    id="git-password"
+                    v-model="serviceData.dockerGitPassword"
+                    type="password"
+                    :placeholder="$t('message.services.wizard.passwordTokenOptional')"
+                    class="w-full"
+                  />
+                </div>
               </div>
 
-              <div class="field">
-                <label for="docker-env">{{ $t('message.services.wizard.environment') }}</label>
-                <Textarea
-                  id="docker-env"
-                  v-model="serviceData.dockerEnv"
-                  :placeholder="$t('message.services.wizard.envPlaceholder')"
-                  class="w-full"
-                  rows="3"
-                />
+              <!-- Local Directory Configuration -->
+              <div v-else-if="serviceData.dockerSource === 'local'" class="source-config">
+                <div class="field">
+                  <label for="local-path">{{ $t('message.services.wizard.localPath') }} *</label>
+                  <InputText
+                    id="local-path"
+                    v-model="serviceData.dockerLocalPath"
+                    :placeholder="$t('message.services.wizard.localPathPlaceholder')"
+                    class="w-full"
+                    :class="{ 'p-invalid': errors.dockerLocalPath }"
+                  />
+                  <small class="field-help">{{ $t('message.services.wizard.localPathHelp') }}</small>
+                  <small v-if="errors.dockerLocalPath" class="p-error">{{ errors.dockerLocalPath }}</small>
+                </div>
               </div>
             </div>
 
@@ -319,7 +404,7 @@ import SplitButton from 'primevue/splitbutton'
 import { useServicesStore } from '../../stores/services'
 import { api } from '../../services/api'
 
-const props = defineProps<{
+defineProps<{
   visible: boolean
 }>()
 
@@ -355,10 +440,16 @@ const serviceData = ref({
   // DATA specific
   files: [] as File[],
   // DOCKER specific
-  dockerImage: '',
-  dockerPorts: '',
-  dockerVolumes: '',
-  dockerEnv: '',
+  dockerSource: 'registry' as 'registry' | 'git' | 'local',
+  dockerImageName: '',
+  dockerImageTag: 'latest',
+  dockerUsername: '',
+  dockerPassword: '',
+  dockerGitRepo: '',
+  dockerGitBranch: 'main',
+  dockerGitUsername: '',
+  dockerGitPassword: '',
+  dockerLocalPath: '',
   // STANDALONE specific
   standaloneCommand: '',
   standaloneArgs: '',
@@ -369,7 +460,10 @@ const serviceData = ref({
 const errors = ref({
   name: '',
   serviceType: '',
-  files: ''
+  files: '',
+  dockerImageName: '',
+  dockerGitRepo: '',
+  dockerLocalPath: ''
 })
 
 const selectedFiles = ref<File[]>([])
@@ -423,6 +517,25 @@ const serviceTypes = computed(() => {
   return types
 })
 
+// Docker sources
+const dockerSources = computed(() => [
+  {
+    value: 'registry',
+    label: t('message.services.wizard.fromRegistry'),
+    icon: 'pi pi-cloud-download'
+  },
+  {
+    value: 'git',
+    label: t('message.services.wizard.fromGit'),
+    icon: 'pi pi-github'
+  },
+  {
+    value: 'local',
+    label: t('message.services.wizard.fromLocal'),
+    icon: 'pi pi-folder-open'
+  }
+])
+
 // File picker menu items for SplitButton dropdown
 const filePickerMenuItems = computed(() => [
   {
@@ -469,7 +582,14 @@ function clearFiles() {
 }
 
 function validateStep(step: number): boolean {
-  errors.value = { name: '', serviceType: '', files: '' }
+  errors.value = {
+    name: '',
+    serviceType: '',
+    files: '',
+    dockerImageName: '',
+    dockerGitRepo: '',
+    dockerLocalPath: ''
+  }
 
   if (step === 1) {
     if (!serviceData.value.name.trim()) {
@@ -501,13 +621,29 @@ async function finishWizard() {
     return
   }
 
+  // Validate Docker service
+  if (serviceData.value.serviceType === 'DOCKER') {
+    errors.value.dockerImageName = ''
+    errors.value.dockerGitRepo = ''
+    errors.value.dockerLocalPath = ''
+
+    if (serviceData.value.dockerSource === 'registry' && !serviceData.value.dockerImageName.trim()) {
+      errors.value.dockerImageName = t('message.services.imageRequired')
+      return
+    }
+    if (serviceData.value.dockerSource === 'git' && !serviceData.value.dockerGitRepo.trim()) {
+      errors.value.dockerGitRepo = t('message.services.repoRequired')
+      return
+    }
+    if (serviceData.value.dockerSource === 'local' && !serviceData.value.dockerLocalPath.trim()) {
+      errors.value.dockerLocalPath = t('message.services.pathRequired')
+      return
+    }
+  }
+
   isCreating.value = true
 
   try {
-    // Create the service based on type
-    // For now, we'll use the existing DATA service flow
-    // TODO: Implement DOCKER and STANDALONE service creation
-
     if (serviceData.value.serviceType === 'DATA') {
       // Create DATA service (reuse existing logic from AddDataServiceDialog)
       toast.add({
@@ -516,6 +652,55 @@ async function finishWizard() {
         detail: 'DATA service creation with file upload will be implemented',
         life: 3000
       })
+    } else if (serviceData.value.serviceType === 'DOCKER') {
+      // Create Docker service based on source
+      let endpoint = ''
+      let payload: any = {
+        service_name: serviceData.value.name,
+        description: serviceData.value.description
+      }
+
+      if (serviceData.value.dockerSource === 'registry') {
+        endpoint = '/api/services/docker/from-registry'
+        payload.image_name = serviceData.value.dockerImageName
+        payload.image_tag = serviceData.value.dockerImageTag || 'latest'
+        if (serviceData.value.dockerUsername) payload.username = serviceData.value.dockerUsername
+        if (serviceData.value.dockerPassword) payload.password = serviceData.value.dockerPassword
+      } else if (serviceData.value.dockerSource === 'git') {
+        endpoint = '/api/services/docker/from-git'
+        payload.repo_url = serviceData.value.dockerGitRepo
+        payload.branch = serviceData.value.dockerGitBranch || 'main'
+        if (serviceData.value.dockerGitUsername) payload.username = serviceData.value.dockerGitUsername
+        if (serviceData.value.dockerGitPassword) payload.password = serviceData.value.dockerGitPassword
+      } else if (serviceData.value.dockerSource === 'local') {
+        endpoint = '/api/services/docker/from-local'
+        payload.local_path = serviceData.value.dockerLocalPath
+      }
+
+      const response = await fetch(`${api.getBaseURL()}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
+        },
+        body: JSON.stringify(payload)
+      })
+
+      const data = await response.json()
+
+      if (response.ok && data.success) {
+        toast.add({
+          severity: 'success',
+          summary: t('message.common.success'),
+          detail: t('message.services.dockerCreated'),
+          life: 3000
+        })
+        servicesStore.fetchServices()
+        emit('service-created')
+        closeDialog()
+      } else {
+        throw new Error(data.error || data.message || 'Failed to create Docker service')
+      }
     } else {
       toast.add({
         severity: 'info',
@@ -524,9 +709,6 @@ async function finishWizard() {
         life: 3000
       })
     }
-
-    emit('service-created')
-    closeDialog()
   } catch (error: any) {
     toast.add({
       severity: 'error',
@@ -550,17 +732,30 @@ function resetWizard() {
     pricingUnit: 'MONTHS',
     serviceType: '',
     files: [],
-    dockerImage: '',
-    dockerPorts: '',
-    dockerVolumes: '',
-    dockerEnv: '',
+    dockerSource: 'registry',
+    dockerImageName: '',
+    dockerImageTag: 'latest',
+    dockerUsername: '',
+    dockerPassword: '',
+    dockerGitRepo: '',
+    dockerGitBranch: 'main',
+    dockerGitUsername: '',
+    dockerGitPassword: '',
+    dockerLocalPath: '',
     standaloneCommand: '',
     standaloneArgs: '',
     standaloneWorkdir: '',
     standaloneEnv: ''
   }
   selectedFiles.value = []
-  errors.value = { name: '', serviceType: '', files: '' }
+  errors.value = {
+    name: '',
+    serviceType: '',
+    files: '',
+    dockerImageName: '',
+    dockerGitRepo: '',
+    dockerLocalPath: ''
+  }
 }
 
 function closeDialog() {
@@ -931,5 +1126,50 @@ onMounted(async () => {
 
 .p-invalid {
   border-color: var(--red-500);
+}
+
+.docker-source-selection {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.docker-source-card {
+  padding: 1rem;
+  border: 2px solid rgb(49, 64, 92);
+  border-radius: 6px;
+  background-color: rgb(38, 49, 65);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: center;
+
+  &:hover {
+    background-color: rgb(49, 64, 92);
+    border-color: rgba(vars.$color-primary, 0.5);
+  }
+
+  &.selected {
+    border-color: vars.$color-primary;
+    background-color: rgb(49, 64, 92);
+  }
+
+  .source-icon {
+    font-size: 1.8rem;
+    color: vars.$color-primary;
+    margin-bottom: 0.25rem;
+  }
+
+  .source-label {
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+}
+
+.source-config {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(vars.$color-primary, 0.2);
 }
 </style>

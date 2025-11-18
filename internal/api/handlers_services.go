@@ -24,21 +24,38 @@ func (s *APIServer) handleGetServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enhance each service with its interfaces
+	// Enhance each service with its interfaces and Docker details (if applicable)
+	type EnhancedService struct {
+		*database.OfferedService
+		DockerDetails *database.DockerServiceDetails `json:"docker_details,omitempty"`
+	}
+
+	enhancedServices := make([]EnhancedService, len(services))
 	for i := range services {
+		enhancedServices[i] = EnhancedService{OfferedService: services[i]}
+
+		// Add interfaces
 		interfaces, err := s.dbManager.GetServiceInterfaces(services[i].ID)
 		if err == nil {
-			services[i].Interfaces = interfaces
+			enhancedServices[i].Interfaces = interfaces
 		} else {
 			// If error, just set empty array (don't fail the whole request)
-			services[i].Interfaces = []*database.ServiceInterface{}
+			enhancedServices[i].Interfaces = []*database.ServiceInterface{}
+		}
+
+		// Add Docker details for Docker services
+		if services[i].ServiceType == "DOCKER" {
+			dockerDetails, err := s.dbManager.GetDockerServiceDetails(services[i].ID)
+			if err == nil {
+				enhancedServices[i].DockerDetails = dockerDetails
+			}
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"services": services,
-		"total":    len(services),
+		"services": enhancedServices,
+		"total":    len(enhancedServices),
 	})
 }
 
@@ -279,6 +296,33 @@ func (s *APIServer) handleDeleteService(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		http.Error(w, "Invalid service ID", http.StatusBadRequest)
 		return
+	}
+
+	// Get service details before deleting to check if it's a Docker service
+	service, err := s.dbManager.GetService(id)
+	if err != nil {
+		s.logger.Error("Failed to get service details", "api")
+		http.Error(w, "Failed to retrieve service", http.StatusInternalServerError)
+		return
+	}
+
+	if service == nil {
+		http.Error(w, "Service not found", http.StatusNotFound)
+		return
+	}
+
+	// If it's a Docker service, clean up Docker resources
+	if service.ServiceType == "DOCKER" {
+		dockerDetails, err := s.dbManager.GetDockerServiceDetails(id)
+		if err == nil && dockerDetails != nil && dockerDetails.ImageName != "" {
+			imageName := fmt.Sprintf("%s:%s", dockerDetails.ImageName, dockerDetails.ImageTag)
+			s.logger.Info(fmt.Sprintf("Cleaning up Docker image for service %d: %s", id, imageName), "api")
+
+			// Remove Docker image (don't fail deletion if image removal fails)
+			if err := s.dockerService.RemoveImage(imageName); err != nil {
+				s.logger.Warn(fmt.Sprintf("Failed to remove Docker image %s: %v", imageName, err), "api")
+			}
+		}
 	}
 
 	err = s.dbManager.DeleteService(id)

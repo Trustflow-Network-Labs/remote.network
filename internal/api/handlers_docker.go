@@ -1,0 +1,462 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+)
+
+// Request types for Docker service creation
+
+// CreateFromRegistryRequest represents a request to create a Docker service from a registry
+type CreateFromRegistryRequest struct {
+	ServiceName      string                       `json:"service_name"`
+	ImageName        string                       `json:"image_name"`
+	ImageTag         string                       `json:"image_tag"`
+	Description      string                       `json:"description"`
+	Username         string                       `json:"username,omitempty"`
+	Password         string                       `json:"password,omitempty"`
+	CustomInterfaces []*database.ServiceInterface `json:"custom_interfaces,omitempty"`
+}
+
+// CreateFromGitRequest represents a request to create a Docker service from a Git repository
+type CreateFromGitRequest struct {
+	ServiceName      string                       `json:"service_name"`
+	RepoURL          string                       `json:"repo_url"`
+	Branch           string                       `json:"branch"`
+	Username         string                       `json:"username,omitempty"`
+	Password         string                       `json:"password,omitempty"`
+	Description      string                       `json:"description"`
+	CustomInterfaces []*database.ServiceInterface `json:"custom_interfaces,omitempty"`
+}
+
+// CreateFromLocalRequest represents a request to create a Docker service from a local directory
+type CreateFromLocalRequest struct {
+	ServiceName      string                       `json:"service_name"`
+	LocalPath        string                       `json:"local_path"`
+	Description      string                       `json:"description"`
+	CustomInterfaces []*database.ServiceInterface `json:"custom_interfaces,omitempty"`
+}
+
+// handleCreateDockerFromRegistry handles POST /api/services/docker/from-registry
+func (s *APIServer) handleCreateDockerFromRegistry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CreateFromRegistryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to decode request: %v", err), "api")
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.ServiceName == "" || req.ImageName == "" {
+		http.Error(w, "service_name and image_name are required", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Creating Docker service from registry: %s:%s", req.ImageName, req.ImageTag), "api")
+
+	// Create service
+	service, suggestions, err := s.dockerService.CreateFromRegistry(
+		req.ServiceName,
+		req.ImageName,
+		req.ImageTag,
+		req.Description,
+		req.Username,
+		req.Password,
+		req.CustomInterfaces,
+	)
+
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to create Docker service from registry: %v", err), "api")
+		http.Error(w, fmt.Sprintf("Failed to create service: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
+
+	// Update peer metadata in background
+	go s.updatePeerMetadataAfterServiceChange()
+
+	s.logger.Info(fmt.Sprintf("Docker service created successfully: %s (ID: %d)", req.ServiceName, service.ID), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":             true,
+		"service":             service,
+		"suggested_interfaces": suggestions,
+	})
+}
+
+// handleCreateDockerFromGit handles POST /api/services/docker/from-git
+func (s *APIServer) handleCreateDockerFromGit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CreateFromGitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to decode request: %v", err), "api")
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.ServiceName == "" || req.RepoURL == "" {
+		http.Error(w, "service_name and repo_url are required", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Creating Docker service from Git: %s (branch: %s)", req.RepoURL, req.Branch), "api")
+
+	// Create service
+	service, suggestions, err := s.dockerService.CreateFromGitRepo(
+		req.ServiceName,
+		req.RepoURL,
+		req.Branch,
+		req.Username,
+		req.Password,
+		req.Description,
+		req.CustomInterfaces,
+	)
+
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to create Docker service from Git: %v", err), "api")
+		http.Error(w, fmt.Sprintf("Failed to create service: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
+
+	// Update peer metadata in background
+	go s.updatePeerMetadataAfterServiceChange()
+
+	s.logger.Info(fmt.Sprintf("Docker service created from Git successfully: %s (ID: %d)", req.ServiceName, service.ID), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":             true,
+		"service":             service,
+		"suggested_interfaces": suggestions,
+	})
+}
+
+// handleCreateDockerFromLocal handles POST /api/services/docker/from-local
+func (s *APIServer) handleCreateDockerFromLocal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CreateFromLocalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to decode request: %v", err), "api")
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.ServiceName == "" || req.LocalPath == "" {
+		http.Error(w, "service_name and local_path are required", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Creating Docker service from local directory: %s", req.LocalPath), "api")
+
+	// Create service
+	service, suggestions, err := s.dockerService.CreateFromLocalDirectory(
+		req.ServiceName,
+		req.LocalPath,
+		req.Description,
+		req.CustomInterfaces,
+	)
+
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to create Docker service from local: %v", err), "api")
+		http.Error(w, fmt.Sprintf("Failed to create service: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
+
+	// Update peer metadata in background
+	go s.updatePeerMetadataAfterServiceChange()
+
+	s.logger.Info(fmt.Sprintf("Docker service created from local successfully: %s (ID: %d)", req.ServiceName, service.ID), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":             true,
+		"service":             service,
+		"suggested_interfaces": suggestions,
+	})
+}
+
+// handleGetDockerServiceDetails handles GET /api/services/docker/{id}/details
+func (s *APIServer) handleGetDockerServiceDetails(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/api/services/docker/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 1 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	// Get Docker service details
+	details, err := s.dbManager.GetDockerServiceDetails(id)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get Docker service details: %v", err), "api")
+		http.Error(w, "Failed to retrieve Docker service details", http.StatusInternalServerError)
+		return
+	}
+
+	if details == nil {
+		http.Error(w, "Docker service details not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"details": details,
+	})
+}
+
+// handleValidateGitRepo handles POST /api/services/docker/validate-git
+func (s *APIServer) handleValidateGitRepo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		RepoURL  string `json:"repo_url"`
+		Username string `json:"username,omitempty"`
+		Password string `json:"password,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.RepoURL == "" {
+		http.Error(w, "repo_url is required", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Validating Git repository: %s", req.RepoURL), "api")
+
+	// Validate repository
+	err := s.gitService.ValidateRepo(req.RepoURL, req.Username, req.Password)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Git repository validation failed: %v", err), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK) // Return 200 with validation result
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"valid": false,
+			"error": err.Error(),
+		})
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Git repository validated successfully: %s", req.RepoURL), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"valid": true,
+	})
+}
+
+// handleGetSuggestedInterfaces handles GET /api/services/docker/{id}/interfaces/suggested
+func (s *APIServer) handleGetSuggestedInterfaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/api/services/docker/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 1 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	// Get Docker service details
+	details, err := s.dbManager.GetDockerServiceDetails(id)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get Docker service details: %v", err), "api")
+		http.Error(w, "Failed to retrieve Docker service details", http.StatusInternalServerError)
+		return
+	}
+
+	if details == nil {
+		http.Error(w, "Docker service not found", http.StatusNotFound)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Getting suggested interfaces for Docker service ID: %d", id), "api")
+
+	// Re-detect interfaces based on source
+	var suggestions interface{}
+
+	switch details.Source {
+	case "registry":
+		// For registry images, detect from image metadata
+		imageName := fmt.Sprintf("%s:%s", details.ImageName, details.ImageTag)
+		cli, err := s.dockerService.GetDockerClient()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create Docker client: %v", err), http.StatusInternalServerError)
+			return
+		}
+		defer cli.Close()
+
+		detected, err := s.dockerService.DetectInterfacesFromImageName(cli, imageName)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to detect interfaces: %v", err), http.StatusInternalServerError)
+			return
+		}
+		suggestions = detected
+
+	case "git", "local":
+		// For git/local, re-parse the Dockerfile or compose
+		if details.ComposePath != "" {
+			project, err := s.dockerService.ParseComposeFile(details.ComposePath, "")
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to parse compose file: %v", err), http.StatusInternalServerError)
+				return
+			}
+			suggestions = s.dockerService.DetectInterfacesFromComposeProject(project)
+		} else if details.ImageName != "" {
+			// Image was built, detect from it
+			cli, err := s.dockerService.GetDockerClient()
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to create Docker client: %v", err), http.StatusInternalServerError)
+				return
+			}
+			defer cli.Close()
+
+			imageName := fmt.Sprintf("%s:%s", details.ImageName, details.ImageTag)
+			detected, err := s.dockerService.DetectInterfacesFromImageName(cli, imageName)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to detect interfaces: %v", err), http.StatusInternalServerError)
+				return
+			}
+			suggestions = detected
+		}
+
+	default:
+		http.Error(w, "Unknown Docker service source", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"suggested_interfaces": suggestions,
+	})
+}
+
+// handleUpdateServiceInterfaces handles PUT /api/services/docker/{id}/interfaces
+func (s *APIServer) handleUpdateServiceInterfaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/api/services/docker/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 1 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Interfaces []*database.ServiceInterface `json:"interfaces"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Updating interfaces for Docker service ID: %d", id), "api")
+
+	// Delete existing interfaces
+	existingInterfaces, err := s.dbManager.GetServiceInterfaces(id)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get existing interfaces: %v", err), "api")
+		http.Error(w, "Failed to retrieve existing interfaces", http.StatusInternalServerError)
+		return
+	}
+
+	for _, iface := range existingInterfaces {
+		if err := s.dbManager.DeleteServiceInterface(iface.ID); err != nil {
+			s.logger.Error(fmt.Sprintf("Failed to delete interface: %v", err), "api")
+			http.Error(w, "Failed to delete existing interfaces", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Add new interfaces
+	for _, iface := range req.Interfaces {
+		iface.ServiceID = id
+		if err := s.dbManager.AddServiceInterface(iface); err != nil {
+			s.logger.Error(fmt.Sprintf("Failed to add interface: %v", err), "api")
+			http.Error(w, "Failed to add new interfaces", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
+
+	// Update peer metadata
+	go s.updatePeerMetadataAfterServiceChange()
+
+	s.logger.Info(fmt.Sprintf("Updated %d interfaces for Docker service ID: %d", len(req.Interfaces), id), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Interfaces updated successfully",
+	})
+}

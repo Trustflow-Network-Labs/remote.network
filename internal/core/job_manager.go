@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/dependencies"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/workers"
@@ -24,6 +26,7 @@ type JobManager struct {
 	logger           *utils.LogsManager
 	workerPool       *workers.WorkerPool
 	dataWorker       *workers.DataServiceWorker
+	dockerService    *services.DockerService
 	statusUpdateChan chan *types.JobStatusUpdate
 	peerManager      *PeerManager // Reference to peer manager for P2P communication
 	tickerInterval   time.Duration
@@ -49,14 +52,24 @@ func NewJobManager(ctx context.Context, db *database.SQLiteManager, cm *utils.Co
 	// For now, pass nil for job handler
 	dataWorker := workers.NewDataServiceWorker(db, cm, nil)
 
+	// Initialize logger
+	logger := utils.NewLogsManager(cm)
+
+	// Initialize Docker service for job execution
+	appPaths := utils.GetAppPaths("")
+	gitService := services.NewGitService(logger, cm, appPaths)
+	depManager := dependencies.NewDependencyManager(cm, logger)
+	dockerService := services.NewDockerService(db, logger, cm, appPaths, depManager, gitService)
+
 	jm := &JobManager{
 		ctx:              jobCtx,
 		cancel:           cancel,
 		db:               db,
 		cm:               cm,
-		logger:           utils.NewLogsManager(cm),
+		logger:           logger,
 		workerPool:       workerPool,
 		dataWorker:       dataWorker,
+		dockerService:    dockerService,
 		statusUpdateChan: make(chan *types.JobStatusUpdate, 100),
 		peerManager:      peerManager,
 		tickerInterval:   tickerInterval,
@@ -277,8 +290,7 @@ func (jm *JobManager) executeJob(job *database.JobExecution) {
 		jm.executeDataService(job, service)
 
 	case types.ServiceTypeDocker:
-		jm.logger.Error(fmt.Sprintf("DOCKER service type not yet implemented for job %d", job.ID), "job_manager")
-		jm.handleJobError(job.ID, job.WorkflowJobID, "DOCKER service type not yet implemented")
+		jm.executeDockerService(job, service)
 
 	case types.ServiceTypeStandalone:
 		jm.logger.Error(fmt.Sprintf("STANDALONE service type not yet implemented for job %d", job.ID), "job_manager")
@@ -311,6 +323,85 @@ func (jm *JobManager) executeDataService(job *database.JobExecution, service *da
 
 	// Send status update
 	jm.sendStatusUpdate(job.ID, job.WorkflowJobID, types.JobStatusCompleted, "")
+}
+
+// executeDockerService executes a DOCKER service job
+func (jm *JobManager) executeDockerService(job *database.JobExecution, service *database.OfferedService) {
+	jm.logger.Info(fmt.Sprintf("Executing DOCKER service for job %d", job.ID), "job_manager")
+
+	// Get service interfaces
+	interfaces, err := jm.db.GetServiceInterfaces(service.ID)
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to get service interfaces for job %d: %v", job.ID, err), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to get service interfaces: %v", err))
+		return
+	}
+
+	// Parse job configuration
+	// Job inputs/outputs would be in job.Config (depends on your job schema)
+	// For now, use simple defaults
+	inputs := []string{}
+	outputs := []string{}
+	mounts := make(map[string]string)
+	envVars := make(map[string]string)
+
+	// Extract mounts from interfaces
+	appPaths := utils.GetAppPaths("")
+	for _, iface := range interfaces {
+		if iface.InterfaceType == "MOUNT" && iface.Path != "" {
+			hostPath := filepath.Join(appPaths.DataDir, "job_mounts", fmt.Sprintf("job_%d", job.ID), filepath.Base(iface.Path))
+			mounts[hostPath] = iface.Path
+		}
+	}
+
+	// Create execution config
+	config := &services.ExecutionConfig{
+		ServiceID: service.ID,
+		Inputs:    inputs,
+		Outputs:   outputs,
+		Mounts:    mounts,
+		EnvVars:   envVars,
+		Timeout:   10 * time.Minute, // TODO: Make configurable
+	}
+
+	// Execute container
+	jm.logger.Info(fmt.Sprintf("Executing Docker container for job %d, service %d", job.ID, service.ID), "job_manager")
+	result, err := jm.dockerService.ExecuteService(config)
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("DOCKER service execution failed for job %d: %v", job.ID, err), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("DOCKER service execution failed: %v", err))
+		return
+	}
+
+	// Log execution results
+	jm.logger.Info(fmt.Sprintf("Docker container execution completed for job %d - Exit code: %d, Duration: %v",
+		job.ID, result.ExitCode, result.Duration), "job_manager")
+
+	// Store logs if needed (you might want to add a job_logs table)
+	if result.Stdout != "" {
+		jm.logger.Debug(fmt.Sprintf("Job %d stdout: %s", job.ID, result.Stdout), "job_manager")
+	}
+	if result.Stderr != "" {
+		jm.logger.Debug(fmt.Sprintf("Job %d stderr: %s", job.ID, result.Stderr), "job_manager")
+	}
+
+	// Check exit code
+	if result.ExitCode != 0 {
+		jm.logger.Error(fmt.Sprintf("Container exited with non-zero code %d for job %d", result.ExitCode, job.ID), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Container exited with code %d", result.ExitCode))
+		return
+	}
+
+	// Update status to COMPLETED
+	err = jm.db.UpdateJobStatus(job.ID, types.JobStatusCompleted, "")
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to update job %d status to COMPLETED: %v", job.ID, err), "job_manager")
+		return
+	}
+
+	// Send status update
+	jm.sendStatusUpdate(job.ID, job.WorkflowJobID, types.JobStatusCompleted, "")
+	jm.logger.Info(fmt.Sprintf("DOCKER service job %d completed successfully", job.ID), "job_manager")
 }
 
 // handleJobError handles job execution errors

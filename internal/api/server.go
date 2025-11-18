@@ -19,6 +19,7 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/core"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/dependencies"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/gorilla/websocket"
@@ -53,6 +54,8 @@ type APIServer struct {
 	wsUpgrader       websocket.Upgrader
 	eventEmitter     *events.Emitter
 	fileProcessor    *services.FileProcessor
+	gitService       *services.GitService
+	dockerService    *services.DockerService
 	startTime        time.Time
 }
 
@@ -117,6 +120,18 @@ func NewAPIServer(
 	// Initialize file processor
 	fileProcessor := services.NewFileProcessor(dbManager, logger, config, appPaths)
 
+	// Initialize Git service for Docker service creation from Git repos
+	gitService := services.NewGitService(logger, config, appPaths)
+	logger.Info("Git service initialized for Docker service creation", "api")
+
+	// Initialize dependency manager for Docker service
+	depManager := dependencies.NewDependencyManager(config, logger)
+	logger.Info("Dependency manager initialized for Docker operations", "api")
+
+	// Initialize Docker service
+	dockerService := services.NewDockerService(dbManager, logger, config, appPaths, depManager, gitService)
+	logger.Info("Docker service initialized", "api")
+
 	// Initialize file upload handler
 	fileUploadHandler := ws.NewFileUploadHandler(dbManager, logger, config, appPaths)
 
@@ -156,6 +171,8 @@ func NewAPIServer(
 		wsUpgrader:       wsUpgrader,
 		eventEmitter:     eventEmitter,
 		fileProcessor:    fileProcessor,
+		gitService:       gitService,
+		dockerService:    dockerService,
 		startTime:        time.Now(),
 	}
 }
@@ -366,6 +383,27 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 
 	// File processing route (protected with JWT authentication)
 	mux.Handle("/api/services/process-upload", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleProcessUploadedFile)))
+
+	// Docker service routes (protected with JWT authentication)
+	mux.Handle("/api/services/docker/from-registry", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleCreateDockerFromRegistry)))
+	mux.Handle("/api/services/docker/from-git", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleCreateDockerFromGit)))
+	mux.Handle("/api/services/docker/from-local", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleCreateDockerFromLocal)))
+	mux.Handle("/api/services/docker/validate-git", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleValidateGitRepo)))
+	mux.Handle("/api/services/docker/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/details") {
+			s.handleGetDockerServiceDetails(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/interfaces/suggested") {
+			s.handleGetSuggestedInterfaces(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/interfaces") {
+			s.handleUpdateServiceInterfaces(w, r)
+			return
+		}
+		http.Error(w, "Not found", http.StatusNotFound)
+	})))
 
 	// Blacklist routes (protected with JWT authentication)
 	mux.Handle("/api/blacklist", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

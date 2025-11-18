@@ -188,6 +188,48 @@ class APIClient {
     return response.data
   }
 
+  /**
+   * Create Docker service from registry
+   */
+  async createDockerFromRegistry(data: {
+    service_name: string
+    image_name: string
+    image_tag?: string
+    description?: string
+    username?: string
+    password?: string
+  }) {
+    const response = await this.client.post('/api/services/docker/from-registry', data)
+    return response.data
+  }
+
+  /**
+   * Create Docker service from Git repository
+   */
+  async createDockerFromGit(data: {
+    service_name: string
+    repo_url: string
+    branch?: string
+    username?: string
+    password?: string
+    description?: string
+  }) {
+    const response = await this.client.post('/api/services/docker/from-git', data)
+    return response.data
+  }
+
+  /**
+   * Create Docker service from local directory
+   */
+  async createDockerFromLocal(data: {
+    service_name: string
+    local_path: string
+    description?: string
+  }) {
+    const response = await this.client.post('/api/services/docker/from-local', data)
+    return response.data
+  }
+
   // ===== Blacklist API =====
 
   /**
