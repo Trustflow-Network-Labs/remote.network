@@ -27,6 +27,10 @@ const (
 	MessageTypeFileUploadComplete MessageType = "file.upload.complete"
 	MessageTypeFileUploadError    MessageType = "file.upload.error"
 
+	// Docker operation message types
+	MessageTypeDockerPullProgress MessageType = "docker.pull.progress"
+	MessageTypeDockerBuildOutput  MessageType = "docker.build.output"
+
 	// Service discovery message types
 	MessageTypeServiceSearchRequest  MessageType = "service.search.request"
 	MessageTypeServiceSearchResponse MessageType = "service.search.response"
@@ -222,6 +226,24 @@ type FileUploadErrorPayload struct {
 	SessionID string `json:"session_id"`
 	Error     string `json:"error"`
 	Code      string `json:"code,omitempty"`
+}
+
+// DockerPullProgressPayload reports Docker image pull progress
+type DockerPullProgressPayload struct {
+	ServiceName    string                 `json:"service_name"`
+	ImageName      string                 `json:"image_name"`
+	Status         string                 `json:"status"`
+	Progress       string                 `json:"progress,omitempty"`
+	ProgressDetail map[string]interface{} `json:"progress_detail,omitempty"`
+}
+
+// DockerBuildOutputPayload reports Docker image build output
+type DockerBuildOutputPayload struct {
+	ServiceName string `json:"service_name"`
+	ImageName   string `json:"image_name"`
+	Stream      string `json:"stream,omitempty"`
+	Error       string `json:"error,omitempty"`
+	ErrorDetail map[string]interface{} `json:"error_detail,omitempty"`
 }
 
 // ServiceSearchRequestPayload contains service search criteria

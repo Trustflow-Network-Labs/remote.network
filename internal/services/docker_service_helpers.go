@@ -26,7 +26,7 @@ import (
 )
 
 // pullImage pulls a Docker image from a registry
-func (ds *DockerService) pullImage(cli *client.Client, imageName, username, password string) error {
+func (ds *DockerService) pullImage(cli *client.Client, serviceName, imageName, username, password string) error {
 	ctx := context.Background()
 
 	// Check if image already exists locally
@@ -72,7 +72,7 @@ func (ds *DockerService) pullImage(cli *client.Client, imageName, username, pass
 	defer reader.Close()
 
 	// Process output
-	if err := ds.processDockerPullOutput(reader, imageName); err != nil {
+	if err := ds.processDockerPullOutput(reader, serviceName, imageName); err != nil {
 		return err
 	}
 
@@ -81,7 +81,7 @@ func (ds *DockerService) pullImage(cli *client.Client, imageName, username, pass
 }
 
 // buildImage builds a Docker image from a context directory
-func (ds *DockerService) buildImage(cli *client.Client, contextDir, imageName, dockerfile string) error {
+func (ds *DockerService) buildImage(cli *client.Client, serviceName, contextDir, imageName, dockerfile string) error {
 	ctx := context.Background()
 
 	ds.logger.Info(fmt.Sprintf("Building image %s from context: %s", imageName, contextDir), "docker")
@@ -117,7 +117,7 @@ func (ds *DockerService) buildImage(cli *client.Client, contextDir, imageName, d
 	defer resp.Body.Close()
 
 	// Process build output
-	if err := ds.processDockerBuildOutput(resp.Body, imageName); err != nil {
+	if err := ds.processDockerBuildOutput(resp.Body, serviceName, imageName); err != nil {
 		return err
 	}
 
@@ -162,30 +162,40 @@ func (ds *DockerService) parseCompose(composePath, envFile string) (*composetype
 }
 
 // detectInterfacesFromImage auto-detects interfaces from Docker image metadata
-func (ds *DockerService) detectInterfacesFromImage(cli *client.Client, imageName string) ([]SuggestedInterface, error) {
+// Returns suggested interfaces and the entrypoint/cmd from the image
+func (ds *DockerService) detectInterfacesFromImage(cli *client.Client, imageName string) ([]SuggestedInterface, []string, []string, error) {
 	ctx := context.Background()
 	var suggestions []SuggestedInterface
 
 	// Inspect image
 	inspect, _, err := cli.ImageInspectWithRaw(ctx, imageName)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
-	// Detect STDIN if image has an entrypoint or cmd
-	if len(inspect.Config.Entrypoint) > 0 || len(inspect.Config.Cmd) > 0 {
-		suggestions = append(suggestions, SuggestedInterface{
-			InterfaceType: "STDIN",
-			Path:          "",
-			Description:   "Container accepts input via STDIN",
-		})
-	}
+	// Extract entrypoint and cmd (these are NOT interfaces, they're configuration)
+	entrypoint := inspect.Config.Entrypoint
+	cmd := inspect.Config.Cmd
 
 	// Detect STDOUT (most containers output to stdout)
 	suggestions = append(suggestions, SuggestedInterface{
 		InterfaceType: "STDOUT",
 		Path:          "",
-		Description:   "Container outputs to STDOUT",
+		Description:   "Container standard output",
+	})
+
+	// Detect STDERR (most containers output errors to stderr)
+	suggestions = append(suggestions, SuggestedInterface{
+		InterfaceType: "STDERR",
+		Path:          "",
+		Description:   "Container standard error output",
+	})
+
+	// Detect LOGS (container logs combining stdout/stderr)
+	suggestions = append(suggestions, SuggestedInterface{
+		InterfaceType: "LOGS",
+		Path:          "",
+		Description:   "Container logs (combined stdout/stderr)",
 	})
 
 	// Detect MOUNT interfaces from exposed volumes
@@ -208,7 +218,7 @@ func (ds *DockerService) detectInterfacesFromImage(cli *client.Client, imageName
 		})
 	}
 
-	return suggestions, nil
+	return suggestions, entrypoint, cmd, nil
 }
 
 // detectInterfacesFromCompose auto-detects interfaces from docker-compose project
@@ -392,7 +402,7 @@ func (ds *DockerService) getEnvMap() map[string]string {
 	return env
 }
 
-func (ds *DockerService) processDockerPullOutput(reader io.Reader, imageName string) error {
+func (ds *DockerService) processDockerPullOutput(reader io.Reader, serviceName, imageName string) error {
 	// Create logs directory
 	logDir := filepath.Join(ds.appPaths.DataDir, "docker_logs", "pulls")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
@@ -416,21 +426,38 @@ func (ds *DockerService) processDockerPullOutput(reader io.Reader, imageName str
 		// Write to log file
 		logFile.Write(append(line, '\n'))
 
-		// Parse JSON for logging
+		// Parse JSON for logging and broadcasting
 		var msg map[string]interface{}
 		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
 		}
 
-		if status, ok := msg["status"].(string); ok {
+		// Extract fields
+		status := ""
+		progress := ""
+		var progressDetail map[string]interface{}
+
+		if s, ok := msg["status"].(string); ok {
+			status = s
 			ds.logger.Debug(fmt.Sprintf("Pull: %s", status), "docker")
+		}
+		if p, ok := msg["progress"].(string); ok {
+			progress = p
+		}
+		if pd, ok := msg["progressDetail"].(map[string]interface{}); ok {
+			progressDetail = pd
+		}
+
+		// Broadcast to WebSocket clients if broadcaster is available
+		if ds.eventBroadcaster != nil && status != "" {
+			ds.eventBroadcaster.BroadcastDockerPullProgress(serviceName, imageName, status, progress, progressDetail)
 		}
 	}
 
 	return scanner.Err()
 }
 
-func (ds *DockerService) processDockerBuildOutput(reader io.Reader, imageName string) error {
+func (ds *DockerService) processDockerBuildOutput(reader io.Reader, serviceName, imageName string) error {
 	// Create logs directory
 	logDir := filepath.Join(ds.appPaths.DataDir, "docker_logs", "builds")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
@@ -454,18 +481,37 @@ func (ds *DockerService) processDockerBuildOutput(reader io.Reader, imageName st
 		// Write to log file
 		logFile.Write(append(line, '\n'))
 
-		// Parse JSON for logging
+		// Parse JSON for logging and broadcasting
 		var msg map[string]interface{}
 		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
 		}
 
-		if stream, ok := msg["stream"].(string); ok {
+		// Extract fields
+		stream := ""
+		errorMsg := ""
+		var errorDetail map[string]interface{}
+
+		if s, ok := msg["stream"].(string); ok {
+			stream = s
 			ds.logger.Debug(strings.TrimSpace(stream), "docker")
 		}
-		if errMsg, ok := msg["error"].(string); ok {
-			ds.logger.Error(fmt.Sprintf("Build error: %s", errMsg), "docker")
-			return fmt.Errorf("build failed: %s", errMsg)
+		if e, ok := msg["error"].(string); ok {
+			errorMsg = e
+			ds.logger.Error(fmt.Sprintf("Build error: %s", errorMsg), "docker")
+		}
+		if ed, ok := msg["errorDetail"].(map[string]interface{}); ok {
+			errorDetail = ed
+		}
+
+		// Broadcast to WebSocket clients if broadcaster is available
+		if ds.eventBroadcaster != nil && (stream != "" || errorMsg != "") {
+			ds.eventBroadcaster.BroadcastDockerBuildOutput(serviceName, imageName, stream, errorMsg, errorDetail)
+		}
+
+		// Return error if build failed
+		if errorMsg != "" {
+			return fmt.Errorf("build failed: %s", errorMsg)
 		}
 	}
 

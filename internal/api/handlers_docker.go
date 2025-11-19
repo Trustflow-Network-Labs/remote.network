@@ -343,7 +343,7 @@ func (s *APIServer) handleGetSuggestedInterfaces(w http.ResponseWriter, r *http.
 		}
 		defer cli.Close()
 
-		detected, err := s.dockerService.DetectInterfacesFromImageName(cli, imageName)
+		detected, _, _, err := s.dockerService.DetectInterfacesFromImageName(cli, imageName)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to detect interfaces: %v", err), http.StatusInternalServerError)
 			return
@@ -369,7 +369,7 @@ func (s *APIServer) handleGetSuggestedInterfaces(w http.ResponseWriter, r *http.
 			defer cli.Close()
 
 			imageName := fmt.Sprintf("%s:%s", details.ImageName, details.ImageTag)
-			detected, err := s.dockerService.DetectInterfacesFromImageName(cli, imageName)
+			detected, _, _, err := s.dockerService.DetectInterfacesFromImageName(cli, imageName)
 			if err != nil {
 				http.Error(w, fmt.Sprintf("Failed to detect interfaces: %v", err), http.StatusInternalServerError)
 				return

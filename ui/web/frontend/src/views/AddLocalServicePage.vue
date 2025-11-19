@@ -120,7 +120,7 @@
                     :key="type.value"
                     class="service-type-card"
                     :class="{ 'selected': serviceData.serviceType === type.value }"
-                    @click="serviceData.serviceType = type.value"
+                    @click="serviceData.serviceType = type.value as 'DATA' | 'DOCKER' | 'STANDALONE'"
                   >
                     <i :class="type.icon" class="type-icon"></i>
                     <div class="type-label">{{ type.label }}</div>
@@ -389,6 +389,27 @@
         </StepPanels>
       </Stepper>
     </div>
+
+    <!-- Docker Progress Modal -->
+    <DockerProgressModal
+      ref="dockerProgressModal"
+      v-model:visible="showDockerProgress"
+      :service-name="serviceData.name"
+      :image-name="serviceData.dockerSource === 'registry' ? `${serviceData.dockerImageName}:${serviceData.dockerImageTag}` : serviceData.dockerSource === 'git' ? serviceData.dockerGitRepo : serviceData.dockerLocalPath"
+      @close="showDockerProgress = false"
+    />
+
+    <!-- Interface Review Dialog -->
+    <InterfaceReviewDialog
+      v-model:visible="showInterfaceDialog"
+      :service-name="serviceData.name"
+      :image-name="dockerServiceResponse?.service?.name || ''"
+      :suggested-interfaces="dockerServiceResponse?.suggested_interfaces || []"
+      :entrypoint="dockerServiceResponse?.service?.entrypoint ? JSON.parse(dockerServiceResponse.service.entrypoint) : null"
+      :cmd="dockerServiceResponse?.service?.cmd ? JSON.parse(dockerServiceResponse.service.cmd) : null"
+      @confirm="handleInterfaceConfirm"
+      @cancel="handleInterfaceCancel"
+    />
   </div>
 </template>
 
@@ -412,17 +433,29 @@ import SplitButton from 'primevue/splitbutton'
 
 import { useServicesStore } from '../stores/services'
 import { useChunkedFileUpload } from '../composables/useChunkedFileUpload'
+import { useWebSocket } from '../composables/useWebSocket'
 import { api } from '../services/api'
+import InterfaceReviewDialog from '../components/services/InterfaceReviewDialog.vue'
+import DockerProgressModal from '../components/services/DockerProgressModal.vue'
 
 const router = useRouter()
 const { t } = useI18n()
 const toast = useToast()
 const servicesStore = useServicesStore()
 const { uploadMultipleFiles, currentFileIndex, totalFilesCount } = useChunkedFileUpload()
+const { subscribe, MessageType } = useWebSocket()
 
 // Wizard state
 const activeStep = ref('1')
 const isCreating = ref(false)
+
+// Interface review dialog state
+const showInterfaceDialog = ref(false)
+const dockerServiceResponse = ref<any>(null)
+
+// Docker progress modal state
+const showDockerProgress = ref(false)
+const dockerProgressModal = ref<InstanceType<typeof DockerProgressModal> | null>(null)
 
 // Service data
 const serviceData = ref({
@@ -594,6 +627,31 @@ function validateAndNext(currentStep: number) {
   }
 }
 
+// WebSocket event handlers for Docker operations
+function setupDockerWebSocketHandlers() {
+  // Subscribe to Docker pull progress
+  subscribe(MessageType.DOCKER_PULL_PROGRESS, (payload: any) => {
+    if (dockerProgressModal.value && payload.service_name === serviceData.value.name) {
+      const line = payload.status + (payload.progress ? ` ${payload.progress}` : '')
+      dockerProgressModal.value.addOutputLine(line, false)
+      dockerProgressModal.value.setCurrentOperation(payload.status)
+    }
+  })
+
+  // Subscribe to Docker build output
+  subscribe(MessageType.DOCKER_BUILD_OUTPUT, (payload: any) => {
+    if (dockerProgressModal.value && payload.service_name === serviceData.value.name) {
+      if (payload.stream) {
+        dockerProgressModal.value.addOutputLine(payload.stream, false)
+      }
+      if (payload.error) {
+        dockerProgressModal.value.addOutputLine(payload.error, true)
+        dockerProgressModal.value.setStatus('error')
+      }
+    }
+  })
+}
+
 async function finishWizard() {
   // Validate based on service type
   if (serviceData.value.serviceType === 'DATA' && selectedFiles.value.length === 0) {
@@ -670,47 +728,73 @@ async function finishWizard() {
         }
       })
     } else if (serviceData.value.serviceType === 'DOCKER') {
+      // Setup WebSocket handlers
+      setupDockerWebSocketHandlers()
+
+      // Show Docker progress modal
+      showDockerProgress.value = true
+
+      // Wait for modal to mount
+      await new Promise(resolve => setTimeout(resolve, 100))
+
       // Create DOCKER service
-      switch (serviceData.value.dockerSource) {
-        case 'registry':
-          await api.createDockerFromRegistry({
-            service_name: serviceData.value.name,
-            image_name: serviceData.value.dockerImageName,
-            image_tag: serviceData.value.dockerImageTag || 'latest',
-            description: serviceData.value.description,
-            username: serviceData.value.dockerUsername,
-            password: serviceData.value.dockerPassword
-          })
-          break
+      let response
+      try {
+        switch (serviceData.value.dockerSource) {
+          case 'registry':
+            response = await api.createDockerFromRegistry({
+              service_name: serviceData.value.name,
+              image_name: serviceData.value.dockerImageName,
+              image_tag: serviceData.value.dockerImageTag || 'latest',
+              description: serviceData.value.description,
+              username: serviceData.value.dockerUsername,
+              password: serviceData.value.dockerPassword
+            })
+            break
 
-        case 'git':
-          await api.createDockerFromGit({
-            service_name: serviceData.value.name,
-            repo_url: serviceData.value.dockerGitRepo,
-            branch: serviceData.value.dockerGitBranch || 'main',
-            username: serviceData.value.dockerGitUsername,
-            password: serviceData.value.dockerGitPassword,
-            description: serviceData.value.description
-          })
-          break
+          case 'git':
+            response = await api.createDockerFromGit({
+              service_name: serviceData.value.name,
+              repo_url: serviceData.value.dockerGitRepo,
+              branch: serviceData.value.dockerGitBranch || 'main',
+              username: serviceData.value.dockerGitUsername,
+              password: serviceData.value.dockerGitPassword,
+              description: serviceData.value.description
+            })
+            break
 
-        case 'local':
-          await api.createDockerFromLocal({
-            service_name: serviceData.value.name,
-            local_path: serviceData.value.dockerLocalPath,
-            description: serviceData.value.description
-          })
-          break
+          case 'local':
+            response = await api.createDockerFromLocal({
+              service_name: serviceData.value.name,
+              local_path: serviceData.value.dockerLocalPath,
+              description: serviceData.value.description
+            })
+            break
+        }
+
+        // Mark progress modal as completed
+        if (dockerProgressModal.value) {
+          dockerProgressModal.value.setStatus('completed')
+          dockerProgressModal.value.setCurrentOperation('Docker service created successfully')
+        }
+
+        // Wait a moment before showing interface dialog
+        await new Promise(resolve => setTimeout(resolve, 1000))
+
+        // Hide progress modal and show interface review dialog
+        showDockerProgress.value = false
+        dockerServiceResponse.value = response
+        showInterfaceDialog.value = true
+      } catch (error: any) {
+        // Mark progress modal as error
+        if (dockerProgressModal.value) {
+          dockerProgressModal.value.setStatus('error')
+          dockerProgressModal.value.addOutputLine(error.message || 'Docker service creation failed', true)
+        }
+        throw error
       }
 
-      toast.add({
-        severity: 'success',
-        summary: t('message.common.success'),
-        detail: t('message.services.dockerCreated'),
-        life: 3000
-      })
-
-      router.push('/services')
+      isCreating.value = false
     } else {
       // STANDALONE service types
       toast.add({
@@ -731,6 +815,42 @@ async function finishWizard() {
   } finally {
     isCreating.value = false
   }
+}
+
+// Handle interface review dialog confirm
+async function handleInterfaceConfirm(interfaces: any[]) {
+  try {
+    const serviceId = dockerServiceResponse.value?.service?.id
+    if (!serviceId) {
+      throw new Error('Service ID not found')
+    }
+
+    // Update service interfaces
+    await api.updateDockerServiceInterfaces(serviceId, interfaces)
+
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.services.dockerCreated'),
+      life: 3000
+    })
+
+    router.push('/services')
+  } catch (error: any) {
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: error.message || 'Failed to update interfaces',
+      life: 5000
+    })
+  }
+}
+
+// Handle interface review dialog cancel
+function handleInterfaceCancel() {
+  // User canceled, but service was already created
+  // Just redirect to services page
+  router.push('/services')
 }
 
 function goBack() {

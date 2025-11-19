@@ -17,6 +17,8 @@ type DockerServiceDetails struct {
 	GitRepoURL       string    `json:"git_repo_url"`       // For git sources
 	GitCommitHash    string    `json:"git_commit_hash"`    // For reproducibility
 	LocalContextPath string    `json:"local_context_path"` // For local builds
+	Entrypoint       string    `json:"entrypoint"`         // JSON array of entrypoint strings
+	Cmd              string    `json:"cmd"`                // JSON array of cmd strings
 	CreatedAt        time.Time `json:"created_at"`
 }
 
@@ -25,9 +27,10 @@ func (sm *SQLiteManager) AddDockerServiceDetails(details *DockerServiceDetails) 
 	query := `
 		INSERT INTO docker_service_details (
 			service_id, image_name, image_tag, dockerfile_path, compose_path,
-			source, git_repo_url, git_commit_hash, local_context_path
+			source, git_repo_url, git_commit_hash, local_context_path,
+			entrypoint, cmd
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	result, err := sm.db.Exec(
@@ -41,6 +44,8 @@ func (sm *SQLiteManager) AddDockerServiceDetails(details *DockerServiceDetails) 
 		details.GitRepoURL,
 		details.GitCommitHash,
 		details.LocalContextPath,
+		details.Entrypoint,
+		details.Cmd,
 	)
 
 	if err != nil {
@@ -64,7 +69,8 @@ func (sm *SQLiteManager) AddDockerServiceDetails(details *DockerServiceDetails) 
 func (sm *SQLiteManager) GetDockerServiceDetails(serviceID int64) (*DockerServiceDetails, error) {
 	query := `
 		SELECT id, service_id, image_name, image_tag, dockerfile_path, compose_path,
-		       source, git_repo_url, git_commit_hash, local_context_path, created_at
+		       source, git_repo_url, git_commit_hash, local_context_path,
+		       entrypoint, cmd, created_at
 		FROM docker_service_details
 		WHERE service_id = ?
 	`
@@ -81,6 +87,8 @@ func (sm *SQLiteManager) GetDockerServiceDetails(serviceID int64) (*DockerServic
 		&details.GitRepoURL,
 		&details.GitCommitHash,
 		&details.LocalContextPath,
+		&details.Entrypoint,
+		&details.Cmd,
 		&details.CreatedAt,
 	)
 
@@ -99,7 +107,8 @@ func (sm *SQLiteManager) GetDockerServiceDetails(serviceID int64) (*DockerServic
 func (sm *SQLiteManager) GetAllDockerServiceDetails() ([]*DockerServiceDetails, error) {
 	query := `
 		SELECT id, service_id, image_name, image_tag, dockerfile_path, compose_path,
-		       source, git_repo_url, git_commit_hash, local_context_path, created_at
+		       source, git_repo_url, git_commit_hash, local_context_path,
+		       entrypoint, cmd, created_at
 		FROM docker_service_details
 		ORDER BY created_at DESC
 	`
@@ -125,6 +134,8 @@ func (sm *SQLiteManager) GetAllDockerServiceDetails() ([]*DockerServiceDetails, 
 			&details.GitRepoURL,
 			&details.GitCommitHash,
 			&details.LocalContextPath,
+			&details.Entrypoint,
+			&details.Cmd,
 			&details.CreatedAt,
 		)
 		if err != nil {
@@ -141,7 +152,8 @@ func (sm *SQLiteManager) GetAllDockerServiceDetails() ([]*DockerServiceDetails, 
 func (sm *SQLiteManager) GetDockerServiceDetailsBySource(source string) ([]*DockerServiceDetails, error) {
 	query := `
 		SELECT id, service_id, image_name, image_tag, dockerfile_path, compose_path,
-		       source, git_repo_url, git_commit_hash, local_context_path, created_at
+		       source, git_repo_url, git_commit_hash, local_context_path,
+		       entrypoint, cmd, created_at
 		FROM docker_service_details
 		WHERE source = ?
 		ORDER BY created_at DESC
@@ -168,6 +180,8 @@ func (sm *SQLiteManager) GetDockerServiceDetailsBySource(source string) ([]*Dock
 			&details.GitRepoURL,
 			&details.GitCommitHash,
 			&details.LocalContextPath,
+			&details.Entrypoint,
+			&details.Cmd,
 			&details.CreatedAt,
 		)
 		if err != nil {
@@ -185,7 +199,8 @@ func (sm *SQLiteManager) UpdateDockerServiceDetails(details *DockerServiceDetail
 	query := `
 		UPDATE docker_service_details
 		SET image_name = ?, image_tag = ?, dockerfile_path = ?, compose_path = ?,
-		    source = ?, git_repo_url = ?, git_commit_hash = ?, local_context_path = ?
+		    source = ?, git_repo_url = ?, git_commit_hash = ?, local_context_path = ?,
+		    entrypoint = ?, cmd = ?
 		WHERE id = ?
 	`
 
@@ -199,6 +214,8 @@ func (sm *SQLiteManager) UpdateDockerServiceDetails(details *DockerServiceDetail
 		details.GitRepoURL,
 		details.GitCommitHash,
 		details.LocalContextPath,
+		details.Entrypoint,
+		details.Cmd,
 		details.ID,
 	)
 

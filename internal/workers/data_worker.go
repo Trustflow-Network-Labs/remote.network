@@ -250,7 +250,7 @@ func (dsw *DataServiceWorker) ExecuteDataService(job *database.JobExecution, ser
 
 	// Transfer data to each peer
 	for _, peer := range peers {
-		if peer.PeerMountFunction == types.MountFunctionReceiver {
+		if peer.PeerMountFunction == types.MountFunctionOutput || peer.PeerMountFunction == types.MountFunctionBoth {
 			dsw.logger.Info(fmt.Sprintf("Transferring data to peer %s (path: %s)", peer.PeerNodeID[:8], peer.PeerPath), "data_worker")
 
 			err := dsw.transferDataToPeer(job, filePath, peer, dataDetails)

@@ -230,6 +230,24 @@ class APIClient {
     return response.data
   }
 
+  /**
+   * Update service interfaces for a Docker service
+   */
+  async updateDockerServiceInterfaces(serviceId: number, interfaces: any[]) {
+    const response = await this.client.put(`/api/services/docker/${serviceId}/interfaces`, {
+      interfaces
+    })
+    return response.data
+  }
+
+  /**
+   * Get Docker service details
+   */
+  async getDockerServiceDetails(serviceId: number) {
+    const response = await this.client.get(`/api/services/docker/${serviceId}/details`)
+    return response.data
+  }
+
   // ===== Blacklist API =====
 
   /**

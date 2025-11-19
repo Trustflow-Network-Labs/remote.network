@@ -115,13 +115,16 @@ const leftConnectorState = computed(() => {
 })
 
 const rightConnectorState = computed(() => {
-  // Right connector is for OUTPUT (STDOUT or MOUNT output)
+  // Right connector is for OUTPUT (STDOUT, STDERR, LOGS, or MOUNT output)
   if (!props.job.interfaces || props.job.interfaces.length === 0) {
     return 'not-allowed'
   }
 
   const hasOutputInterface = props.job.interfaces.some(
-    iface => iface.interface_type === 'STDOUT' || iface.interface_type === 'MOUNT'
+    iface => iface.interface_type === 'STDOUT' ||
+             iface.interface_type === 'STDERR' ||
+             iface.interface_type === 'LOGS' ||
+             iface.interface_type === 'MOUNT'
   )
 
   return hasOutputInterface ? 'allowed' : 'not-allowed'

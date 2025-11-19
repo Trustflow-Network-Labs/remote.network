@@ -27,8 +27,9 @@ const (
 
 // Mount function constants
 const (
-	MountFunctionProvider = "PROVIDER"
-	MountFunctionReceiver = "RECEIVER"
+	MountFunctionInput  = "INPUT"   // Provides data TO the container
+	MountFunctionOutput = "OUTPUT"  // Receives data FROM the container
+	MountFunctionBoth   = "BOTH"    // Bidirectional
 )
 
 // Service type constants

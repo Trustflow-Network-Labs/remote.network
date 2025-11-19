@@ -127,7 +127,7 @@ func (sm *SQLiteManager) InitServicesTable() error {
 	CREATE TABLE IF NOT EXISTS service_interfaces (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		service_id INTEGER NOT NULL,
-		interface_type TEXT CHECK(interface_type IN ('STDIN', 'STDOUT', 'MOUNT')) NOT NULL,
+		interface_type TEXT CHECK(interface_type IN ('STDIN', 'STDOUT', 'STDERR', 'LOGS', 'MOUNT')) NOT NULL,
 		path TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE
@@ -148,6 +148,8 @@ func (sm *SQLiteManager) InitServicesTable() error {
 		git_repo_url TEXT,
 		git_commit_hash TEXT,
 		local_context_path TEXT,
+		entrypoint TEXT,
+		cmd TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE
 	);

@@ -27,7 +27,10 @@ export default {
       show: 'Show',
       hide: 'Hide',
       createdAt: 'Created At',
-      updatedAt: 'Updated At'
+      updatedAt: 'Updated At',
+      description: 'Description',
+      notSet: 'Not set',
+      clear: 'Clear'
     },
     auth: {
       login: 'Login',
@@ -275,6 +278,20 @@ export default {
       fileHash: 'File Hash',
       passphrase: 'Passphrase',
       free: 'Free',
+
+      // Interface Management
+      reviewInterfaces: 'Review Service Interfaces',
+      dockerConfiguration: 'Docker Configuration',
+      entrypoint: 'Entrypoint',
+      cmd: 'Command',
+      interfaces: 'Interfaces',
+      addInterface: 'Add Interface',
+      noInterfacesDetected: 'No interfaces detected. Click "Add Interface" to add manually.',
+      selectInterfaceType: 'Select interface type',
+      mountPath: 'Mount path (e.g., /data)',
+      optional: 'Optional',
+      saveInterfaces: 'Save Interfaces',
+      interfaceReviewInfo: 'Review and modify the detected interfaces. Input interfaces (STDIN, input MOUNTs) allow data to flow into the service. Output interfaces (STDOUT, STDERR, LOGS, output MOUNTs) provide data from the service.',
 
       // Messages
       deleteConfirm: 'Are you sure you want to delete this service?',

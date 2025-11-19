@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -18,19 +19,26 @@ import (
 
 // SuggestedInterface represents an auto-detected interface suggestion
 type SuggestedInterface struct {
-	InterfaceType string `json:"interface_type"` // STDIN, STDOUT, MOUNT
+	InterfaceType string `json:"interface_type"` // STDIN, STDOUT, STDERR, LOGS, MOUNT
 	Path          string `json:"path"`           // Optional path for MOUNT interfaces
 	Description   string `json:"description"`    // Human-readable description
 }
 
+// EventBroadcaster interface for broadcasting Docker operation events
+type EventBroadcaster interface {
+	BroadcastDockerPullProgress(serviceName, imageName, status, progress string, progressDetail map[string]interface{})
+	BroadcastDockerBuildOutput(serviceName, imageName, stream, errorMsg string, errorDetail map[string]interface{})
+}
+
 // DockerService handles Docker service operations
 type DockerService struct {
-	dbManager  *database.SQLiteManager
-	logger     *utils.LogsManager
-	configMgr  *utils.ConfigManager
-	appPaths   *utils.AppPaths
-	depManager *dependencies.DependencyManager
-	gitService *GitService
+	dbManager       *database.SQLiteManager
+	logger          *utils.LogsManager
+	configMgr       *utils.ConfigManager
+	appPaths        *utils.AppPaths
+	depManager      *dependencies.DependencyManager
+	gitService      *GitService
+	eventBroadcaster EventBroadcaster // Optional event broadcaster for real-time updates
 }
 
 // NewDockerService creates a new DockerService instance
@@ -50,6 +58,11 @@ func NewDockerService(
 		depManager: depMgr,
 		gitService: gitSvc,
 	}
+}
+
+// SetEventBroadcaster sets the event broadcaster for real-time Docker operation updates
+func (ds *DockerService) SetEventBroadcaster(broadcaster EventBroadcaster) {
+	ds.eventBroadcaster = broadcaster
 }
 
 // CreateFromRegistry creates a Docker service from a registry image
@@ -83,16 +96,20 @@ func (ds *DockerService) CreateFromRegistry(
 	}
 
 	// Pull the image
-	if err := ds.pullImage(cli, fullImageName, username, password); err != nil {
+	if err := ds.pullImage(cli, serviceName, fullImageName, username, password); err != nil {
 		return nil, nil, fmt.Errorf("failed to pull image: %w", err)
 	}
 
 	// Auto-detect interfaces from image metadata
-	suggestedInterfaces, err := ds.detectInterfacesFromImage(cli, fullImageName)
+	suggestedInterfaces, entrypoint, cmd, err := ds.detectInterfacesFromImage(cli, fullImageName)
 	if err != nil {
 		ds.logger.Warn(fmt.Sprintf("Failed to auto-detect interfaces: %v", err), "docker")
 		// Continue anyway, user can define manually
 	}
+
+	// Convert entrypoint and cmd to JSON strings for storage
+	entrypointJSON, _ := json.Marshal(entrypoint)
+	cmdJSON, _ := json.Marshal(cmd)
 
 	// Create service record
 	service := &database.OfferedService{
@@ -121,6 +138,8 @@ func (ds *DockerService) CreateFromRegistry(
 		ImageName:  imageName,
 		ImageTag:   imageTag,
 		Source:     "registry",
+		Entrypoint: string(entrypointJSON),
+		Cmd:        string(cmdJSON),
 	}
 
 	if err := ds.dbManager.AddDockerServiceDetails(details); err != nil {
@@ -199,6 +218,8 @@ func (ds *DockerService) CreateFromGitRepo(
 	var imageName string
 	var dockerfilePath, composePath string
 	var suggestedInterfaces []SuggestedInterface
+	var entrypoint, cmd []string
+	var entrypointJSON, cmdJSON []byte
 
 	// Prefer docker-compose if available
 	if dockerFiles.HasCompose {
@@ -219,7 +240,7 @@ func (ds *DockerService) CreateFromGitRepo(
 					svcImageName = fmt.Sprintf("%s-%s:latest", serviceName, svc.Name)
 				}
 
-				if err := ds.buildImage(cli, svc.Build.Context, svcImageName, svc.Build.Dockerfile); err != nil {
+				if err := ds.buildImage(cli, serviceName, svc.Build.Context, svcImageName, svc.Build.Dockerfile); err != nil {
 					return nil, nil, fmt.Errorf("failed to build service %s: %w", svc.Name, err)
 				}
 
@@ -240,15 +261,19 @@ func (ds *DockerService) CreateFromGitRepo(
 
 		ds.logger.Info(fmt.Sprintf("Building from Dockerfile: %s", dockerfilePath), "docker")
 
-		if err := ds.buildImage(cli, contextDir, imageName, "Dockerfile"); err != nil {
+		if err := ds.buildImage(cli, serviceName, contextDir, imageName, "Dockerfile"); err != nil {
 			return nil, nil, fmt.Errorf("failed to build image: %w", err)
 		}
 
 		// Auto-detect interfaces from image
-		suggestedInterfaces, err = ds.detectInterfacesFromImage(cli, imageName)
+		suggestedInterfaces, entrypoint, cmd, err = ds.detectInterfacesFromImage(cli, imageName)
 		if err != nil {
 			ds.logger.Warn(fmt.Sprintf("Failed to auto-detect interfaces: %v", err), "docker")
 		}
+
+		// Convert entrypoint and cmd to JSON strings for storage
+		entrypointJSON, _ = json.Marshal(entrypoint)
+		cmdJSON, _ = json.Marshal(cmd)
 	}
 
 	// Create service record
@@ -285,14 +310,16 @@ func (ds *DockerService) CreateFromGitRepo(
 
 	// Add Docker service details
 	details := &database.DockerServiceDetails{
-		ServiceID:        service.ID,
-		ImageName:        imgName,
-		ImageTag:         imgTag,
-		DockerfilePath:   dockerfilePath,
-		ComposePath:      composePath,
-		Source:           "git",
-		GitRepoURL:       repoURL,
-		GitCommitHash:    commitHash,
+		ServiceID:      service.ID,
+		ImageName:      imgName,
+		ImageTag:       imgTag,
+		DockerfilePath: dockerfilePath,
+		ComposePath:    composePath,
+		Source:         "git",
+		GitRepoURL:     repoURL,
+		GitCommitHash:  commitHash,
+		Entrypoint:     string(entrypointJSON),
+		Cmd:            string(cmdJSON),
 	}
 
 	if err := ds.dbManager.AddDockerServiceDetails(details); err != nil {
@@ -361,6 +388,8 @@ func (ds *DockerService) CreateFromLocalDirectory(
 	var imageName string
 	var dockerfilePath, composePath string
 	var suggestedInterfaces []SuggestedInterface
+	var entrypoint, cmd []string
+	var entrypointJSON, cmdJSON []byte
 
 	// Prefer docker-compose if available
 	if dockerFiles.HasCompose {
@@ -381,7 +410,7 @@ func (ds *DockerService) CreateFromLocalDirectory(
 					svcImageName = fmt.Sprintf("%s-%s:latest", serviceName, svc.Name)
 				}
 
-				if err := ds.buildImage(cli, svc.Build.Context, svcImageName, svc.Build.Dockerfile); err != nil {
+				if err := ds.buildImage(cli, serviceName, svc.Build.Context, svcImageName, svc.Build.Dockerfile); err != nil {
 					return nil, nil, fmt.Errorf("failed to build service %s: %w", svc.Name, err)
 				}
 
@@ -400,14 +429,18 @@ func (ds *DockerService) CreateFromLocalDirectory(
 
 		ds.logger.Info(fmt.Sprintf("Building from Dockerfile: %s", dockerfilePath), "docker")
 
-		if err := ds.buildImage(cli, contextDir, imageName, "Dockerfile"); err != nil {
+		if err := ds.buildImage(cli, serviceName, contextDir, imageName, "Dockerfile"); err != nil {
 			return nil, nil, fmt.Errorf("failed to build image: %w", err)
 		}
 
-		suggestedInterfaces, err = ds.detectInterfacesFromImage(cli, imageName)
+		suggestedInterfaces, entrypoint, cmd, err = ds.detectInterfacesFromImage(cli, imageName)
 		if err != nil {
 			ds.logger.Warn(fmt.Sprintf("Failed to auto-detect interfaces: %v", err), "docker")
 		}
+
+		// Convert entrypoint and cmd to JSON strings for storage
+		entrypointJSON, _ = json.Marshal(entrypoint)
+		cmdJSON, _ = json.Marshal(cmd)
 	}
 
 	// Copy Dockerfile/compose to service storage for persistence
@@ -471,6 +504,8 @@ func (ds *DockerService) CreateFromLocalDirectory(
 		ComposePath:      composePath,
 		Source:           "local",
 		LocalContextPath: localPath,
+		Entrypoint:       string(entrypointJSON),
+		Cmd:              string(cmdJSON),
 	}
 
 	if err := ds.dbManager.AddDockerServiceDetails(details); err != nil {
@@ -536,7 +571,8 @@ func (ds *DockerService) GetDockerClient() (*client.Client, error) {
 }
 
 // DetectInterfacesFromImageName detects interfaces from a Docker image by name
-func (ds *DockerService) DetectInterfacesFromImageName(cli *client.Client, imageName string) ([]SuggestedInterface, error) {
+// Returns suggested interfaces, entrypoint, cmd, and error
+func (ds *DockerService) DetectInterfacesFromImageName(cli *client.Client, imageName string) ([]SuggestedInterface, []string, []string, error) {
 	return ds.detectInterfacesFromImage(cli, imageName)
 }
 

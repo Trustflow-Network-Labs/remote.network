@@ -254,7 +254,7 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 		PeerNodeID        string `json:"peer_node_id"`
 		PeerJobID         *int64 `json:"peer_job_id,omitempty"`
 		PeerPath          string `json:"peer_path"`
-		PeerMountFunction string `json:"peer_mount_function"` // PROVIDER or RECEIVER
+		PeerMountFunction string `json:"peer_mount_function"` // INPUT, OUTPUT, or BOTH
 		DutyAcknowledged  bool   `json:"duty_acknowledged,omitempty"`
 	}
 
@@ -342,7 +342,7 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 					PeerNodeID:        destPeerID,
 					PeerJobID:         destJobID,
 					PeerPath:          "input" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/input/
-					PeerMountFunction: "RECEIVER",
+					PeerMountFunction: "OUTPUT",
 					DutyAcknowledged:  false,
 				})
 			}
@@ -391,7 +391,7 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 					PeerNodeID:        srcPeerID,
 					PeerJobID:         srcJobID,
 					PeerPath:          "output" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/output/
-					PeerMountFunction: "PROVIDER",
+					PeerMountFunction: "INPUT",
 					DutyAcknowledged:  false,
 				})
 			}
@@ -553,4 +553,36 @@ func (sm *SQLiteManager) GetWorkflowJobs(workflowID int64) ([]*WorkflowJob, erro
 	}
 
 	return jobs, nil
+}
+
+// GetWorkflowJobByID retrieves a workflow job by its ID
+func (sm *SQLiteManager) GetWorkflowJobByID(id int64) (*WorkflowJob, error) {
+	var job WorkflowJob
+	var resultStr, errorStr sql.NullString
+
+	err := sm.db.QueryRow(`
+		SELECT id, workflow_id, status, result, error, created_at, updated_at
+		FROM workflow_jobs
+		WHERE id = ?
+	`, id).Scan(
+		&job.ID, &job.WorkflowID, &job.Status,
+		&resultStr, &errorStr, &job.CreatedAt, &job.UpdatedAt,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse JSON result if present
+	if resultStr.Valid && resultStr.String != "" {
+		if err := json.Unmarshal([]byte(resultStr.String), &job.Result); err != nil {
+			return nil, fmt.Errorf("failed to parse result JSON: %v", err)
+		}
+	}
+
+	if errorStr.Valid {
+		job.Error = errorStr.String
+	}
+
+	return &job, nil
 }

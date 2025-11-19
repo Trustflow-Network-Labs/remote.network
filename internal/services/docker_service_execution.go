@@ -215,20 +215,87 @@ func (ds *DockerService) executeSingleContainer(
 	result.Stderr = stderrBuf.String()
 	result.Duration = time.Since(startTime)
 
+	// Get container logs from Docker engine (for LOGS interface)
+	containerLogs, err := ds.getContainerLogs(ctx, cli, resp.ID)
+	if err != nil {
+		ds.logger.Warn(fmt.Sprintf("Failed to get container logs: %v", err), "docker")
+		containerLogs = "" // Continue without logs
+	}
+
 	// Write outputs to files if requested
 	for _, outputPath := range config.Outputs {
-		outputFile := filepath.Join(ds.appPaths.DataDir, "job_outputs", outputPath)
+		// outputPath already contains the full relative path (e.g., workflows/.../output/stdout.txt)
+		outputFile := filepath.Join(ds.appPaths.DataDir, outputPath)
 		if err := os.MkdirAll(filepath.Dir(outputFile), 0755); err != nil {
 			ds.logger.Warn(fmt.Sprintf("Failed to create output directory: %v", err), "docker")
 			continue
 		}
-		if err := os.WriteFile(outputFile, []byte(result.Stdout), 0644); err != nil {
-			ds.logger.Warn(fmt.Sprintf("Failed to write output file: %v", err), "docker")
+
+		// Determine content based on filename
+		var content []byte
+		baseName := filepath.Base(outputPath)
+		switch baseName {
+		case "stdout.txt":
+			content = []byte(result.Stdout)
+		case "stderr.txt":
+			content = []byte(result.Stderr)
+		case "logs.txt":
+			// Docker engine container logs (not just stdout+stderr)
+			content = []byte(containerLogs)
+		default:
+			// Default to stdout for unknown output types
+			content = []byte(result.Stdout)
+		}
+
+		if err := os.WriteFile(outputFile, content, 0644); err != nil {
+			ds.logger.Warn(fmt.Sprintf("Failed to write output file %s: %v", outputPath, err), "docker")
+		} else {
+			ds.logger.Debug(fmt.Sprintf("Wrote output to %s (%d bytes)", outputFile, len(content)), "docker")
 		}
 	}
 
 	ds.logger.Info(fmt.Sprintf("Container execution completed in %v", result.Duration), "docker")
 	return result, nil
+}
+
+// getContainerLogs retrieves container logs from Docker engine
+func (ds *DockerService) getContainerLogs(ctx context.Context, cli *client.Client, containerID string) (string, error) {
+	// Get container logs from Docker engine
+	logOptions := container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: true,  // Include timestamps for better logging
+		Details:    false,
+	}
+
+	logs, err := cli.ContainerLogs(ctx, containerID, logOptions)
+	if err != nil {
+		return "", fmt.Errorf("failed to get container logs: %w", err)
+	}
+	defer logs.Close()
+
+	// Docker multiplexes stdout/stderr streams with special headers
+	// We need to demultiplex them using stdcopy.StdCopy
+	var stdoutBuf, stderrBuf strings.Builder
+	_, err = stdcopy.StdCopy(&stdoutBuf, &stderrBuf, logs)
+	if err != nil {
+		return "", fmt.Errorf("failed to demultiplex container logs: %w", err)
+	}
+
+	// Combine stdout and stderr with labels
+	var combinedLogs strings.Builder
+	if stdoutBuf.Len() > 0 {
+		combinedLogs.WriteString("=== STDOUT ===\n")
+		combinedLogs.WriteString(stdoutBuf.String())
+		combinedLogs.WriteString("\n")
+	}
+	if stderrBuf.Len() > 0 {
+		combinedLogs.WriteString("=== STDERR ===\n")
+		combinedLogs.WriteString(stderrBuf.String())
+		combinedLogs.WriteString("\n")
+	}
+
+	return combinedLogs.String(), nil
 }
 
 // executeComposeService runs a docker-compose stack

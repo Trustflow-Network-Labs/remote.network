@@ -453,8 +453,9 @@ func (wm *WorkflowManager) validateWorkflow(workflow *types.WorkflowDefinition) 
 
 			// Validate interface peers
 			for _, peer := range iface.InterfacePeers {
-				if peer.PeerMountFunction != types.MountFunctionProvider &&
-				   peer.PeerMountFunction != types.MountFunctionReceiver {
+				if peer.PeerMountFunction != types.MountFunctionInput &&
+				   peer.PeerMountFunction != types.MountFunctionOutput &&
+				   peer.PeerMountFunction != types.MountFunctionBoth {
 					return fmt.Errorf("invalid mount function '%s' for job '%s'", peer.PeerMountFunction, job.JobName)
 				}
 			}
@@ -679,8 +680,8 @@ func (wm *WorkflowManager) validateDataTransferConstraints(jobs []*types.Workflo
 			}
 
 			for _, peer := range iface.InterfacePeers {
-				if peer.PeerMountFunction != types.MountFunctionReceiver {
-					continue // We only care about receivers (where data goes)
+				if peer.PeerMountFunction != types.MountFunctionOutput && peer.PeerMountFunction != types.MountFunctionBoth {
+					continue // We only care about outputs (where data goes)
 				}
 
 				destPeerID := peer.PeerNodeID
@@ -735,7 +736,7 @@ func (wm *WorkflowManager) findJobByPeerAndInputPath(jobs []*types.WorkflowJob, 
 
 			// Check if this interface has the matching path
 			for _, peer := range iface.InterfacePeers {
-				if peer.PeerPath == inputPath && peer.PeerMountFunction == types.MountFunctionProvider {
+				if peer.PeerPath == inputPath && (peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth) {
 					return job
 				}
 			}

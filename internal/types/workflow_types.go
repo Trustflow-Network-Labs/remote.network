@@ -45,7 +45,7 @@ type InterfacePeer struct {
 	PeerNodeID        string `json:"peer_node_id"`    // Ed25519 peer ID
 	PeerJobID         *int64 `json:"peer_job_id"`     // Connected job ID (nullable)
 	PeerPath          string `json:"peer_path"`
-	PeerMountFunction string `json:"peer_mount_function"` // PROVIDER, RECEIVER
+	PeerMountFunction string `json:"peer_mount_function"` // INPUT, OUTPUT, BOTH
 	DutyAcknowledged  bool   `json:"duty_acknowledged"`
 }
 

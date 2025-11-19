@@ -544,3 +544,33 @@ func (e *Emitter) BroadcastBlacklistUpdate() {
 		e.logger.WithError(err).Error("Failed to broadcast blacklist update")
 	}
 }
+
+// BroadcastDockerPullProgress sends Docker image pull progress update
+func (e *Emitter) BroadcastDockerPullProgress(serviceName, imageName, status, progress string, progressDetail map[string]interface{}) {
+	payload := ws.DockerPullProgressPayload{
+		ServiceName:    serviceName,
+		ImageName:      imageName,
+		Status:         status,
+		Progress:       progress,
+		ProgressDetail: progressDetail,
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeDockerPullProgress, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to broadcast Docker pull progress")
+	}
+}
+
+// BroadcastDockerBuildOutput sends Docker image build output update
+func (e *Emitter) BroadcastDockerBuildOutput(serviceName, imageName, stream, errorMsg string, errorDetail map[string]interface{}) {
+	payload := ws.DockerBuildOutputPayload{
+		ServiceName: serviceName,
+		ImageName:   imageName,
+		Stream:      stream,
+		Error:       errorMsg,
+		ErrorDetail: errorDetail,
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeDockerBuildOutput, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to broadcast Docker build output")
+	}
+}

@@ -136,6 +136,34 @@
         </template>
       </Card>
 
+      <!-- Interfaces Card -->
+      <Card v-if="serviceInterfaces.length > 0" class="info-card">
+        <template #title>
+          <i class="pi pi-link"></i> {{ $t('message.services.interfaces') }}
+        </template>
+        <template #content>
+          <div class="interfaces-list">
+            <div
+              v-for="(iface, index) in serviceInterfaces"
+              :key="index"
+              class="interface-item"
+            >
+              <div class="interface-badge" :class="`badge-${iface.interface_type.toLowerCase()}`">
+                {{ iface.interface_type }}
+              </div>
+              <div class="interface-details">
+                <div v-if="iface.path" class="interface-path">
+                  <code>{{ iface.path }}</code>
+                </div>
+                <div v-if="iface.description" class="interface-description">
+                  {{ iface.description }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </Card>
+
       <!-- Actions Card -->
       <Card class="actions-card">
         <template #title>
@@ -189,6 +217,7 @@ const service = ref<any>(null)
 const dataDetails = ref<any>(null)
 const passphrase = ref<string | null>(null)
 const showPassphrase = ref(false)
+const serviceInterfaces = ref<any[]>([])
 
 // Computed
 const compressionRatio = computed(() => {
@@ -212,6 +241,16 @@ const fetchServiceDetails = async () => {
 
     if (response && response.service) {
       service.value = response.service
+
+      // Fetch service interfaces
+      try {
+        const interfacesResponse = await api.getServiceInterfaces(serviceId)
+        if (interfacesResponse && interfacesResponse.interfaces) {
+          serviceInterfaces.value = interfacesResponse.interfaces
+        }
+      } catch (err) {
+        console.error('Failed to fetch service interfaces:', err)
+      }
 
       // Fetch additional details for DATA services
       if (service.value.service_type === 'DATA') {
@@ -499,5 +538,77 @@ onMounted(() => {
   display: flex;
   gap: vars.$spacing-md;
   flex-wrap: wrap;
+}
+
+.interfaces-list {
+  display: flex;
+  flex-direction: column;
+  gap: vars.$spacing-md;
+
+  .interface-item {
+    display: flex;
+    align-items: flex-start;
+    gap: vars.$spacing-md;
+    padding: vars.$spacing-md;
+    background: vars.$color-surface;
+    border-radius: vars.$border-radius-sm;
+    border-left: 3px solid vars.$color-primary;
+
+    .interface-badge {
+      padding: vars.$spacing-xs vars.$spacing-sm;
+      border-radius: vars.$border-radius-sm;
+      font-size: vars.$font-size-sm;
+      font-weight: 600;
+      text-transform: uppercase;
+      white-space: nowrap;
+
+      &.badge-stdin {
+        background: rgba(59, 130, 246, 0.2);
+        color: rgb(59, 130, 246);
+      }
+
+      &.badge-stdout {
+        background: rgba(34, 197, 94, 0.2);
+        color: rgb(34, 197, 94);
+      }
+
+      &.badge-stderr {
+        background: rgba(239, 68, 68, 0.2);
+        color: rgb(239, 68, 68);
+      }
+
+      &.badge-logs {
+        background: rgba(168, 85, 247, 0.2);
+        color: rgb(168, 85, 247);
+      }
+
+      &.badge-mount {
+        background: rgba(251, 146, 60, 0.2);
+        color: rgb(251, 146, 60);
+      }
+    }
+
+    .interface-details {
+      flex: 1;
+
+      .interface-path {
+        margin-bottom: vars.$spacing-xs;
+
+        code {
+          background: rgba(vars.$color-primary, 0.1);
+          padding: vars.$spacing-xs vars.$spacing-sm;
+          border-radius: vars.$border-radius-sm;
+          color: vars.$color-primary;
+          font-family: 'Courier New', monospace;
+          font-size: vars.$font-size-sm;
+        }
+      }
+
+      .interface-description {
+        color: vars.$color-text-secondary;
+        font-size: vars.$font-size-sm;
+      }
+    }
+  }
 }
 </style>

@@ -132,6 +132,10 @@ func NewAPIServer(
 	dockerService := services.NewDockerService(dbManager, logger, config, appPaths, depManager, gitService)
 	logger.Info("Docker service initialized", "api")
 
+	// Set event broadcaster for real-time Docker operation updates
+	dockerService.SetEventBroadcaster(eventEmitter)
+	logger.Info("Event broadcaster set for Docker service", "api")
+
 	// Initialize file upload handler
 	fileUploadHandler := ws.NewFileUploadHandler(dbManager, logger, config, appPaths)
 

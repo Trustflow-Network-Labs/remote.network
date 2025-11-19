@@ -33,6 +33,10 @@ export enum MessageType {
   SERVICE_SEARCH_REQUEST = 'service.search.request',
   SERVICE_SEARCH_RESPONSE = 'service.search.response',
 
+  // Docker operation messages
+  DOCKER_PULL_PROGRESS = 'docker.pull.progress',
+  DOCKER_BUILD_OUTPUT = 'docker.build.output',
+
   // Control messages
   PING = 'ping',
   PONG = 'pong',

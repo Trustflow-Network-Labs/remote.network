@@ -42,7 +42,7 @@ type JobInterfacePeer struct {
 	PeerNodeID         string    `json:"peer_node_id"`    // Ed25519 peer ID
 	PeerJobID          *int64    `json:"peer_job_id"`     // Connected job ID (nullable)
 	PeerPath           string    `json:"peer_path"`
-	PeerMountFunction  string    `json:"peer_mount_function"` // PROVIDER, RECEIVER
+	PeerMountFunction  string    `json:"peer_mount_function"` // INPUT, OUTPUT, BOTH
 	DutyAcknowledged   bool      `json:"duty_acknowledged"`
 	CreatedAt          time.Time `json:"created_at"`
 }
@@ -98,7 +98,7 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 		peer_node_id TEXT NOT NULL,
 		peer_job_id INTEGER,
 		peer_path TEXT NOT NULL,
-		peer_mount_function TEXT CHECK(peer_mount_function IN ('PROVIDER', 'RECEIVER')) NOT NULL,
+		peer_mount_function TEXT CHECK(peer_mount_function IN ('INPUT', 'OUTPUT', 'BOTH')) NOT NULL,
 		duty_acknowledged BOOLEAN DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (job_interface_id) REFERENCES job_interfaces(id) ON DELETE CASCADE
@@ -507,9 +507,9 @@ func (sm *SQLiteManager) ValidateJobInputsReady(jobExecutionID int64) (bool, err
 				return false, err
 			}
 
-			// Check if all provider peers have acknowledged
+			// Check if all input provider peers have acknowledged
 			for _, peer := range peers {
-				if peer.PeerMountFunction == "PROVIDER" && !peer.DutyAcknowledged {
+				if (peer.PeerMountFunction == "INPUT" || peer.PeerMountFunction == "BOTH") && !peer.DutyAcknowledged {
 					return false, nil
 				}
 			}
