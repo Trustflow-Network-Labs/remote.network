@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +18,55 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 )
+
+// sanitizeImageName converts a service name to a valid Docker image name
+// Docker image names must be lowercase and can only contain [a-z0-9-_.]
+func sanitizeImageName(name string) string {
+	// 1. Convert to lowercase (REQUIRED by Docker)
+	name = strings.ToLower(name)
+
+	// 2. Replace spaces and invalid characters with hyphens
+	name = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			return r
+		}
+		return '-'
+	}, name)
+
+	// 3. Remove leading/trailing separators
+	name = strings.Trim(name, "-_.")
+
+	// 4. Collapse multiple consecutive hyphens
+	for strings.Contains(name, "--") {
+		name = strings.ReplaceAll(name, "--", "-")
+	}
+
+	return name
+}
+
+// secureRandomString generates a cryptographically secure random hex string
+func (ds *DockerService) secureRandomString(length int) (string, error) {
+	bytes := make([]byte, length)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes)[:length], nil
+}
+
+// generateContainerName creates a unique container name for job execution
+// Format: job_<execution_id>_<service_name>_<random>
+func (ds *DockerService) generateContainerName(jobExecutionID int64, serviceName string) string {
+	// Sanitize service name for container name
+	base := sanitizeImageName(serviceName)
+	// Create random suffix for uniqueness
+	rnd, err := ds.secureRandomString(6)
+	if err != nil {
+		// Fallback to timestamp-based suffix if random generation fails
+		rnd = fmt.Sprintf("%d", jobExecutionID%1000000)
+	}
+	// Format: job_<id>_<service>_<random>
+	return fmt.Sprintf("job_%d_%s_%s", jobExecutionID, base, rnd)
+}
 
 // SuggestedInterface represents an auto-detected interface suggestion
 type SuggestedInterface struct {
@@ -237,7 +288,8 @@ func (ds *DockerService) CreateFromGitRepo(
 			if svc.Build != nil {
 				svcImageName := svc.Image
 				if svcImageName == "" {
-					svcImageName = fmt.Sprintf("%s-%s:latest", serviceName, svc.Name)
+					sanitizedName := sanitizeImageName(serviceName)
+					svcImageName = fmt.Sprintf("%s-%s:latest", sanitizedName, svc.Name)
 				}
 
 				if err := ds.buildImage(cli, serviceName, svc.Build.Context, svcImageName, svc.Build.Dockerfile); err != nil {
@@ -257,7 +309,8 @@ func (ds *DockerService) CreateFromGitRepo(
 		// Build from Dockerfile
 		dockerfilePath = dockerFiles.Dockerfiles[0]
 		contextDir := filepath.Dir(dockerfilePath)
-		imageName = fmt.Sprintf("%s:latest", serviceName)
+		sanitizedName := sanitizeImageName(serviceName)
+		imageName = fmt.Sprintf("%s:latest", sanitizedName)
 
 		ds.logger.Info(fmt.Sprintf("Building from Dockerfile: %s", dockerfilePath), "docker")
 
@@ -407,7 +460,8 @@ func (ds *DockerService) CreateFromLocalDirectory(
 			if svc.Build != nil {
 				svcImageName := svc.Image
 				if svcImageName == "" {
-					svcImageName = fmt.Sprintf("%s-%s:latest", serviceName, svc.Name)
+					sanitizedName := sanitizeImageName(serviceName)
+					svcImageName = fmt.Sprintf("%s-%s:latest", sanitizedName, svc.Name)
 				}
 
 				if err := ds.buildImage(cli, serviceName, svc.Build.Context, svcImageName, svc.Build.Dockerfile); err != nil {
@@ -425,7 +479,8 @@ func (ds *DockerService) CreateFromLocalDirectory(
 		// Build from Dockerfile
 		dockerfilePath = dockerFiles.Dockerfiles[0]
 		contextDir := filepath.Dir(dockerfilePath)
-		imageName = fmt.Sprintf("%s:latest", serviceName)
+		sanitizedName := sanitizeImageName(serviceName)
+		imageName = fmt.Sprintf("%s:latest", sanitizedName)
 
 		ds.logger.Info(fmt.Sprintf("Building from Dockerfile: %s", dockerfilePath), "docker")
 

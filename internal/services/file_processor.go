@@ -151,7 +151,7 @@ func (fp *FileProcessor) ProcessUploadedFile(uploadGroupID string, serviceID int
 	// Format: passphrase|keydata (separated by |)
 	encryptionKey := &database.EncryptionKey{
 		ServiceID:      serviceID,
-		PassphraseHash: hashPassphrase(passphrase),
+		PassphraseHash: utils.HashPassphrase(passphrase),
 		KeyData:        passphrase + "|" + hex.EncodeToString(keyData), // Store both passphrase and key data
 	}
 	if err := fp.dbManager.AddEncryptionKey(encryptionKey); err != nil {
@@ -368,7 +368,7 @@ func (fp *FileProcessor) DecryptFile(encryptedPath, outputPath string, passphras
 	}
 
 	// Verify passphrase
-	if hashPassphrase(passphrase) != encryptionKey.PassphraseHash {
+	if utils.HashPassphrase(passphrase) != encryptionKey.PassphraseHash {
 		return fmt.Errorf("invalid passphrase")
 	}
 
@@ -535,12 +535,6 @@ func (fp *FileProcessor) copyFile(src, dst string) error {
 	}
 
 	return nil
-}
-
-// hashPassphrase creates a SHA-256 hash of the passphrase for verification
-func hashPassphrase(passphrase string) string {
-	hash := sha256.Sum256([]byte(passphrase))
-	return hex.EncodeToString(hash[:])
 }
 
 // GetPassphrase retrieves the passphrase for a service

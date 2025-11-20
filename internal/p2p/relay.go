@@ -337,6 +337,23 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 		}
 	}
 
+	// For job status requests and updates, inject source peer ID so target knows who to respond to
+	// This is critical for relay forwarding where the connection context is lost
+	if data.MessageType == "job_status_request" || data.MessageType == "job_request" ||
+	   data.MessageType == "job_status_update" || data.MessageType == "job_data_transfer_request" {
+		msg, err := UnmarshalQUICMessage(data.Payload)
+		if err == nil {
+			// Inject source peer ID into message envelope
+			msg.SourcePeerID = data.SourcePeerID
+
+			if modifiedPayload, err := msg.Marshal(); err == nil {
+				forwardPayload = modifiedPayload
+				rp.logger.Debug(fmt.Sprintf("Injected source peer ID %s into %s message",
+					data.SourcePeerID[:8], data.MessageType), "relay")
+			}
+		}
+	}
+
 	// Forward the payload to the target client
 	if err := rp.forwardDataToTarget(data.TargetPeerID, forwardPayload); err != nil {
 		rp.logger.Error(fmt.Sprintf("Failed to forward to target %s: %v", data.TargetPeerID, err), "relay")

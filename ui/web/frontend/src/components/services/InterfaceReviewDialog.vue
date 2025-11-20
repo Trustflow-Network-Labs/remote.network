@@ -66,7 +66,7 @@
               :class="{ 'has-mount-function': iface.interface_type === 'MOUNT' }"
             >
               <div class="interface-type">
-                <Dropdown
+                <Select
                   v-model="iface.interface_type"
                   :options="interfaceTypes"
                   optionLabel="label"
@@ -82,7 +82,7 @@
                 />
               </div>
               <div v-if="iface.interface_type === 'MOUNT'" class="interface-mount-function">
-                <Dropdown
+                <Select
                   v-model="iface.mount_function"
                   :options="mountFunctionTypes"
                   optionLabel="label"
@@ -139,7 +139,7 @@ import { ref, watch } from 'vue'
 import Dialog from 'primevue/dialog'
 import Card from 'primevue/card'
 import Button from 'primevue/button'
-import Dropdown from 'primevue/dropdown'
+import Select from 'primevue/select'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 
@@ -353,7 +353,7 @@ const handleCancel = () => {
     }
 
     .interface-type {
-      :deep(.p-dropdown) {
+      :deep(.p-select) {
         width: 100%;
       }
     }
@@ -362,7 +362,7 @@ const handleCancel = () => {
     .interface-mount-function,
     .interface-description {
       :deep(.p-inputtext),
-      :deep(.p-dropdown) {
+      :deep(.p-select) {
         width: 100%;
       }
     }

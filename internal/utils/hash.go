@@ -47,3 +47,8 @@ func VerifyFileHash(filePath, expectedHash string) (bool, error) {
 	}
 	return actualHash == expectedHash, nil
 }
+
+// HashPassphrase creates a BLAKE3 hash of the passphrase for verification
+func HashPassphrase(passphrase string) string {
+	return HashString(passphrase)
+}

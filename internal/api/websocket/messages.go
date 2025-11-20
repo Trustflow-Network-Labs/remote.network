@@ -28,8 +28,12 @@ const (
 	MessageTypeFileUploadError    MessageType = "file.upload.error"
 
 	// Docker operation message types
-	MessageTypeDockerPullProgress MessageType = "docker.pull.progress"
-	MessageTypeDockerBuildOutput  MessageType = "docker.build.output"
+	MessageTypeDockerPullProgress   MessageType = "docker.pull.progress"
+	MessageTypeDockerBuildOutput    MessageType = "docker.build.output"
+	MessageTypeDockerOperationStart MessageType = "docker.operation.start"
+	MessageTypeDockerOperationProgress MessageType = "docker.operation.progress"
+	MessageTypeDockerOperationComplete MessageType = "docker.operation.complete"
+	MessageTypeDockerOperationError MessageType = "docker.operation.error"
 
 	// Service discovery message types
 	MessageTypeServiceSearchRequest  MessageType = "service.search.request"
@@ -285,4 +289,38 @@ type RemoteServiceInfo struct {
 type RemoteServiceInterface struct {
 	InterfaceType string `json:"interface_type"` // STDIN, STDOUT, MOUNT
 	Path          string `json:"path,omitempty"`
+}
+
+// DockerOperationStartPayload reports that a Docker operation has started
+type DockerOperationStartPayload struct {
+	OperationID   string `json:"operation_id"`
+	OperationType string `json:"operation_type"` // "build", "pull", "create"
+	ServiceName   string `json:"service_name"`
+	ImageName     string `json:"image_name,omitempty"`
+	Message       string `json:"message"`
+}
+
+// DockerOperationProgressPayload reports Docker operation progress
+type DockerOperationProgressPayload struct {
+	OperationID string  `json:"operation_id"`
+	Message     string  `json:"message"`
+	Percentage  float64 `json:"percentage,omitempty"`
+	Stream      string  `json:"stream,omitempty"`
+}
+
+// DockerOperationCompletePayload reports successful Docker operation completion
+type DockerOperationCompletePayload struct {
+	OperationID         string                   `json:"operation_id"`
+	ServiceID           int64                    `json:"service_id"`
+	ServiceName         string                   `json:"service_name"`
+	ImageName           string                   `json:"image_name"`
+	SuggestedInterfaces []map[string]interface{} `json:"suggested_interfaces,omitempty"`
+	Service             map[string]interface{}   `json:"service,omitempty"`
+}
+
+// DockerOperationErrorPayload reports a Docker operation error
+type DockerOperationErrorPayload struct {
+	OperationID string `json:"operation_id"`
+	Error       string `json:"error"`
+	Code        string `json:"code,omitempty"`
 }

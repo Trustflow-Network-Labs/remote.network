@@ -137,12 +137,25 @@
       </Card>
 
       <!-- Interfaces Card -->
-      <Card v-if="serviceInterfaces.length > 0" class="info-card">
+      <Card class="info-card">
         <template #title>
-          <i class="pi pi-link"></i> {{ $t('message.services.interfaces') }}
+          <div class="card-title-with-actions">
+            <span><i class="pi pi-link"></i> {{ $t('message.services.interfaces') }}</span>
+            <Button
+              :label="$t('message.services.editInterfaces')"
+              icon="pi pi-pencil"
+              size="small"
+              @click="openEditInterfaces"
+              outlined
+            />
+          </div>
         </template>
         <template #content>
-          <div class="interfaces-list">
+          <div v-if="serviceInterfaces.length === 0" class="empty-interfaces">
+            <i class="pi pi-info-circle"></i>
+            <p>{{ $t('message.services.noInterfaces') }}</p>
+          </div>
+          <div v-else class="interfaces-list">
             <div
               v-for="(iface, index) in serviceInterfaces"
               :key="index"
@@ -188,6 +201,19 @@
         </template>
       </Card>
     </div>
+
+    <!-- Interface Edit Dialog -->
+    <InterfaceReviewDialog
+      v-if="showEditInterfaces"
+      v-model:visible="showEditInterfaces"
+      :service-name="service?.name || ''"
+      :image-name="dockerDetails?.image_name || service?.name || ''"
+      :suggested-interfaces="serviceInterfaces"
+      :entrypoint="dockerDetails?.entrypoint ? JSON.parse(dockerDetails.entrypoint) : []"
+      :cmd="dockerDetails?.cmd ? JSON.parse(dockerDetails.cmd) : []"
+      @confirm="handleSaveInterfaces"
+      @cancel="showEditInterfaces = false"
+    />
   </div>
 </template>
 
@@ -202,6 +228,7 @@ import Button from 'primevue/button'
 import Tag from 'primevue/tag'
 import ProgressSpinner from 'primevue/progressspinner'
 import Message from 'primevue/message'
+import InterfaceReviewDialog from '../components/services/InterfaceReviewDialog.vue'
 import { api } from '../services/api'
 
 const router = useRouter()
@@ -215,9 +242,11 @@ const loading = ref(true)
 const error = ref<string | null>(null)
 const service = ref<any>(null)
 const dataDetails = ref<any>(null)
+const dockerDetails = ref<any>(null)
 const passphrase = ref<string | null>(null)
 const showPassphrase = ref(false)
 const serviceInterfaces = ref<any[]>([])
+const showEditInterfaces = ref(false)
 
 // Computed
 const compressionRatio = computed(() => {
@@ -262,6 +291,18 @@ const fetchServiceDetails = async () => {
           }
         } catch (err) {
           console.error('Failed to fetch data details:', err)
+        }
+      }
+
+      // Fetch additional details for DOCKER services
+      if (service.value.service_type === 'DOCKER') {
+        try {
+          const dockerResponse = await api.getDockerServiceDetails(serviceId)
+          if (dockerResponse && dockerResponse.details) {
+            dockerDetails.value = dockerResponse.details
+          }
+        } catch (err) {
+          console.error('Failed to fetch Docker details:', err)
         }
       }
     }
@@ -406,6 +447,49 @@ const confirmDeleteService = () => {
   })
 }
 
+const openEditInterfaces = async () => {
+  // Fetch Docker details if not already loaded (for non-Docker services, this will be empty)
+  if (service.value.service_type === 'DOCKER' && !dockerDetails.value) {
+    try {
+      const dockerResponse = await api.getDockerServiceDetails(service.value.id)
+      if (dockerResponse && dockerResponse.details) {
+        dockerDetails.value = dockerResponse.details
+      }
+    } catch (err) {
+      console.error('Failed to fetch Docker details:', err)
+    }
+  }
+
+  showEditInterfaces.value = true
+}
+
+const handleSaveInterfaces = async (interfaces: any[]) => {
+  try {
+    await api.updateDockerServiceInterfaces(service.value.id, interfaces)
+
+    // Refresh interfaces
+    const interfacesResponse = await api.getServiceInterfaces(service.value.id)
+    if (interfacesResponse && interfacesResponse.interfaces) {
+      serviceInterfaces.value = interfacesResponse.interfaces
+    }
+
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.services.interfacesUpdated'),
+      life: 3000
+    })
+  } catch (err: any) {
+    console.error('Failed to update interfaces:', err)
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: err.response?.data?.error || t('message.services.errors.interfacesUpdateFailed'),
+      life: 3000
+    })
+  }
+}
+
 // Lifecycle
 onMounted(() => {
   fetchServiceDetails()
@@ -538,6 +622,22 @@ onMounted(() => {
   display: flex;
   gap: vars.$spacing-md;
   flex-wrap: wrap;
+}
+
+.empty-interfaces {
+  text-align: center;
+  padding: vars.$spacing-xl;
+  color: vars.$color-text-secondary;
+
+  i {
+    font-size: 2rem;
+    margin-bottom: vars.$spacing-md;
+    display: block;
+  }
+
+  p {
+    margin: 0;
+  }
 }
 
 .interfaces-list {

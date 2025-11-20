@@ -73,11 +73,12 @@ const (
 
 // QUICMessage represents a structured message sent over QUIC
 type QUICMessage struct {
-	Type      MessageType `json:"type"`
-	Version   int         `json:"version"`
-	Timestamp time.Time   `json:"timestamp"`
-	RequestID string      `json:"request_id,omitempty"` // For request/response correlation
-	Data      interface{} `json:"data,omitempty"`
+	Type         MessageType `json:"type"`
+	Version      int         `json:"version"`
+	Timestamp    time.Time   `json:"timestamp"`
+	RequestID    string      `json:"request_id,omitempty"` // For request/response correlation
+	SourcePeerID string      `json:"source_peer_id,omitempty"` // Source peer ID (injected by relay)
+	Data         interface{} `json:"data,omitempty"`
 }
 
 // MetadataRequestData contains metadata request parameters

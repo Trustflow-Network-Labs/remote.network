@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	_ "modernc.org/sqlite"
 )
 
@@ -96,7 +96,7 @@ func RunDecryptService(args []string) {
 
 	fmt.Println("=== Decryption Info ===")
 	fmt.Printf("Passphrase: %s\n", passphrase)
-	fmt.Printf("Passphrase Hash: %s\n", hashPassphrase(passphrase))
+	fmt.Printf("Passphrase Hash: %s\n", utils.HashPassphrase(passphrase))
 	fmt.Println()
 
 	// Decode key data
@@ -232,10 +232,4 @@ func splitKeyData(keyData string) []string {
 		}
 	}
 	return []string{keyData}
-}
-
-// hashPassphrase creates a SHA-256 hash of the passphrase for verification
-func hashPassphrase(passphrase string) string {
-	hash := sha256.Sum256([]byte(passphrase))
-	return hex.EncodeToString(hash[:])
 }

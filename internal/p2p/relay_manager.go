@@ -518,36 +518,36 @@ func (rm *RelayManager) listenForRelayedMessages(stream *quic.Stream, sessionID 
 func (rm *RelayManager) handleRelayedMessage(msg *QUICMessage) error {
 	rm.logger.Info(fmt.Sprintf("Received message type %s via relay - routing to handlers", msg.Type), "relay-manager")
 
-	// Extract source peer ID from request if available
-	var sourcePeerID string
-	switch msg.Type {
-	case MessageTypeServiceRequest:
-		var request ServiceSearchRequest
-		if err := msg.GetDataAs(&request); err == nil {
-			sourcePeerID = request.SourcePeerID
+	// Extract source peer ID - first try message envelope (injected by relay)
+	sourcePeerID := msg.SourcePeerID
+
+	// Fallback: extract from message payload for backwards compatibility
+	if sourcePeerID == "" {
+		switch msg.Type {
+		case MessageTypeServiceRequest:
+			var request ServiceSearchRequest
+			if err := msg.GetDataAs(&request); err == nil {
+				sourcePeerID = request.SourcePeerID
+			}
+		case MessageTypeJobRequest:
+			var request types.JobExecutionRequest
+			if err := msg.GetDataAs(&request); err == nil {
+				sourcePeerID = request.OrderingPeerID
+			}
+		case MessageTypeJobDataTransferRequest:
+			var request types.JobDataTransferRequest
+			if err := msg.GetDataAs(&request); err == nil {
+				sourcePeerID = request.SourcePeerID
+			}
 		}
-	case MessageTypeJobRequest:
-		var request types.JobExecutionRequest
-		if err := msg.GetDataAs(&request); err == nil {
-			sourcePeerID = request.OrderingPeerID
-		}
-	case MessageTypeJobStatusRequest:
-		// Status requests don't have a source peer ID field in the message
-		// The relay should have this from the forward data wrapper
-		// For now, we'll rely on the relay forwarding mechanism
-	case MessageTypeJobDataTransferRequest:
-		var request types.JobDataTransferRequest
-		if err := msg.GetDataAs(&request); err == nil {
-			sourcePeerID = request.SourcePeerID
-		}
-	case MessageTypeJobCancel:
-		// Cancel requests don't have a source peer ID field
-		// The relay should have this from the forward data wrapper
 	}
 
 	// Use a default identifier if source peer ID couldn't be extracted
 	if sourcePeerID == "" {
 		sourcePeerID = "unknown-relay-source"
+		rm.logger.Warn(fmt.Sprintf("Could not extract source peer ID from %s message", msg.Type), "relay-manager")
+	} else {
+		rm.logger.Debug(fmt.Sprintf("Extracted source peer ID: %s from %s message", sourcePeerID[:8], msg.Type), "relay-manager")
 	}
 
 	// Recover from panics in message handlers and generate error responses

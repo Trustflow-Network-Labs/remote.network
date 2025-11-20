@@ -41,6 +41,17 @@
       <div v-if="loading" class="loading-overlay">
         <ProgressSpinner />
       </div>
+
+      <!-- Interface Selector Dialog -->
+      <InterfaceSelector
+        v-model:visible="interfaceSelectorVisible"
+        :from-card-name="pendingConnection.fromCardName"
+        :to-card-name="pendingConnection.toCardName"
+        :from-interfaces="pendingConnection.fromInterfaces"
+        :to-interfaces="pendingConnection.toInterfaces"
+        @confirm="onInterfacesSelected"
+        @cancel="onInterfaceSelectorCancel"
+      />
     </div>
   </AppLayout>
 </template>
@@ -60,8 +71,9 @@ import AppLayout from '../layout/AppLayout.vue'
 import ServiceCard from './ServiceCard.vue'
 import SelfPeerCard from './SelfPeerCard.vue'
 import WorkflowTools from './WorkflowTools.vue'
+import InterfaceSelector from './InterfaceSelector.vue'
 import { useWorkflowsStore } from '../../stores/workflows'
-import type { WorkflowJob } from '../../stores/workflows'
+import type { WorkflowJob, ServiceInterface } from '../../stores/workflows'
 
 const route = useRoute()
 const router = useRouter()
@@ -93,6 +105,24 @@ const serviceCards = ref<Array<{
 const draggableInstances: Map<number | string, any> = new Map()
 const cardRefs: Map<number, any> = new Map()
 
+// Interface selector dialog state
+const interfaceSelectorVisible = ref(false)
+const pendingConnection = ref<{
+  fromCardId: string | number
+  toCardId: string | number
+  fromCardName: string
+  toCardName: string
+  fromInterfaces: ServiceInterface[]
+  toInterfaces: ServiceInterface[]
+}>({
+  fromCardId: '',
+  toCardId: '',
+  fromCardName: '',
+  toCardName: '',
+  fromInterfaces: [],
+  toInterfaces: []
+})
+
 // Leader-line connections (must be reactive for computed properties to update)
 const connections = ref<Array<{
   line: any
@@ -102,6 +132,7 @@ const connections = ref<Array<{
   toCardId: string | number
   dbId?: number // Database ID for persistence
   svgElement?: SVGElement // Store reference to SVG element for click handling
+  interfaces?: string[] // Store which interfaces are connected
 }>>([])
 const selectedConnector = ref<{ cardId: string | number; type: 'input' | 'output'; element: HTMLElement } | null>(null)
 const previewLine = ref<any>(null)
@@ -893,31 +924,44 @@ async function createConnection(fromCardId: string | number, toCardId: string | 
     return
   }
 
-  // Create curved leader line
-  const line = new LeaderLine(
-    fromElement,
-    toElement,
-    {
-      color: 'rgb(205, 81, 36)',
-      size: 3,
-      path: 'fluid',
-      startPlug: 'disc',
-      endPlug: 'arrow2',
-      startPlugColor: 'rgb(205, 81, 36)',
-      endPlugColor: 'rgb(205, 81, 36)',
-      dash: false
-    }
-  )
+  // Get card data and interfaces
+  const fromCard = fromCardId === 'self-peer' ?
+    { job: { service_name: 'Local Peer', interfaces: [] } } :
+    serviceCards.value.find(c => c.id == fromCardId)
 
-  // Add visual draw animation effect
-  line.show('draw', {duration: 500, timing: [0.58, 0, 0.42, 1]})
+  const toCard = toCardId === 'self-peer' ?
+    { job: { service_name: 'Local Peer', interfaces: [{ interface_type: 'STDIN', path: 'input/' }] as ServiceInterface[] } } :
+    serviceCards.value.find(c => c.id == toCardId)
 
-  // Store connection ID with the line object for later reference
-  ;(line as any)._connectionId = connectionId
+  if (!fromCard || !toCard) {
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: 'Card not found',
+      life: 3000
+    })
+    return
+  }
+
+  // Set pending connection data
+  pendingConnection.value = {
+    fromCardId,
+    toCardId,
+    fromCardName: fromCard.job.service_name || 'Unknown',
+    toCardName: toCard.job.service_name || 'Unknown',
+    fromInterfaces: fromCard.job.interfaces || [],
+    toInterfaces: toCard.job.interfaces || []
+  }
+
+  // Show interface selector dialog
+  interfaceSelectorVisible.value = true
+}
+
+async function onInterfacesSelected(selectedInterfaces: string[]) {
+  const { fromCardId, toCardId } = pendingConnection.value
 
   // Save to database - check if workflow exists first
   if (!workflowsStore.currentWorkflow?.id) {
-    line.remove()
     toast.add({
       severity: 'warn',
       summary: t('message.common.warning'),
@@ -941,19 +985,46 @@ async function createConnection(fromCardId: string | number, toCardId: string | 
       toNodeId = toCard?.job.id || null
     }
 
-    const connection = {
-      from_node_id: fromNodeId,
-      from_interface_type: 'STDOUT',
-      to_node_id: toNodeId,
-      to_interface_type: 'STDIN'
+    // Create connections for each selected interface
+    for (const interfaceType of selectedInterfaces) {
+      const connection = {
+        from_node_id: fromNodeId,
+        from_interface_type: interfaceType,  // STDOUT, STDERR, LOGS, or MOUNT
+        to_node_id: toNodeId,
+        to_interface_type: 'STDIN'  // Always STDIN for now (can be enhanced later)
+      }
+
+      await workflowsStore.addWorkflowConnection(
+        workflowsStore.currentWorkflow.id,
+        connection
+      )
     }
 
-    const response = await workflowsStore.addWorkflowConnection(
-      workflowsStore.currentWorkflow.id,
-      connection
+    // Create visual leader line (one line for all interfaces)
+    const fromElement = document.querySelector(`[data-card-id="${fromCardId}"][data-connector="output"]`)
+    const toElement = document.querySelector(`[data-card-id="${toCardId}"][data-connector="input"]`)
+
+    const line = new LeaderLine(
+      fromElement,
+      toElement,
+      {
+        color: 'rgb(205, 81, 36)',
+        size: 3,
+        path: 'fluid',
+        startPlug: 'disc',
+        endPlug: 'arrow2',
+        startPlugColor: 'rgb(205, 81, 36)',
+        endPlugColor: 'rgb(205, 81, 36)',
+        dash: false
+      }
     )
 
-    // Add click handler to delete connection and store SVG reference
+    line.show('draw', {duration: 500, timing: [0.58, 0, 0.42, 1]})
+
+    const connectionId = `${fromCardId}->${toCardId}`
+    ;(line as any)._connectionId = connectionId
+
+    // Add click handler and store
     const svgElement = await attachConnectionClickHandler(connectionId, line)
 
     connections.value.push({
@@ -962,25 +1033,36 @@ async function createConnection(fromCardId: string | number, toCardId: string | 
       to: `${toCardId}`,
       fromCardId,
       toCardId,
-      dbId: response.connection?.id,
-      svgElement: svgElement || undefined
+      svgElement: svgElement || undefined,
+      interfaces: selectedInterfaces  // Store which interfaces are connected
     })
 
     toast.add({
       severity: 'success',
       summary: t('message.common.success'),
-      detail: 'Connection created',
+      detail: `Connection created (${selectedInterfaces.length} interface${selectedInterfaces.length > 1 ? 's' : ''})`,
       life: 3000
     })
+
   } catch (error: any) {
-    // Remove the line if saving failed
-    line.remove()
     toast.add({
       severity: 'error',
       summary: t('message.common.error'),
-      detail: error.message || 'Failed to save connection',
+      detail: error.message || 'Failed to create connection',
       life: 5000
     })
+  }
+}
+
+function onInterfaceSelectorCancel() {
+  interfaceSelectorVisible.value = false
+  pendingConnection.value = {
+    fromCardId: '',
+    toCardId: '',
+    fromCardName: '',
+    toCardName: '',
+    fromInterfaces: [],
+    toInterfaces: []
   }
 }
 

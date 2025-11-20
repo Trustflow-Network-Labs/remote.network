@@ -12,7 +12,7 @@ class APIClient {
     this.baseURL = baseURL
     this.client = axios.create({
       baseURL: this.baseURL,
-      timeout: 60000, // 60 seconds for relay operations that may take time
+      timeout: 3600000, // 1 hour to accommodate long-running operations like Docker builds
       headers: {
         'Content-Type': 'application/json',
       },

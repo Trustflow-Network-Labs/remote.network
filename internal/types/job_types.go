@@ -22,6 +22,8 @@ const (
 const (
 	InterfaceTypeStdin  = "STDIN"
 	InterfaceTypeStdout = "STDOUT"
+	InterfaceTypeStderr = "STDERR"
+	InterfaceTypeLogs   = "LOGS"
 	InterfaceTypeMount  = "MOUNT"
 )
 
@@ -46,6 +48,7 @@ type JobExecutionRequest struct {
 	JobName             string             `json:"job_name"`
 	ServiceID           int64              `json:"service_id"`
 	ServiceType         string             `json:"service_type"`
+	ServiceName         string             `json:"service_name,omitempty"` // For reference/logging
 	ExecutorPeerID      string             `json:"executor_peer_id"` // Which peer should execute this job
 	Entrypoint          []string           `json:"entrypoint,omitempty"`
 	Commands            []string           `json:"commands,omitempty"`
@@ -53,6 +56,12 @@ type JobExecutionRequest struct {
 	Interfaces          []*JobInterface    `json:"interfaces"`
 	OrderingPeerID      string             `json:"ordering_peer_id"` // Who requested this job
 	RequestedAt         time.Time          `json:"requested_at"`
+	// DataService details (for DATA service types only, sent from orchestrator to worker)
+	DataServiceFilePath      string `json:"data_service_file_path,omitempty"`
+	DataServiceEncryptedPath string `json:"data_service_encrypted_path,omitempty"`
+	DataServiceHash          string `json:"data_service_hash,omitempty"`
+	DataServiceSizeBytes     int64  `json:"data_service_size_bytes,omitempty"`
+	DataServiceEncrypted     bool   `json:"data_service_encrypted,omitempty"`
 }
 
 // JobExecutionResponse represents a response to a job execution request

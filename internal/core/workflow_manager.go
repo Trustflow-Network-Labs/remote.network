@@ -447,6 +447,8 @@ func (wm *WorkflowManager) validateWorkflow(workflow *types.WorkflowDefinition) 
 		for _, iface := range job.Interfaces {
 			if iface.Type != types.InterfaceTypeStdin &&
 			   iface.Type != types.InterfaceTypeStdout &&
+			   iface.Type != types.InterfaceTypeStderr &&
+			   iface.Type != types.InterfaceTypeLogs &&
 			   iface.Type != types.InterfaceTypeMount {
 				return fmt.Errorf("invalid interface type '%s' for job '%s'", iface.Type, job.JobName)
 			}
@@ -881,8 +883,14 @@ func (wm *WorkflowManager) requestJobStatus(execution *WorkflowExecution, jobNam
 	}
 
 	// Request status from executor peer
+	// Use remote_job_execution_id if this is a remote job
+	jobIDToQuery := jobExec.ID
+	if jobExec.RemoteJobExecutionID != nil {
+		jobIDToQuery = *jobExec.RemoteJobExecutionID
+	}
+
 	request := &types.JobStatusRequest{
-		JobExecutionID: jobExec.ID,
+		JobExecutionID: jobIDToQuery,
 		WorkflowJobID:  jobExec.WorkflowJobID,
 	}
 

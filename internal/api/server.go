@@ -224,11 +224,13 @@ func (s *APIServer) Start() error {
 	useHTTPS := s.config.GetConfigBool("api_use_https", true)
 
 	// Create HTTP server with TLS configuration
+	// Note: WriteTimeout is set to 1 hour to accommodate long-running operations like Docker builds
+	// This is a single-user application, so we can be generous with timeouts
 	s.server = &http.Server{
 		Handler:      handler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  5 * time.Minute,
+		WriteTimeout: 1 * time.Hour, // Allow for very long Docker builds
+		IdleTimeout:  10 * time.Minute,
 		ErrorLog:     log.New(s.logger.File, "", 0), // Redirect errors to log file, not stdout
 	}
 
@@ -299,9 +301,9 @@ func (s *APIServer) Start() error {
 			// Create HTTP server (same handler as HTTPS server)
 			s.httpServer = &http.Server{
 				Handler:      handler,
-				ReadTimeout:  15 * time.Second,
-				WriteTimeout: 15 * time.Second,
-				IdleTimeout:  60 * time.Second,
+				ReadTimeout:  5 * time.Minute,
+				WriteTimeout: 1 * time.Hour, // Allow for very long Docker builds
+				IdleTimeout:  10 * time.Minute,
 				ErrorLog:     log.New(s.logger.File, "", 0),
 			}
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -109,6 +108,9 @@ func (dsw *DataServiceWorker) MonitorTransfers() {
 	for {
 		select {
 		case <-ticker.C:
+			// Clean up abandoned in-memory transfers (no activity for 5+ minutes)
+			dsw.cleanupAbandonedTransfers(5 * time.Minute)
+
 			// Get stalled transfers (no activity for 30+ seconds)
 			stalledTransfers, err := dsw.db.GetStalledTransfers(30 * time.Second)
 			if err != nil {
@@ -150,6 +152,72 @@ func (dsw *DataServiceWorker) MonitorTransfers() {
 			dsw.logger.Info("Transfer monitoring stopped", "data_worker")
 			return
 		}
+	}
+}
+
+// cleanupAbandonedTransfers removes abandoned in-memory transfers that have had no activity for the specified duration
+func (dsw *DataServiceWorker) cleanupAbandonedTransfers(timeout time.Duration) {
+	dsw.transfersMu.Lock()
+	defer dsw.transfersMu.Unlock()
+
+	now := time.Now()
+	var abandoned []string
+
+	// Find abandoned transfers
+	for transferID, transfer := range dsw.incomingTransfers {
+		transfer.mu.Lock()
+		lastActivity := transfer.LastChunkAt
+		if lastActivity.IsZero() {
+			lastActivity = transfer.StartedAt
+		}
+		transfer.mu.Unlock()
+
+		if now.Sub(lastActivity) > timeout {
+			abandoned = append(abandoned, transferID)
+		}
+	}
+
+	if len(abandoned) == 0 {
+		return
+	}
+
+	dsw.logger.Info(fmt.Sprintf("Found %d abandoned transfers to clean up", len(abandoned)), "data_worker")
+
+	// Clean up abandoned transfers
+	for _, transferID := range abandoned {
+		transfer := dsw.incomingTransfers[transferID]
+		if transfer == nil {
+			continue
+		}
+
+		dsw.logger.Warn(fmt.Sprintf("Cleaning up abandoned transfer %s (no activity for %s)",
+			transferID, timeout), "data_worker")
+
+		// Close file handle
+		if transfer.File != nil {
+			transfer.File.Close()
+		}
+
+		// Remove the incomplete .dat file
+		if transfer.TargetPath != "" {
+			if err := os.Remove(transfer.TargetPath); err != nil {
+				dsw.logger.Warn(fmt.Sprintf("Failed to remove abandoned transfer file %s: %v",
+					transfer.TargetPath, err), "data_worker")
+			} else {
+				dsw.logger.Info(fmt.Sprintf("Removed abandoned transfer file: %s", transfer.TargetPath), "data_worker")
+			}
+		}
+
+		// Mark transfer as failed in database
+		if err := dsw.db.FailTransfer(transferID, "Transfer abandoned - no activity for "+timeout.String()); err != nil {
+			dsw.logger.Error(fmt.Sprintf("Failed to mark transfer %s as failed in database: %v",
+				transferID, err), "data_worker")
+		}
+
+		// Remove from in-memory map
+		delete(dsw.incomingTransfers, transferID)
+
+		dsw.logger.Info(fmt.Sprintf("Abandoned transfer %s cleaned up successfully", transferID), "data_worker")
 	}
 }
 
@@ -664,8 +732,8 @@ func (dsw *DataServiceWorker) ResumeTransfer(transfer *database.DataTransfer, pe
 // GenerateTransferID generates a unique transfer ID (public method for JobManager)
 func (dsw *DataServiceWorker) GenerateTransferID(jobExecutionID int64, peerID string) string {
 	data := fmt.Sprintf("%d-%s-%d", jobExecutionID, peerID, time.Now().UnixNano())
-	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:8]) // Use first 8 bytes as transfer ID
+	hash := utils.HashString(data)
+	return hash[:16] // Use first 16 hex chars as transfer ID
 }
 
 

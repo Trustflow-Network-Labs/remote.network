@@ -20,12 +20,13 @@ import (
 
 // ExecutionConfig holds configuration for container execution
 type ExecutionConfig struct {
-	ServiceID int64
-	Inputs    []string          // STDIN inputs
-	Outputs   []string          // STDOUT output paths
-	Mounts    map[string]string // Host path -> Container path
-	EnvVars   map[string]string // Environment variables
-	Timeout   time.Duration     // Execution timeout (0 = no timeout)
+	ServiceID      int64
+	JobExecutionID int64             // Job execution ID for unique container naming
+	Inputs         []string          // STDIN inputs
+	Outputs        []string          // STDOUT output paths
+	Mounts         map[string]string // Host path -> Container path
+	EnvVars        map[string]string // Environment variables
+	Timeout        time.Duration     // Execution timeout (0 = no timeout)
 }
 
 // ExecutionResult holds the results of container execution
@@ -91,16 +92,17 @@ func (ds *DockerService) ExecuteService(config *ExecutionConfig) (*ExecutionResu
 	// Execute based on service source
 	if dockerDetails.ComposePath != "" {
 		// Execute docker-compose stack
-		return ds.executeComposeService(cli, dockerDetails, config, interfaces)
+		return ds.executeComposeService(cli, service.Name, dockerDetails, config, interfaces)
 	}
 
 	// Execute single container
-	return ds.executeSingleContainer(cli, dockerDetails, config, interfaces)
+	return ds.executeSingleContainer(cli, service.Name, dockerDetails, config, interfaces)
 }
 
 // executeSingleContainer runs a single Docker container
 func (ds *DockerService) executeSingleContainer(
 	cli *client.Client,
+	serviceName string,
 	details *database.DockerServiceDetails,
 	config *ExecutionConfig,
 	interfaces []*database.ServiceInterface,
@@ -125,6 +127,9 @@ func (ds *DockerService) executeSingleContainer(
 	// Build container configuration
 	containerConfig, hostConfig, networkConfig := ds.buildContainerConfig(imageName, config, interfaces)
 
+	// Generate unique container name
+	containerName := ds.generateContainerName(config.JobExecutionID, serviceName)
+
 	// Create context with timeout
 	ctx := context.Background()
 	if config.Timeout > 0 {
@@ -134,8 +139,8 @@ func (ds *DockerService) executeSingleContainer(
 	}
 
 	// Create container
-	ds.logger.Info(fmt.Sprintf("Creating container from image: %s", imageName), "docker")
-	resp, err := cli.ContainerCreate(ctx, containerConfig, hostConfig, networkConfig, nil, "")
+	ds.logger.Info(fmt.Sprintf("Creating container '%s' from image: %s", containerName, imageName), "docker")
+	resp, err := cli.ContainerCreate(ctx, containerConfig, hostConfig, networkConfig, nil, containerName)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to create container: %w", err)
 		return result, result.Error
@@ -301,6 +306,7 @@ func (ds *DockerService) getContainerLogs(ctx context.Context, cli *client.Clien
 // executeComposeService runs a docker-compose stack
 func (ds *DockerService) executeComposeService(
 	cli *client.Client,
+	serviceName string,
 	details *database.DockerServiceDetails,
 	config *ExecutionConfig,
 	interfaces []*database.ServiceInterface,
@@ -343,7 +349,7 @@ func (ds *DockerService) executeComposeService(
 	}
 
 	// Execute as single container
-	result, err = ds.executeSingleContainer(cli, tempDetails, config, interfaces)
+	result, err = ds.executeSingleContainer(cli, serviceName, tempDetails, config, interfaces)
 	result.Duration = time.Since(startTime)
 
 	return result, err

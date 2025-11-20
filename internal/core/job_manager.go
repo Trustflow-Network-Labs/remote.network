@@ -2,6 +2,11 @@ package core
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/pbkdf2"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/dependencies"
@@ -330,14 +337,6 @@ func (jm *JobManager) executeDataService(job *database.JobExecution, service *da
 func (jm *JobManager) executeDockerService(job *database.JobExecution, service *database.OfferedService) {
 	jm.logger.Info(fmt.Sprintf("Executing DOCKER service for job %d", job.ID), "job_manager")
 
-	// Get workflow job to get workflow_id
-	workflowJob, err := jm.db.GetWorkflowJobByID(job.WorkflowJobID)
-	if err != nil {
-		jm.logger.Error(fmt.Sprintf("Failed to get workflow job for job %d: %v", job.ID, err), "job_manager")
-		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to get workflow job: %v", err))
-		return
-	}
-
 	// Get service interfaces
 	interfaces, err := jm.db.GetServiceInterfaces(service.ID)
 	if err != nil {
@@ -347,12 +346,13 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 	}
 
 	// Create workflow directory structure
+	// Use workflow_job_id (execution instance ID) for directory isolation
 	appPaths := utils.GetAppPaths("")
 	workflowJobDir := filepath.Join(
 		appPaths.DataDir,
 		"workflows",
 		job.OrderingPeerID,
-		fmt.Sprintf("%d", workflowJob.WorkflowID),
+		fmt.Sprintf("%d", job.WorkflowJobID), // Use workflow_job_id (execution instance)
 		"jobs",
 		fmt.Sprintf("%d", job.ID),
 	)
@@ -378,7 +378,7 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 	envVars := make(map[string]string)
 
 	// Relative path prefix for outputs
-	relPathPrefix := filepath.Join("workflows", job.OrderingPeerID, fmt.Sprintf("%d", workflowJob.WorkflowID), "jobs", fmt.Sprintf("%d", job.ID), "output")
+	relPathPrefix := filepath.Join("workflows", job.OrderingPeerID, fmt.Sprintf("%d", job.WorkflowJobID), "jobs", fmt.Sprintf("%d", job.ID), "output")
 
 	for _, iface := range interfaces {
 		switch iface.InterfaceType {
@@ -400,12 +400,13 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 
 	// Create execution config
 	config := &services.ExecutionConfig{
-		ServiceID: service.ID,
-		Inputs:    inputs,
-		Outputs:   outputs,
-		Mounts:    mounts,
-		EnvVars:   envVars,
-		Timeout:   10 * time.Minute,
+		ServiceID:      service.ID,
+		JobExecutionID: job.ID,
+		Inputs:         inputs,
+		Outputs:        outputs,
+		Mounts:         mounts,
+		EnvVars:        envVars,
+		Timeout:        10 * time.Minute,
 	}
 
 	// Execute container
@@ -426,7 +427,7 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 
 	// Transfer outputs to connected jobs/peers
 	if len(outputs) > 0 {
-		err = jm.transferDockerOutputs(job, workflowJob.WorkflowID, outputDir)
+		err = jm.transferDockerOutputs(job, job.WorkflowJobID, outputDir)
 		if err != nil {
 			jm.logger.Error(fmt.Sprintf("Failed to transfer outputs: %v", err), "job_manager")
 			jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to transfer outputs: %v", err))
@@ -617,44 +618,182 @@ func (jm *JobManager) transferOutputLocally(job *database.JobExecution, workflow
 	return nil
 }
 
-// transferOutputRemotely transfers output file to a remote peer via P2P
+// generateTransferPassphrase generates a one-time passphrase and encryption key for secure transfers
+func (jm *JobManager) generateTransferPassphrase() (passphrase string, keyData []byte, err error) {
+	// Generate a random 32-byte passphrase
+	passphraseBytes := make([]byte, 32)
+	if _, err := rand.Read(passphraseBytes); err != nil {
+		return "", nil, fmt.Errorf("failed to generate passphrase: %w", err)
+	}
+	passphrase = hex.EncodeToString(passphraseBytes)
+
+	// Derive AES-256 key using PBKDF2
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", nil, fmt.Errorf("failed to generate salt: %w", err)
+	}
+
+	// Derive key using PBKDF2 with SHA-256
+	keyData = pbkdf2.Key([]byte(passphrase), salt, 100000, 32, sha256.New)
+
+	// Prepend salt to keyData (first 16 bytes = salt, rest = derived key)
+	fullKeyData := append(salt, keyData...)
+
+	return passphrase, fullKeyData, nil
+}
+
+// encryptFileStreaming encrypts a file using AES-256-GCM in chunks (memory-efficient)
+func (jm *JobManager) encryptFileStreaming(inputPath, outputPath string, keyData []byte) error {
+	// Extract key from keyData (skip first 16 bytes which is salt)
+	if len(keyData) < 48 {
+		return fmt.Errorf("invalid key data length")
+	}
+	key := keyData[16:48]
+
+	// Open input file
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		return fmt.Errorf("failed to open input file: %w", err)
+	}
+	defer inputFile.Close()
+
+	// Create output file
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	// Create AES cipher
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	// Generate nonce
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	// Write nonce to output file first
+	if _, err := outputFile.Write(nonce); err != nil {
+		return fmt.Errorf("failed to write nonce: %w", err)
+	}
+
+	// Encrypt file in chunks (64KB chunks for streaming)
+	const chunkSize = 64 * 1024 // 64KB chunks
+	buffer := make([]byte, chunkSize)
+	counter := uint64(0) // Counter for GCM nonce variation
+
+	for {
+		n, err := inputFile.Read(buffer)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read chunk: %w", err)
+		}
+		if n == 0 {
+			break
+		}
+
+		// Create unique nonce for this chunk by XORing with counter
+		chunkNonce := make([]byte, len(nonce))
+		copy(chunkNonce, nonce)
+		for i := 0; i < 8 && i < len(chunkNonce); i++ {
+			chunkNonce[i] ^= byte(counter >> (i * 8))
+		}
+
+		// Encrypt chunk
+		cipherChunk := gcm.Seal(nil, chunkNonce, buffer[:n], nil)
+
+		// Write encrypted chunk to output
+		if _, err := outputFile.Write(cipherChunk); err != nil {
+			return fmt.Errorf("failed to write encrypted chunk: %w", err)
+		}
+
+		counter++
+	}
+
+	return nil
+}
+
+// transferOutputRemotely transfers output file to a remote peer via P2P with compression and encryption
 func (jm *JobManager) transferOutputRemotely(job *database.JobExecution, peer *database.JobInterfacePeer, outputFilePath, interfaceType string) error {
-	// Open file for reading
-	file, err := os.Open(outputFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
+	jm.logger.Info(fmt.Sprintf("Preparing secure transfer of %s to peer %s", outputFilePath, peer.PeerNodeID[:8]), "job_manager")
+
+	// Step 1: Create temporary directory for processing
+	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("docker-output-%d-%d", job.ID, time.Now().Unix()))
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	defer file.Close()
+	defer os.RemoveAll(tempDir) // Clean up temp directory
 
-	// Get file info
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("failed to get file info: %w", err)
+	// Step 2: Compress output file to tar.gz
+	compressedPath := filepath.Join(tempDir, "output.tar.gz")
+	jm.logger.Info(fmt.Sprintf("Compressing %s to tar.gz", outputFilePath), "job_manager")
+
+	if err := utils.Compress(outputFilePath, compressedPath); err != nil {
+		return fmt.Errorf("failed to compress output: %w", err)
 	}
 
-	fileSize := fileInfo.Size()
-	chunkSize := 1024 * 1024 // 1MB chunks
-	totalChunks := int((fileSize + int64(chunkSize) - 1) / int64(chunkSize))
+	// Step 3: Generate one-time passphrase for encryption
+	passphrase, keyData, err := jm.generateTransferPassphrase()
+	if err != nil {
+		return fmt.Errorf("failed to generate passphrase: %w", err)
+	}
+	jm.logger.Info("Generated one-time encryption passphrase for transfer", "job_manager")
 
-	// Calculate BLAKE3 hash (consistent with DATA services)
-	hash, err := utils.HashFileToCID(outputFilePath)
+	// Step 4: Encrypt the compressed archive
+	encryptedPath := filepath.Join(tempDir, "output.tar.gz.encrypted")
+	jm.logger.Info("Encrypting compressed archive", "job_manager")
+
+	if err := jm.encryptFileStreaming(compressedPath, encryptedPath, keyData); err != nil {
+		return fmt.Errorf("failed to encrypt output: %w", err)
+	}
+
+	// Step 5: Get encrypted file info
+	fileInfo, err := os.Stat(encryptedPath)
+	if err != nil {
+		return fmt.Errorf("failed to get encrypted file info: %w", err)
+	}
+	encryptedSize := fileInfo.Size()
+
+	// Step 6: Calculate hash of encrypted file
+	hash, err := utils.HashFileToCID(encryptedPath)
 	if err != nil {
 		return fmt.Errorf("failed to calculate file hash: %w", err)
 	}
 
-	jm.logger.Info(fmt.Sprintf("Transferring file %s (%d bytes) in %d chunks to peer %s",
-		outputFilePath, fileSize, totalChunks, peer.PeerNodeID[:8]), "job_manager")
+	jm.logger.Info(fmt.Sprintf("Encrypted output ready: %d bytes", encryptedSize), "job_manager")
 
-	// Generate transfer ID
+	// Step 7: Open encrypted file for streaming
+	file, err := os.Open(encryptedPath)
+	if err != nil {
+		return fmt.Errorf("failed to open encrypted file: %w", err)
+	}
+	defer file.Close()
+
+	chunkSize := 1024 * 1024 // 1MB chunks
+	totalChunks := int((encryptedSize + int64(chunkSize) - 1) / int64(chunkSize))
+
+	// Step 8: Generate transfer ID
 	transferID := jm.dataWorker.GenerateTransferID(job.ID, peer.PeerNodeID)
 
-	// Get job handler
+	// Step 9: Get job handler
 	jobHandler := jm.peerManager.GetJobHandler()
 	if jobHandler == nil {
 		return fmt.Errorf("job handler not available")
 	}
 
-	// Send transfer request
+	// Step 10: Send transfer request with passphrase in expected format
+	// Format: "passphrase|hexkeydata" (same format as DATA services)
+	keyDataFormatted := fmt.Sprintf("%s|%s", passphrase, hex.EncodeToString(keyData))
+
 	transferRequest := &types.JobDataTransferRequest{
 		TransferID:        transferID,
 		WorkflowJobID:     job.WorkflowJobID,
@@ -664,11 +803,13 @@ func (jm *JobManager) transferOutputRemotely(job *database.JobExecution, peer *d
 		SourcePath:        outputFilePath,
 		DestinationPath:   peer.PeerPath,
 		DataHash:          hash,
-		SizeBytes:         fileSize,
-		Encrypted:         false,
+		SizeBytes:         encryptedSize,
+		Passphrase:        keyDataFormatted, // Format: passphrase|hexkeydata
+		Encrypted:         true,             // Data is encrypted
 	}
 
-	jm.logger.Info(fmt.Sprintf("Sending transfer request for transfer ID %s to peer %s", transferID, peer.PeerNodeID[:8]), "job_manager")
+	jm.logger.Info(fmt.Sprintf("Sending encrypted transfer request for transfer ID %s to peer %s",
+		transferID, peer.PeerNodeID[:8]), "job_manager")
 
 	response, err := jobHandler.SendJobDataTransferRequest(peer.PeerNodeID, transferRequest)
 	if err != nil {
@@ -681,7 +822,7 @@ func (jm *JobManager) transferOutputRemotely(job *database.JobExecution, peer *d
 
 	jm.logger.Info(fmt.Sprintf("Transfer request accepted by peer %s for transfer ID %s", peer.PeerNodeID[:8], transferID), "job_manager")
 
-	// Send file in chunks
+	// Step 11: Send encrypted file in chunks
 	buffer := make([]byte, chunkSize)
 	chunkIndex := 0
 
@@ -733,7 +874,7 @@ func (jm *JobManager) transferOutputRemotely(job *database.JobExecution, peer *d
 		chunkIndex++
 	}
 
-	jm.logger.Info(fmt.Sprintf("Successfully sent all %d chunks for transfer %s", totalChunks, transferID), "job_manager")
+	jm.logger.Info(fmt.Sprintf("Successfully sent all %d chunks for transfer %s (encrypted)", totalChunks, transferID), "job_manager")
 
 	return nil
 }
@@ -1327,7 +1468,7 @@ func (jm *JobManager) sendJobToRemotePeer(job *database.JobExecution) {
 
 	// Create job execution request
 	request := &types.JobExecutionRequest{
-		WorkflowID:          job.WorkflowJobID, // Note: This is actually workflow_job_id
+		WorkflowID:          job.WorkflowJobID, // Workflow job ID (execution instance) for directory paths
 		WorkflowJobID:       job.WorkflowJobID,
 		JobName:             fmt.Sprintf("job-%d", job.ID),
 		ServiceID:           job.ServiceID,
@@ -1358,6 +1499,11 @@ func (jm *JobManager) sendJobToRemotePeer(job *database.JobExecution) {
 
 	jm.logger.Info(fmt.Sprintf("Job %d accepted by remote peer %s (remote job_execution_id: %d)",
 		job.ID, job.ExecutorPeerID[:8], response.JobExecutionID), "job_manager")
+
+	// Store the remote job execution ID for later status requests
+	if err := jm.db.UpdateRemoteJobExecutionID(job.ID, response.JobExecutionID); err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to store remote_job_execution_id for job %d: %v", job.ID, err), "job_manager")
+	}
 
 	// Update job status to RUNNING (remote peer will send status updates)
 	jm.db.UpdateJobStatus(job.ID, types.JobStatusRunning, "")

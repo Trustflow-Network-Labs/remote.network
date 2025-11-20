@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api/websocket"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 )
 
@@ -118,7 +120,42 @@ func (s *APIServer) handleCreateDockerFromGit(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	s.logger.Info(fmt.Sprintf("Creating Docker service from Git: %s (branch: %s)", req.RepoURL, req.Branch), "api")
+	// Generate operation ID
+	operationID := fmt.Sprintf("docker-git-%d", time.Now().UnixNano())
+
+	s.logger.Info(fmt.Sprintf("Starting async Docker service creation from Git: %s (operation: %s)", req.RepoURL, operationID), "api")
+
+	// Return immediately with operation ID
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"operation_id": operationID,
+		"message":      "Docker service creation started",
+	})
+
+	// Run Docker service creation asynchronously
+	go s.createDockerServiceFromGitAsync(operationID, req)
+}
+
+// createDockerServiceFromGitAsync creates a Docker service from Git asynchronously with WebSocket progress updates
+func (s *APIServer) createDockerServiceFromGitAsync(operationID string, req CreateFromGitRequest) {
+	// Emit start event
+	startMsg, _ := websocket.NewMessage(websocket.MessageTypeDockerOperationStart, websocket.DockerOperationStartPayload{
+		OperationID:   operationID,
+		OperationType: "build",
+		ServiceName:   req.ServiceName,
+		ImageName:     "",
+		Message:       fmt.Sprintf("Starting Docker service creation from Git: %s", req.RepoURL),
+	})
+	s.wsHub.Broadcast(startMsg)
+
+	// Emit progress: Cloning repository
+	progressMsg, _ := websocket.NewMessage(websocket.MessageTypeDockerOperationProgress, websocket.DockerOperationProgressPayload{
+		OperationID: operationID,
+		Message:     "Cloning Git repository...",
+		Percentage:  10,
+	})
+	s.wsHub.Broadcast(progressMsg)
 
 	// Create service
 	service, suggestions, err := s.dockerService.CreateFromGitRepo(
@@ -132,8 +169,14 @@ func (s *APIServer) handleCreateDockerFromGit(w http.ResponseWriter, r *http.Req
 	)
 
 	if err != nil {
-		s.logger.Error(fmt.Sprintf("Failed to create Docker service from Git: %v", err), "api")
-		http.Error(w, fmt.Sprintf("Failed to create service: %v", err), http.StatusInternalServerError)
+		s.logger.Error(fmt.Sprintf("Failed to create Docker service from Git (operation: %s): %v", operationID, err), "api")
+
+		// Emit error event
+		errorMsg, _ := websocket.NewMessage(websocket.MessageTypeDockerOperationError, websocket.DockerOperationErrorPayload{
+			OperationID: operationID,
+			Error:       err.Error(),
+		})
+		s.wsHub.Broadcast(errorMsg)
 		return
 	}
 
@@ -143,15 +186,45 @@ func (s *APIServer) handleCreateDockerFromGit(w http.ResponseWriter, r *http.Req
 	// Update peer metadata in background
 	go s.updatePeerMetadataAfterServiceChange()
 
-	s.logger.Info(fmt.Sprintf("Docker service created from Git successfully: %s (ID: %d)", req.ServiceName, service.ID), "api")
+	s.logger.Info(fmt.Sprintf("Docker service created from Git successfully: %s (ID: %d, operation: %s)", req.ServiceName, service.ID, operationID), "api")
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":             true,
-		"service":             service,
-		"suggested_interfaces": suggestions,
+	// Convert service to map for JSON
+	serviceMap := map[string]interface{}{
+		"id":               service.ID,
+		"name":             service.Name,
+		"description":      service.Description,
+		"service_type":     service.ServiceType,
+		"type":             service.Type,
+		"status":           service.Status,
+		"pricing_amount":   service.PricingAmount,
+		"pricing_type":     service.PricingType,
+		"pricing_interval": service.PricingInterval,
+		"pricing_unit":     service.PricingUnit,
+		"capabilities":     service.Capabilities,
+		"created_at":       service.CreatedAt,
+		"updated_at":       service.UpdatedAt,
+	}
+
+	// Convert suggestions to interface{} slice
+	suggestionsMap := make([]map[string]interface{}, len(suggestions))
+	for i, s := range suggestions {
+		suggestionsMap[i] = map[string]interface{}{
+			"interface_type": s.InterfaceType,
+			"path":           s.Path,
+			"description":    s.Description,
+		}
+	}
+
+	// Emit completion event
+	completeMsg, _ := websocket.NewMessage(websocket.MessageTypeDockerOperationComplete, websocket.DockerOperationCompletePayload{
+		OperationID:         operationID,
+		ServiceID:           service.ID,
+		ServiceName:         service.Name,
+		ImageName:           fmt.Sprintf("%v:%v", service.Capabilities["image_name"], "latest"),
+		SuggestedInterfaces: suggestionsMap,
+		Service:             serviceMap,
 	})
+	s.wsHub.Broadcast(completeMsg)
 }
 
 // handleCreateDockerFromLocal handles POST /api/services/docker/from-local

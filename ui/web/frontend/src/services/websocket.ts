@@ -36,6 +36,10 @@ export enum MessageType {
   // Docker operation messages
   DOCKER_PULL_PROGRESS = 'docker.pull.progress',
   DOCKER_BUILD_OUTPUT = 'docker.build.output',
+  DOCKER_OPERATION_START = 'docker.operation.start',
+  DOCKER_OPERATION_PROGRESS = 'docker.operation.progress',
+  DOCKER_OPERATION_COMPLETE = 'docker.operation.complete',
+  DOCKER_OPERATION_ERROR = 'docker.operation.error',
 
   // Control messages
   PING = 'ping',

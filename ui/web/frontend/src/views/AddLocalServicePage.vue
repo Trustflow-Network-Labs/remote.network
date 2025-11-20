@@ -456,6 +456,7 @@ const dockerServiceResponse = ref<any>(null)
 // Docker progress modal state
 const showDockerProgress = ref(false)
 const dockerProgressModal = ref<InstanceType<typeof DockerProgressModal> | null>(null)
+const dockerOperationId = ref<string | null>(null)
 
 // Service data
 const serviceData = ref({
@@ -629,7 +630,72 @@ function validateAndNext(currentStep: number) {
 
 // WebSocket event handlers for Docker operations
 function setupDockerWebSocketHandlers() {
-  // Subscribe to Docker pull progress
+  // Subscribe to Docker operation start
+  subscribe(MessageType.DOCKER_OPERATION_START, (payload: any) => {
+    if (payload.operation_id === dockerOperationId.value) {
+      if (dockerProgressModal.value) {
+        dockerProgressModal.value.setCurrentOperation(payload.message)
+        dockerProgressModal.value.addOutputLine(payload.message, false)
+      }
+    }
+  })
+
+  // Subscribe to Docker operation progress
+  subscribe(MessageType.DOCKER_OPERATION_PROGRESS, (payload: any) => {
+    if (payload.operation_id === dockerOperationId.value) {
+      if (dockerProgressModal.value) {
+        dockerProgressModal.value.setCurrentOperation(payload.message)
+        if (payload.stream) {
+          dockerProgressModal.value.addOutputLine(payload.stream, false)
+        } else if (payload.message) {
+          dockerProgressModal.value.addOutputLine(payload.message, false)
+        }
+      }
+    }
+  })
+
+  // Subscribe to Docker operation complete
+  subscribe(MessageType.DOCKER_OPERATION_COMPLETE, (payload: any) => {
+    if (payload.operation_id === dockerOperationId.value) {
+      if (dockerProgressModal.value) {
+        dockerProgressModal.value.setStatus('completed')
+        dockerProgressModal.value.setCurrentOperation('Docker service created successfully')
+      }
+
+      // Store response data
+      dockerServiceResponse.value = payload
+
+      // Hide progress modal and show interface review dialog
+      setTimeout(() => {
+        showDockerProgress.value = false
+        showInterfaceDialog.value = true
+      }, 1000)
+    }
+  })
+
+  // Subscribe to Docker operation error
+  subscribe(MessageType.DOCKER_OPERATION_ERROR, (payload: any) => {
+    if (payload.operation_id === dockerOperationId.value) {
+      if (dockerProgressModal.value) {
+        dockerProgressModal.value.setStatus('error')
+        dockerProgressModal.value.addOutputLine(payload.error, true)
+      }
+
+      // Show error toast after a delay
+      setTimeout(() => {
+        showDockerProgress.value = false
+        toast.add({
+          severity: 'error',
+          summary: t('message.common.error'),
+          detail: payload.error,
+          life: 5000
+        })
+        isCreating.value = false
+      }, 2000)
+    }
+  })
+
+  // Subscribe to Docker pull progress (legacy support)
   subscribe(MessageType.DOCKER_PULL_PROGRESS, (payload: any) => {
     if (dockerProgressModal.value && payload.service_name === serviceData.value.name) {
       const line = payload.status + (payload.progress ? ` ${payload.progress}` : '')
@@ -638,7 +704,7 @@ function setupDockerWebSocketHandlers() {
     }
   })
 
-  // Subscribe to Docker build output
+  // Subscribe to Docker build output (legacy support)
   subscribe(MessageType.DOCKER_BUILD_OUTPUT, (payload: any) => {
     if (dockerProgressModal.value && payload.service_name === serviceData.value.name) {
       if (payload.stream) {
@@ -737,7 +803,7 @@ async function finishWizard() {
       // Wait for modal to mount
       await new Promise(resolve => setTimeout(resolve, 100))
 
-      // Create DOCKER service
+      // Create DOCKER service (async with WebSocket progress)
       let response
       try {
         switch (serviceData.value.dockerSource) {
@@ -772,29 +838,44 @@ async function finishWizard() {
             break
         }
 
-        // Mark progress modal as completed
-        if (dockerProgressModal.value) {
-          dockerProgressModal.value.setStatus('completed')
-          dockerProgressModal.value.setCurrentOperation('Docker service created successfully')
+        // Check if response is async (has operation_id)
+        if (response.operation_id) {
+          // Store operation ID for WebSocket event tracking
+          dockerOperationId.value = response.operation_id
+
+          if (dockerProgressModal.value) {
+            dockerProgressModal.value.setCurrentOperation('Docker build started...')
+            dockerProgressModal.value.addOutputLine(response.message || 'Operation started', false)
+          }
+
+          // Don't close modal or navigate - wait for WebSocket completion
+          // isCreating will be reset by WebSocket complete/error handlers
+        } else {
+          // Legacy synchronous response (for registry pulls)
+          // Mark progress modal as completed
+          if (dockerProgressModal.value) {
+            dockerProgressModal.value.setStatus('completed')
+            dockerProgressModal.value.setCurrentOperation('Docker service created successfully')
+          }
+
+          // Wait a moment before showing interface dialog
+          await new Promise(resolve => setTimeout(resolve, 1000))
+
+          // Hide progress modal and show interface review dialog
+          showDockerProgress.value = false
+          dockerServiceResponse.value = response
+          showInterfaceDialog.value = true
+          isCreating.value = false
         }
-
-        // Wait a moment before showing interface dialog
-        await new Promise(resolve => setTimeout(resolve, 1000))
-
-        // Hide progress modal and show interface review dialog
-        showDockerProgress.value = false
-        dockerServiceResponse.value = response
-        showInterfaceDialog.value = true
       } catch (error: any) {
         // Mark progress modal as error
         if (dockerProgressModal.value) {
           dockerProgressModal.value.setStatus('error')
           dockerProgressModal.value.addOutputLine(error.message || 'Docker service creation failed', true)
         }
+        isCreating.value = false
         throw error
       }
-
-      isCreating.value = false
     } else {
       // STANDALONE service types
       toast.add({

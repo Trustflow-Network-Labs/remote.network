@@ -9,6 +9,7 @@ export default {
       remove: 'Remove',
       close: 'Close',
       confirm: 'Confirm',
+      create: 'Create',
       execute: 'Execute',
       success: 'Success',
       error: 'Error',
@@ -190,7 +191,12 @@ export default {
         noServiceSelected: 'No service selected',
         addService: 'Add Service',
         removeService: 'Remove Service'
-      }
+      },
+      selectInterfaces: 'Select Interfaces to Connect',
+      sourceOutputs: 'Source Outputs',
+      destinationInputs: 'Destination Inputs',
+      noOutputInterfaces: 'No output interfaces available',
+      noInputInterfaces: 'No input interfaces available'
     },
     services: {
       title: 'Services',
@@ -286,11 +292,14 @@ export default {
       cmd: 'Command',
       interfaces: 'Interfaces',
       addInterface: 'Add Interface',
+      editInterfaces: 'Edit Interfaces',
+      noInterfaces: 'No interfaces configured. Click "Edit Interfaces" to add interfaces.',
       noInterfacesDetected: 'No interfaces detected. Click "Add Interface" to add manually.',
       selectInterfaceType: 'Select interface type',
       mountPath: 'Mount path (e.g., /data)',
       optional: 'Optional',
       saveInterfaces: 'Save Interfaces',
+      interfacesUpdated: 'Service interfaces updated successfully',
       interfaceReviewInfo: 'Review and modify the detected interfaces. Input interfaces (STDIN, input MOUNTs) allow data to flow into the service. Output interfaces (STDOUT, STDERR, LOGS, output MOUNTs) provide data from the service.',
 
       // Messages
@@ -316,7 +325,8 @@ export default {
       errors: {
         fetchFailed: 'Failed to fetch service details',
         statusChangeFailed: 'Failed to change service status',
-        deleteFailed: 'Failed to delete service'
+        deleteFailed: 'Failed to delete service',
+        interfacesUpdateFailed: 'Failed to update service interfaces'
       },
 
       // Sections

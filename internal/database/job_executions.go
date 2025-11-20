@@ -9,28 +9,29 @@ import (
 
 // JobExecution represents a job execution instance
 type JobExecution struct {
-	ID                  int64     `json:"id"`
-	WorkflowJobID       int64     `json:"workflow_job_id"`
-	ServiceID           int64     `json:"service_id"`
-	ExecutorPeerID      string    `json:"executor_peer_id"`      // Ed25519 peer ID who executes
-	OrderingPeerID      string    `json:"ordering_peer_id"`      // Ed25519 peer ID who requested
-	Status              string    `json:"status"`                // IDLE, READY, RUNNING, COMPLETED, ERRORED, CANCELLED
-	Entrypoint          string    `json:"entrypoint,omitempty"`  // JSON array of strings
-	Commands            string    `json:"commands,omitempty"`    // JSON array of strings
-	ExecutionConstraint string    `json:"execution_constraint"`  // NONE, INPUTS_READY
-	ConstraintDetail    string    `json:"constraint_detail,omitempty"`
-	StartedAt           time.Time `json:"started_at,omitempty"`
-	EndedAt             time.Time `json:"ended_at,omitempty"`
-	ErrorMessage        string    `json:"error_message,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	ID                    int64     `json:"id"`
+	WorkflowJobID         int64     `json:"workflow_job_id"`         // Workflow execution instance ID
+	ServiceID             int64     `json:"service_id"`
+	ExecutorPeerID        string    `json:"executor_peer_id"`        // Ed25519 peer ID who executes
+	OrderingPeerID        string    `json:"ordering_peer_id"`        // Ed25519 peer ID who requested
+	RemoteJobExecutionID  *int64    `json:"remote_job_execution_id"` // Job ID on remote executor peer (nullable for local jobs)
+	Status                string    `json:"status"`                  // IDLE, READY, RUNNING, COMPLETED, ERRORED, CANCELLED
+	Entrypoint            string    `json:"entrypoint,omitempty"`    // JSON array of strings
+	Commands              string    `json:"commands,omitempty"`      // JSON array of strings
+	ExecutionConstraint   string    `json:"execution_constraint"`    // NONE, INPUTS_READY
+	ConstraintDetail      string    `json:"constraint_detail,omitempty"`
+	StartedAt             time.Time `json:"started_at,omitempty"`
+	EndedAt               time.Time `json:"ended_at,omitempty"`
+	ErrorMessage          string    `json:"error_message,omitempty"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
-// JobInterface represents an interface (STDIN, STDOUT, MOUNT) for a job
+// JobInterface represents an interface (STDIN, STDOUT, STDERR, LOGS, MOUNT) for a job
 type JobInterface struct {
 	ID             int64     `json:"id"`
 	JobExecutionID int64     `json:"job_execution_id"`
-	InterfaceType  string    `json:"interface_type"` // STDIN, STDOUT, MOUNT
+	InterfaceType  string    `json:"interface_type"` // STDIN, STDOUT, STDERR, LOGS, MOUNT
 	Path           string    `json:"path"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -61,6 +62,7 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 		service_id INTEGER NOT NULL,
 		executor_peer_id TEXT NOT NULL,
 		ordering_peer_id TEXT NOT NULL,
+		remote_job_execution_id INTEGER,
 		status TEXT CHECK(status IN ('IDLE', 'READY', 'RUNNING', 'COMPLETED', 'ERRORED', 'CANCELLED')) NOT NULL DEFAULT 'IDLE',
 		entrypoint TEXT,
 		commands TEXT,
@@ -77,12 +79,13 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 	CREATE INDEX IF NOT EXISTS idx_job_executions_status ON job_executions(status);
 	CREATE INDEX IF NOT EXISTS idx_job_executions_executor_peer_id ON job_executions(executor_peer_id);
 	CREATE INDEX IF NOT EXISTS idx_job_executions_ordering_peer_id ON job_executions(ordering_peer_id);
+	CREATE INDEX IF NOT EXISTS idx_job_executions_remote_job_id ON job_executions(remote_job_execution_id);
 
 	-- Job interfaces table
 	CREATE TABLE IF NOT EXISTS job_interfaces (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		job_execution_id INTEGER NOT NULL,
-		interface_type TEXT CHECK(interface_type IN ('STDIN', 'STDOUT', 'MOUNT')) NOT NULL,
+		interface_type TEXT CHECK(interface_type IN ('STDIN', 'STDOUT', 'STDERR', 'LOGS', 'MOUNT')) NOT NULL,
 		path TEXT NOT NULL,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (job_execution_id) REFERENCES job_executions(id) ON DELETE CASCADE
@@ -160,10 +163,11 @@ func (sm *SQLiteManager) GetJobExecution(id int64) (*JobExecution, error) {
 	var job JobExecution
 	var startedAt, endedAt sql.NullTime
 	var errorMsg sql.NullString
+	var remoteJobID sql.NullInt64
 
 	err := sm.db.QueryRow(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
-		       status, entrypoint, commands, execution_constraint, constraint_detail,
+		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
 		       started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE id = ?
@@ -173,6 +177,7 @@ func (sm *SQLiteManager) GetJobExecution(id int64) (*JobExecution, error) {
 		&job.ServiceID,
 		&job.ExecutorPeerID,
 		&job.OrderingPeerID,
+		&remoteJobID,
 		&job.Status,
 		&job.Entrypoint,
 		&job.Commands,
@@ -193,6 +198,9 @@ func (sm *SQLiteManager) GetJobExecution(id int64) (*JobExecution, error) {
 		return nil, err
 	}
 
+	if remoteJobID.Valid {
+		job.RemoteJobExecutionID = &remoteJobID.Int64
+	}
 	if startedAt.Valid {
 		job.StartedAt = startedAt.Time
 	}
@@ -239,11 +247,28 @@ func (sm *SQLiteManager) UpdateJobStatus(id int64, status string, errorMsg strin
 	return nil
 }
 
+// UpdateRemoteJobExecutionID updates the remote job execution ID for a job
+func (sm *SQLiteManager) UpdateRemoteJobExecutionID(localID int64, remoteID int64) error {
+	_, err := sm.db.Exec(`
+		UPDATE job_executions
+		SET remote_job_execution_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, remoteID, localID)
+
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to update remote_job_execution_id: %v", err), "database")
+		return err
+	}
+
+	sm.logger.Debug(fmt.Sprintf("Updated remote_job_execution_id for job %d: remote_id=%d", localID, remoteID), "database")
+	return nil
+}
+
 // GetReadyJobs retrieves all jobs with READY status
 func (sm *SQLiteManager) GetReadyJobs() ([]*JobExecution, error) {
 	rows, err := sm.db.Query(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
-		       status, entrypoint, commands, execution_constraint, constraint_detail,
+		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
 		       started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE status = 'READY'
@@ -260,6 +285,7 @@ func (sm *SQLiteManager) GetReadyJobs() ([]*JobExecution, error) {
 		var job JobExecution
 		var startedAt, endedAt sql.NullTime
 		var errorMsg sql.NullString
+		var remoteJobID sql.NullInt64
 
 		err := rows.Scan(
 			&job.ID,
@@ -267,6 +293,7 @@ func (sm *SQLiteManager) GetReadyJobs() ([]*JobExecution, error) {
 			&job.ServiceID,
 			&job.ExecutorPeerID,
 			&job.OrderingPeerID,
+			&remoteJobID,
 			&job.Status,
 			&job.Entrypoint,
 			&job.Commands,
@@ -283,6 +310,9 @@ func (sm *SQLiteManager) GetReadyJobs() ([]*JobExecution, error) {
 			continue
 		}
 
+		if remoteJobID.Valid {
+			job.RemoteJobExecutionID = &remoteJobID.Int64
+		}
 		if startedAt.Valid {
 			job.StartedAt = startedAt.Time
 		}
@@ -303,7 +333,7 @@ func (sm *SQLiteManager) GetReadyJobs() ([]*JobExecution, error) {
 func (sm *SQLiteManager) GetJobsByStatus(status string) ([]*JobExecution, error) {
 	rows, err := sm.db.Query(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
-		       status, entrypoint, commands, execution_constraint, constraint_detail,
+		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
 		       started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE status = ?
@@ -320,6 +350,7 @@ func (sm *SQLiteManager) GetJobsByStatus(status string) ([]*JobExecution, error)
 		var job JobExecution
 		var startedAt, endedAt sql.NullTime
 		var errorMsg sql.NullString
+		var remoteJobID sql.NullInt64
 
 		err := rows.Scan(
 			&job.ID,
@@ -327,6 +358,7 @@ func (sm *SQLiteManager) GetJobsByStatus(status string) ([]*JobExecution, error)
 			&job.ServiceID,
 			&job.ExecutorPeerID,
 			&job.OrderingPeerID,
+			&remoteJobID,
 			&job.Status,
 			&job.Entrypoint,
 			&job.Commands,
@@ -343,6 +375,9 @@ func (sm *SQLiteManager) GetJobsByStatus(status string) ([]*JobExecution, error)
 			continue
 		}
 
+		if remoteJobID.Valid {
+			job.RemoteJobExecutionID = &remoteJobID.Int64
+		}
 		if startedAt.Valid {
 			job.StartedAt = startedAt.Time
 		}
@@ -541,7 +576,7 @@ func (sm *SQLiteManager) MarkInterfacePeerAcknowledged(interfacePeerID int64) er
 func (sm *SQLiteManager) GetJobExecutionsByWorkflowJob(workflowJobID int64) ([]*JobExecution, error) {
 	rows, err := sm.db.Query(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
-		       status, entrypoint, commands, execution_constraint, constraint_detail,
+		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
 		       started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE workflow_job_id = ?
@@ -558,6 +593,7 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowJob(workflowJobID int64) ([]*
 		var job JobExecution
 		var startedAt, endedAt sql.NullTime
 		var errorMsg sql.NullString
+		var remoteJobID sql.NullInt64
 
 		err := rows.Scan(
 			&job.ID,
@@ -565,6 +601,7 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowJob(workflowJobID int64) ([]*
 			&job.ServiceID,
 			&job.ExecutorPeerID,
 			&job.OrderingPeerID,
+			&remoteJobID,
 			&job.Status,
 			&job.Entrypoint,
 			&job.Commands,
@@ -581,6 +618,9 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowJob(workflowJobID int64) ([]*
 			continue
 		}
 
+		if remoteJobID.Valid {
+			job.RemoteJobExecutionID = &remoteJobID.Int64
+		}
 		if startedAt.Valid {
 			job.StartedAt = startedAt.Time
 		}
@@ -603,7 +643,7 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowID(workflowID int64) ([]*JobE
 	rows, err := sm.db.Query(`
 		SELECT
 			je.id, je.workflow_job_id, je.service_id, je.executor_peer_id, je.ordering_peer_id,
-			je.status, je.entrypoint, je.commands, je.execution_constraint, je.constraint_detail,
+			je.remote_job_execution_id, je.status, je.entrypoint, je.commands, je.execution_constraint, je.constraint_detail,
 			je.started_at, je.ended_at, je.error_message, je.created_at, je.updated_at
 		FROM job_executions je
 		INNER JOIN workflow_jobs wj ON je.workflow_job_id = wj.id
@@ -621,6 +661,7 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowID(workflowID int64) ([]*JobE
 		var job JobExecution
 		var startedAt, endedAt sql.NullTime
 		var errorMsg sql.NullString
+		var remoteJobID sql.NullInt64
 
 		err := rows.Scan(
 			&job.ID,
@@ -628,6 +669,7 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowID(workflowID int64) ([]*JobE
 			&job.ServiceID,
 			&job.ExecutorPeerID,
 			&job.OrderingPeerID,
+			&remoteJobID,
 			&job.Status,
 			&job.Entrypoint,
 			&job.Commands,
@@ -644,6 +686,9 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowID(workflowID int64) ([]*JobE
 			continue
 		}
 
+		if remoteJobID.Valid {
+			job.RemoteJobExecutionID = &remoteJobID.Int64
+		}
 		if startedAt.Valid {
 			job.StartedAt = startedAt.Time
 		}

@@ -5,8 +5,9 @@ import { getWebSocketService, MessageType } from '../services/websocket'
 export interface ServiceInterface {
   id: number
   service_id: number
-  interface_type: 'STDIN' | 'STDOUT' | 'MOUNT'
+  interface_type: 'STDIN' | 'STDOUT' | 'STDERR' | 'LOGS' | 'MOUNT'
   path: string
+  mount_function?: 'INPUT' | 'OUTPUT' | 'BOTH'  // For MOUNT interfaces
   created_at: string
 }
 
