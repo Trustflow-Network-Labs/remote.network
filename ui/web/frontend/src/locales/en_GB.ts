@@ -183,6 +183,8 @@ export default {
       duration: 'Duration',
       noExecutions: 'No executions found for this workflow',
       executionsLoadError: 'Failed to load workflow executions',
+      interfaces: 'Interfaces',
+      noInterfaces: 'No interfaces found for this execution',
       editor: {
         title: 'Workflow Editor',
         snapToGrid: 'Snap to Grid',
@@ -196,7 +198,13 @@ export default {
       sourceOutputs: 'Source Outputs',
       destinationInputs: 'Destination Inputs',
       noOutputInterfaces: 'No output interfaces available',
-      noInputInterfaces: 'No input interfaces available'
+      noInputInterfaces: 'No input interfaces available',
+      connectionDetails: 'Connection Details',
+      from: 'From',
+      to: 'To',
+      connectedInterfaces: 'Connected Interfaces',
+      noInterfacesConnected: 'No interfaces connected',
+      deleteConnection: 'Delete Connection'
     },
     services: {
       title: 'Services',

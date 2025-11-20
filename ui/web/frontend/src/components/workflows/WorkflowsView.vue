@@ -210,11 +210,25 @@
             <div class="execution-details">
               <div class="execution-detail">
                 <span class="label">{{ $t('message.workflows.executor') }}:</span>
-                <span class="value">{{ truncatePeerId(execution.executor_peer_id) }}</span>
+                <div class="value-with-copy">
+                  <span class="value">{{ shorten(execution.executor_peer_id, 6, 6) }}</span>
+                  <i
+                    class="pi pi-copy copy-icon"
+                    @click="copyExecutorPeerId(execution.executor_peer_id)"
+                    :title="$t('message.common.copy')"
+                  ></i>
+                </div>
               </div>
               <div class="execution-detail">
                 <span class="label">{{ $t('message.workflows.ordering') }}:</span>
-                <span class="value">{{ truncatePeerId(execution.ordering_peer_id) }}</span>
+                <div class="value-with-copy">
+                  <span class="value">{{ shorten(execution.ordering_peer_id, 6, 6) }}</span>
+                  <i
+                    class="pi pi-copy copy-icon"
+                    @click="copyOrderingPeerId(execution.ordering_peer_id)"
+                    :title="$t('message.common.copy')"
+                  ></i>
+                </div>
               </div>
               <div class="execution-detail" v-if="execution.started_at">
                 <span class="label">{{ $t('message.workflows.started') }}:</span>
@@ -229,9 +243,52 @@
                 <span class="value">{{ getRunningTime(execution.started_at) }}</span>
               </div>
             </div>
-            <div v-if="execution.error_message" class="execution-error">
+            <div v-if="execution.error_message && execution.status === 'ERRORED'" class="execution-error">
               <i class="pi pi-exclamation-triangle"></i>
               {{ execution.error_message }}
+            </div>
+
+            <!-- Interfaces Toggle Button -->
+            <div class="execution-actions">
+              <button
+                class="toggle-interfaces-btn"
+                @click="toggleExecutionInterfaces(execution.id)"
+                :class="{ active: expandedExecutionId === execution.id }"
+              >
+                <i :class="expandedExecutionId === execution.id ? 'pi pi-chevron-up' : 'pi pi-chevron-down'"></i>
+                {{ $t('message.workflows.interfaces') }}
+              </button>
+            </div>
+
+            <!-- Interfaces Section (Expandable) -->
+            <div v-if="expandedExecutionId === execution.id" class="execution-interfaces">
+              <div v-if="loadingInterfaces[execution.id]" class="loading-interfaces">
+                <ProgressSpinner style="width:30px;height:30px" strokeWidth="4" />
+              </div>
+
+              <div v-else-if="executionInterfaces[execution.id] && executionInterfaces[execution.id].length > 0" class="interfaces-list">
+                <div
+                  v-for="iface in executionInterfaces[execution.id]"
+                  :key="iface.id"
+                  class="interface-item"
+                  :class="`interface-${iface.interface_type.toLowerCase()}`"
+                >
+                  <div class="interface-header">
+                    <span class="interface-type-badge" :class="`type-${iface.interface_type.toLowerCase()}`">
+                      {{ iface.interface_type }}
+                    </span>
+                  </div>
+                  <div class="interface-path">
+                    <i class="pi pi-file"></i>
+                    <span>{{ iface.path }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div v-else class="no-interfaces">
+                <i class="pi pi-inbox"></i>
+                <p>{{ $t('message.workflows.noInterfaces') }}</p>
+              </div>
             </div>
           </div>
         </div>
@@ -249,7 +306,6 @@ import { useToast } from 'primevue/usetoast'
 
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
-import Button from 'primevue/button'
 import ProgressSpinner from 'primevue/progressspinner'
 import InputText from 'primevue/inputtext'
 import Avatar from 'primevue/avatar'
@@ -260,11 +316,15 @@ import AppLayout from '../layout/AppLayout.vue'
 import { useWorkflowsStore } from '../../stores/workflows'
 import type { Workflow } from '../../stores/workflows'
 import { getApiUrl } from '../../utils/api'
+import { useClipboard } from '../../composables/useClipboard'
+import { useTextUtils } from '../../composables/useTextUtils'
 
 const router = useRouter()
 const { t } = useI18n()
 const confirm = useConfirm()
 const toast = useToast()
+const { copyToClipboard } = useClipboard()
+const { shorten } = useTextUtils()
 
 const workflowsStore = useWorkflowsStore() as any // TODO: Fix Pinia typing
 
@@ -291,10 +351,21 @@ interface JobExecution {
   updated_at: string
 }
 
+interface JobInterface {
+  id: number
+  job_execution_id: number
+  interface_type: string
+  path: string
+  created_at: string
+}
+
 const activeWorkflowId = ref<number | null>(null)
 const activeWorkflowName = ref<string>('')
 const executions = ref<JobExecution[]>([])
 const loadingExecutions = ref(false)
+const expandedExecutionId = ref<number | null>(null)
+const executionInterfaces = ref<Record<number, JobInterface[]>>({})
+const loadingInterfaces = ref<Record<number, boolean>>({})
 let refreshInterval: number | null = null
 
 // Computed
@@ -458,10 +529,56 @@ function closeExecutions() {
   activeWorkflowId.value = null
   activeWorkflowName.value = ''
   executions.value = []
+  expandedExecutionId.value = null
+  executionInterfaces.value = {}
 
   if (refreshInterval) {
     clearInterval(refreshInterval)
     refreshInterval = null
+  }
+}
+
+async function toggleExecutionInterfaces(executionId: number) {
+  if (expandedExecutionId.value === executionId) {
+    // Collapse if already expanded
+    expandedExecutionId.value = null
+  } else {
+    // Expand and load interfaces
+    expandedExecutionId.value = executionId
+
+    // Load interfaces if not already loaded
+    if (!executionInterfaces.value[executionId]) {
+      await loadExecutionInterfaces(executionId)
+    }
+  }
+}
+
+async function loadExecutionInterfaces(executionId: number) {
+  loadingInterfaces.value[executionId] = true
+
+  try {
+    const response = await fetch(getApiUrl(`/api/job-executions/${executionId}/interfaces`), {
+      headers: {
+        'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
+      }
+    })
+
+    if (!response.ok) {
+      throw new Error('Failed to fetch interfaces')
+    }
+
+    const data = await response.json()
+    executionInterfaces.value[executionId] = data.interfaces || []
+  } catch (error) {
+    console.error('Error loading execution interfaces:', error)
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: 'Failed to load execution interfaces',
+      life: 3000
+    })
+  } finally {
+    loadingInterfaces.value[executionId] = false
   }
 }
 
@@ -477,16 +594,50 @@ function getStatusIcon(status: string): string {
   return icons[status] || 'pi pi-circle'
 }
 
-function truncatePeerId(peerId: string): string {
-  if (!peerId || peerId.length <= 12) return peerId
-  return peerId.substring(0, 8) + '...'
+async function copyExecutorPeerId(peerId: string) {
+  const success = await copyToClipboard(peerId || '')
+  if (success) {
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.common.copiedToClipboard'),
+      life: 2000
+    })
+  }
+}
+
+async function copyOrderingPeerId(peerId: string) {
+  const success = await copyToClipboard(peerId || '')
+  if (success) {
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.common.copiedToClipboard'),
+      life: 2000
+    })
+  }
 }
 
 function formatDateTime(dateStr: string): string {
   if (!dateStr) return '-'
+
   const date = new Date(dateStr)
+
+  // Check if date is valid
+  if (isNaN(date.getTime())) {
+    console.warn('Invalid date string:', dateStr)
+    return '-'
+  }
+
   const now = new Date()
   const diffMs = now.getTime() - date.getTime()
+
+  // If the date is in the future or way too far in the past, it's likely invalid
+  if (diffMs < 0 || diffMs > 365 * 24 * 60 * 60 * 1000 * 100) {
+    console.warn('Date out of reasonable range:', dateStr, 'Diff:', diffMs)
+    return '-'
+  }
+
   const diffMins = Math.floor(diffMs / 60000)
 
   if (diffMins < 1) return 'Just now'
@@ -496,6 +647,10 @@ function formatDateTime(dateStr: string): string {
   if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`
 
   const diffDays = Math.floor(diffHours / 24)
+  if (diffDays > 365) {
+    const years = Math.floor(diffDays / 365)
+    return `${years} year${years > 1 ? 's' : ''} ago`
+  }
   return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`
 }
 
@@ -504,7 +659,21 @@ function calculateDuration(startStr: string, endStr: string): string {
 
   const start = new Date(startStr)
   const end = new Date(endStr)
+
+  // Check if dates are valid
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    console.warn('Invalid date strings:', startStr, endStr)
+    return '-'
+  }
+
   const diffMs = end.getTime() - start.getTime()
+
+  // If duration is negative or unreasonably large, something is wrong
+  if (diffMs < 0 || diffMs > 365 * 24 * 60 * 60 * 1000) {
+    console.warn('Duration out of reasonable range:', diffMs)
+    return '-'
+  }
+
   const diffSecs = Math.floor(diffMs / 1000)
 
   if (diffSecs < 60) return `${diffSecs}s`
@@ -521,9 +690,24 @@ function calculateDuration(startStr: string, endStr: string): string {
 
 function getRunningTime(startStr: string): string {
   if (!startStr) return '-'
+
   const start = new Date(startStr)
+
+  // Check if date is valid
+  if (isNaN(start.getTime())) {
+    console.warn('Invalid start date string:', startStr)
+    return '-'
+  }
+
   const now = new Date()
   const diffMs = now.getTime() - start.getTime()
+
+  // If the difference is negative or unreasonably large, return '-'
+  if (diffMs < 0 || diffMs > 365 * 24 * 60 * 60 * 1000) {
+    console.warn('Running time out of reasonable range:', diffMs)
+    return '-'
+  }
+
   const diffSecs = Math.floor(diffMs / 1000)
 
   if (diffSecs < 60) return `${diffSecs}s`
@@ -1049,6 +1233,29 @@ onUnmounted(() => {
           font-weight: 600;
           font-family: 'Courier New', monospace;
         }
+
+        .value-with-copy {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+
+          .value {
+            color: #fff;
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+          }
+
+          .copy-icon {
+            color: rgba(255, 255, 255, 0.5);
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: color 0.2s ease;
+
+            &:hover {
+              color: rgb(205, 81, 36);
+            }
+          }
+        }
       }
     }
 
@@ -1067,6 +1274,159 @@ onUnmounted(() => {
       i {
         flex-shrink: 0;
         margin-top: 0.125rem;
+      }
+    }
+
+    .execution-actions {
+      margin-top: 0.75rem;
+      display: flex;
+      justify-content: flex-end;
+
+      .toggle-interfaces-btn {
+        padding: 0.5rem 1rem;
+        background-color: rgb(49, 64, 92);
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.875rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        transition: all 0.2s ease;
+
+        &:hover {
+          background-color: rgb(64, 96, 195);
+        }
+
+        &.active {
+          background-color: rgb(64, 96, 195);
+        }
+
+        i {
+          font-size: 0.75rem;
+        }
+      }
+    }
+
+    .execution-interfaces {
+      margin-top: 1rem;
+      padding: 1rem;
+      background-color: rgb(27, 38, 54);
+      border-radius: 6px;
+      border: 1px solid rgb(49, 64, 92);
+
+      .loading-interfaces {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 1rem;
+      }
+
+      .no-interfaces {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        padding: 2rem;
+        color: rgba(255, 255, 255, 0.5);
+
+        i {
+          font-size: 2rem;
+          margin-bottom: 0.5rem;
+        }
+
+        p {
+          font-size: 0.875rem;
+          margin: 0;
+        }
+      }
+
+      .interfaces-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+
+        .interface-item {
+          padding: 0.75rem;
+          background-color: rgb(38, 49, 65);
+          border-radius: 4px;
+          border-left: 3px solid rgb(64, 96, 195);
+
+          &.interface-stdin {
+            border-left-color: rgb(84, 116, 215);
+          }
+
+          &.interface-stdout {
+            border-left-color: rgba(86, 164, 82, 1);
+          }
+
+          &.interface-stderr {
+            border-left-color: #d32f2f;
+          }
+
+          &.interface-logs {
+            border-left-color: #f59e0b;
+          }
+
+          &.interface-mount {
+            border-left-color: #8b5cf6;
+          }
+
+          .interface-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+
+            .interface-type-badge {
+              padding: 0.25rem 0.75rem;
+              border-radius: 12px;
+              font-size: 0.75rem;
+              font-weight: 600;
+              text-transform: uppercase;
+
+              &.type-stdin {
+                background-color: rgba(84, 116, 215, 0.2);
+                color: rgb(84, 116, 215);
+              }
+
+              &.type-stdout {
+                background-color: rgba(86, 164, 82, 0.2);
+                color: rgba(86, 164, 82, 1);
+              }
+
+              &.type-stderr {
+                background-color: rgba(211, 47, 47, 0.2);
+                color: #ff6b6b;
+              }
+
+              &.type-logs {
+                background-color: rgba(245, 158, 11, 0.2);
+                color: #f59e0b;
+              }
+
+              &.type-mount {
+                background-color: rgba(139, 92, 246, 0.2);
+                color: #8b5cf6;
+              }
+            }
+          }
+
+          .interface-path {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            font-family: 'Courier New', monospace;
+            color: rgba(255, 255, 255, 0.8);
+
+            i {
+              color: rgba(255, 255, 255, 0.5);
+              font-size: 0.875rem;
+            }
+          }
+        }
       }
     }
   }

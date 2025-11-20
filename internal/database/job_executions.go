@@ -224,7 +224,14 @@ func (sm *SQLiteManager) UpdateJobStatus(id int64, status string, errorMsg strin
 			SET status = ?, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?
 		`, status, id)
-	} else if status == "COMPLETED" || status == "ERRORED" || status == "CANCELLED" {
+	} else if status == "COMPLETED" {
+		// Clear error message on successful completion
+		_, err = sm.db.Exec(`
+			UPDATE job_executions
+			SET status = ?, ended_at = CURRENT_TIMESTAMP, error_message = '', updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, status, id)
+	} else if status == "ERRORED" || status == "CANCELLED" {
 		_, err = sm.db.Exec(`
 			UPDATE job_executions
 			SET status = ?, ended_at = CURRENT_TIMESTAMP, error_message = ?, updated_at = CURRENT_TIMESTAMP

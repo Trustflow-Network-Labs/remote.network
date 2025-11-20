@@ -337,3 +337,39 @@ func (s *APIServer) handleGetWorkflowExecutions(w http.ResponseWriter, r *http.R
 		"total":      len(executions),
 	})
 }
+
+// handleGetJobExecutionInterfaces returns all interfaces for a job execution
+// GET /api/job-executions/:id/interfaces
+func (s *APIServer) handleGetJobExecutionInterfaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract job execution ID from path
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 4 || parts[3] != "interfaces" {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid job execution ID", http.StatusBadRequest)
+		return
+	}
+
+	interfaces, err := s.dbManager.GetJobInterfaces(id)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get job interfaces: %v", err), "api")
+		http.Error(w, "Failed to retrieve job interfaces", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"interfaces": interfaces,
+		"total":      len(interfaces),
+	})
+}

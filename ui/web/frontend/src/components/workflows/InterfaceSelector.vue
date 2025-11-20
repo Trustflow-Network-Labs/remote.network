@@ -1,18 +1,18 @@
 <template>
   <Dialog
     v-model:visible="isVisible"
-    :header="$t('workflows.selectInterfaces')"
+    :header="$t('message.workflows.selectInterfaces')"
     :modal="true"
     :style="{ width: '500px' }"
     @update:visible="onVisibilityChange"
   >
     <div class="interface-selector">
       <div class="section">
-        <h4>{{ $t('workflows.sourceOutputs') }}</h4>
+        <h4>{{ $t('message.workflows.sourceOutputs') }}</h4>
         <p class="source-name">{{ fromCardName }}</p>
 
         <div v-if="availableOutputInterfaces.length === 0" class="no-interfaces">
-          {{ $t('workflows.noOutputInterfaces') }}
+          {{ $t('message.workflows.noOutputInterfaces') }}
         </div>
 
         <div v-for="iface in availableOutputInterfaces" :key="iface.interface_type" class="interface-item">
@@ -33,11 +33,11 @@
       </div>
 
       <div class="section">
-        <h4>{{ $t('workflows.destinationInputs') }}</h4>
+        <h4>{{ $t('message.workflows.destinationInputs') }}</h4>
         <p class="destination-name">{{ toCardName }}</p>
 
         <div v-if="availableInputInterfaces.length === 0" class="no-interfaces">
-          {{ $t('workflows.noInputInterfaces') }}
+          {{ $t('message.workflows.noInputInterfaces') }}
         </div>
 
         <div v-for="iface in availableInputInterfaces" :key="iface.interface_type" class="interface-item readonly">
@@ -55,13 +55,13 @@
 
     <template #footer>
       <Button
-        :label="$t('common.cancel')"
+        :label="$t('message.common.cancel')"
         icon="pi pi-times"
         @click="cancel"
         severity="secondary"
       />
       <Button
-        :label="$t('common.create')"
+        :label="$t('message.common.create')"
         icon="pi pi-check"
         @click="confirm"
         :disabled="selectedInterfaces.length === 0"

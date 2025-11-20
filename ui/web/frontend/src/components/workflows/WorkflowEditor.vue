@@ -52,6 +52,16 @@
         @confirm="onInterfacesSelected"
         @cancel="onInterfaceSelectorCancel"
       />
+
+      <!-- Connection Details Dialog -->
+      <ConnectionDetailsDialog
+        v-model:visible="connectionDetailsVisible"
+        :from-card-name="selectedConnection.fromCardName"
+        :to-card-name="selectedConnection.toCardName"
+        :interfaces="selectedConnection.interfaces"
+        @delete="onDeleteConnection"
+        @cancel="onConnectionDetailsCancel"
+      />
     </div>
   </AppLayout>
 </template>
@@ -72,6 +82,7 @@ import ServiceCard from './ServiceCard.vue'
 import SelfPeerCard from './SelfPeerCard.vue'
 import WorkflowTools from './WorkflowTools.vue'
 import InterfaceSelector from './InterfaceSelector.vue'
+import ConnectionDetailsDialog from './ConnectionDetailsDialog.vue'
 import { useWorkflowsStore } from '../../stores/workflows'
 import type { WorkflowJob, ServiceInterface } from '../../stores/workflows'
 
@@ -123,6 +134,28 @@ const pendingConnection = ref<{
   toInterfaces: []
 })
 
+// Connection details dialog state
+const connectionDetailsVisible = ref(false)
+const selectedConnection = ref<{
+  connectionId: string
+  fromCardId: string | number
+  toCardId: string | number
+  fromCardName: string
+  toCardName: string
+  interfaces: Array<{
+    id: number
+    from_interface_type: string
+    to_interface_type: string
+  }>
+}>({
+  connectionId: '',
+  fromCardId: '',
+  toCardId: '',
+  fromCardName: '',
+  toCardName: '',
+  interfaces: []
+})
+
 // Leader-line connections (must be reactive for computed properties to update)
 const connections = ref<Array<{
   line: any
@@ -130,9 +163,15 @@ const connections = ref<Array<{
   to: string
   fromCardId: string | number
   toCardId: string | number
-  dbId?: number // Database ID for persistence
+  fromCardName: string
+  toCardName: string
+  dbConnections: Array<{
+    id: number
+    from_interface_type: string
+    to_interface_type: string
+  }> // All database connections for this visual line
   svgElement?: SVGElement // Store reference to SVG element for click handling
-  interfaces?: string[] // Store which interfaces are connected
+  interfaces?: string[] // Store which interfaces are connected (legacy, to be removed)
 }>>([])
 const selectedConnector = ref<{ cardId: string | number; type: 'input' | 'output'; element: HTMLElement } | null>(null)
 const previewLine = ref<any>(null)
@@ -433,9 +472,10 @@ async function removeServiceCard(cardId: number) {
   // Delete connections from database
   if (workflowsStore.currentWorkflow?.id) {
     for (const conn of connectionsToRemove) {
-      if (conn.dbId) {
+      // Delete all database connections for this visual line
+      for (const dbConn of conn.dbConnections) {
         try {
-          await workflowsStore.deleteWorkflowConnection(workflowsStore.currentWorkflow.id, conn.dbId)
+          await workflowsStore.deleteWorkflowConnection(workflowsStore.currentWorkflow.id, dbConn.id)
         } catch (error) {
           // Silently fail - connection will be cascade deleted
         }
@@ -958,7 +998,7 @@ async function createConnection(fromCardId: string | number, toCardId: string | 
 }
 
 async function onInterfacesSelected(selectedInterfaces: string[]) {
-  const { fromCardId, toCardId } = pendingConnection.value
+  const { fromCardId, toCardId, fromCardName, toCardName } = pendingConnection.value
 
   // Save to database - check if workflow exists first
   if (!workflowsStore.currentWorkflow?.id) {
@@ -985,7 +1025,13 @@ async function onInterfacesSelected(selectedInterfaces: string[]) {
       toNodeId = toCard?.job.id || null
     }
 
-    // Create connections for each selected interface
+    // Create connections for each selected interface and collect their IDs
+    const createdConnections: Array<{
+      id: number
+      from_interface_type: string
+      to_interface_type: string
+    }> = []
+
     for (const interfaceType of selectedInterfaces) {
       const connection = {
         from_node_id: fromNodeId,
@@ -994,15 +1040,33 @@ async function onInterfacesSelected(selectedInterfaces: string[]) {
         to_interface_type: 'STDIN'  // Always STDIN for now (can be enhanced later)
       }
 
-      await workflowsStore.addWorkflowConnection(
+      const result = await workflowsStore.addWorkflowConnection(
         workflowsStore.currentWorkflow.id,
         connection
       )
+
+      if (result && result.connection) {
+        createdConnections.push({
+          id: result.connection.id,
+          from_interface_type: interfaceType,
+          to_interface_type: 'STDIN'
+        })
+      }
     }
 
     // Create visual leader line (one line for all interfaces)
     const fromElement = document.querySelector(`[data-card-id="${fromCardId}"][data-connector="output"]`)
     const toElement = document.querySelector(`[data-card-id="${toCardId}"][data-connector="input"]`)
+
+    if (!fromElement || !toElement) {
+      toast.add({
+        severity: 'error',
+        summary: t('message.common.error'),
+        detail: 'Failed to find connector elements',
+        life: 3000
+      })
+      return
+    }
 
     const line = new LeaderLine(
       fromElement,
@@ -1033,8 +1097,11 @@ async function onInterfacesSelected(selectedInterfaces: string[]) {
       to: `${toCardId}`,
       fromCardId,
       toCardId,
+      fromCardName,
+      toCardName,
+      dbConnections: createdConnections,
       svgElement: svgElement || undefined,
-      interfaces: selectedInterfaces  // Store which interfaces are connected
+      interfaces: selectedInterfaces  // Store which interfaces are connected (legacy)
     })
 
     toast.add({
@@ -1066,6 +1133,63 @@ function onInterfaceSelectorCancel() {
   }
 }
 
+async function onDeleteConnection() {
+  if (!selectedConnection.value.connectionId) return
+
+  const connectionId = selectedConnection.value.connectionId
+  const index = connections.value.findIndex(c => c.from === connectionId)
+  if (index === -1) return
+
+  const connection = connections.value[index]
+
+  // Delete all database connections for this visual line
+  if (workflowsStore.currentWorkflow?.id) {
+    try {
+      for (const dbConn of connection.dbConnections) {
+        await workflowsStore.deleteWorkflowConnection(workflowsStore.currentWorkflow.id, dbConn.id)
+      }
+    } catch (error) {
+      toast.add({
+        severity: 'error',
+        summary: t('message.common.error'),
+        detail: 'Failed to delete connection',
+        life: 3000
+      })
+      connectionDetailsVisible.value = false
+      return
+    }
+  }
+
+  // Remove leader line from UI
+  if (connection.line && connection.line.remove) {
+    connection.line.remove()
+  }
+
+  // Remove from connections array
+  connections.value.splice(index, 1)
+
+  connectionDetailsVisible.value = false
+
+  toast.add({
+    severity: 'success',
+    summary: t('message.common.success'),
+    detail: 'Connection removed',
+    life: 3000
+  })
+}
+
+function onConnectionDetailsCancel() {
+  connectionDetailsVisible.value = false
+  selectedConnection.value = {
+    connectionId: '',
+    fromCardId: '',
+    toCardId: '',
+    fromCardName: '',
+    toCardName: '',
+    interfaces: []
+  }
+}
+
 async function loadConnections() {
   if (!workflowsStore.currentWorkflow?.id) return
 
@@ -1073,16 +1197,22 @@ async function loadConnections() {
     const response = await workflowsStore.getWorkflowConnections(workflowsStore.currentWorkflow.id)
     const dbConnections = response.connections || []
 
+    // Group database connections by node pairs (from_node_id -> to_node_id)
+    const connectionGroups = new Map<string, Array<any>>()
+
     for (const dbConn of dbConnections) {
       // Map database node IDs to card IDs
       let fromCardId: string | number = 'self-peer'
       let toCardId: string | number = 'self-peer'
+      let fromCardName = 'Self Peer'
+      let toCardName = 'Self Peer'
 
       // Find the card with matching job.id for from_node_id
       if (dbConn.from_node_id !== null) {
         const fromCard = serviceCards.value.find(card => card.job.id === dbConn.from_node_id)
         if (fromCard) {
           fromCardId = fromCard.id
+          fromCardName = fromCard.job.service_name || 'Unknown'
         } else {
           continue
         }
@@ -1093,10 +1223,33 @@ async function loadConnections() {
         const toCard = serviceCards.value.find(card => card.job.id === dbConn.to_node_id)
         if (toCard) {
           toCardId = toCard.id
+          toCardName = toCard.job.service_name || 'Unknown'
         } else {
           continue
         }
       }
+
+      // Group by connection ID (node pair)
+      const connectionId = `${fromCardId}->${toCardId}`
+      if (!connectionGroups.has(connectionId)) {
+        connectionGroups.set(connectionId, [])
+      }
+      connectionGroups.get(connectionId)!.push({
+        ...dbConn,
+        fromCardId,
+        toCardId,
+        fromCardName,
+        toCardName
+      })
+    }
+
+    // Create one visual line per node pair
+    for (const [connectionId, dbConnGroup] of connectionGroups) {
+      const firstConn = dbConnGroup[0]
+      const fromCardId = firstConn.fromCardId
+      const toCardId = firstConn.toCardId
+      const fromCardName = firstConn.fromCardName
+      const toCardName = firstConn.toCardName
 
       // Find connector DOM elements
       const fromElement = document.querySelector(`[data-card-id="${fromCardId}"][data-connector="output"]`)
@@ -1121,20 +1274,24 @@ async function loadConnections() {
         }
       )
 
-      // Add to connections array with database ID
-      const connectionId = `${fromCardId}->${toCardId}`
-
       // Add click handler to delete connection and store SVG reference
       await nextTick()
       const svgElement = await attachConnectionClickHandler(connectionId, line)
 
+      // Store all database connections for this visual line
       connections.value.push({
         line,
         from: connectionId,
         to: `${toCardId}`,
         fromCardId,
         toCardId,
-        dbId: dbConn.id,
+        fromCardName,
+        toCardName,
+        dbConnections: dbConnGroup.map(conn => ({
+          id: conn.id,
+          from_interface_type: conn.from_interface_type,
+          to_interface_type: conn.to_interface_type
+        })),
         svgElement: svgElement || undefined
       })
     }
@@ -1158,43 +1315,6 @@ function updateConnectionsForCard(cardId: string | number) {
       }
     }
   })
-}
-
-async function removeConnection(connectionId: string) {
-  const index = connections.value.findIndex(c => c.from === connectionId)
-  if (index !== -1) {
-    const connection = connections.value[index]
-
-    // Delete from database
-    if (workflowsStore.currentWorkflow?.id && connection.dbId) {
-      try {
-        await workflowsStore.deleteWorkflowConnection(workflowsStore.currentWorkflow.id, connection.dbId)
-      } catch (error) {
-        toast.add({
-          severity: 'error',
-          summary: t('message.common.error'),
-          detail: 'Failed to delete connection',
-          life: 3000
-        })
-        return
-      }
-    }
-
-    // Remove leader line from UI
-    if (connection.line && connection.line.remove) {
-      connection.line.remove()
-    }
-
-    // Remove from connections array
-    connections.value.splice(index, 1)
-
-    toast.add({
-      severity: 'success',
-      summary: t('message.common.success'),
-      detail: 'Connection removed',
-      life: 3000
-    })
-  }
 }
 
 // Clear connection UI elements without deleting from database
@@ -1283,15 +1403,21 @@ onMounted(async () => {
       const connectionId = svgElement.getAttribute('data-connection-id')
       if (connectionId) {
         e.stopPropagation()
-        confirm.require({
-          message: 'Are you sure you want to delete this connection?',
-          header: t('message.common.confirm'),
-          icon: 'pi pi-exclamation-triangle',
-          acceptClass: 'p-button-danger',
-          accept: async () => {
-            await removeConnection(connectionId)
+
+        // Find the connection in our connections array
+        const connection = connections.value.find(c => c.from === connectionId)
+        if (connection) {
+          // Show connection details dialog
+          selectedConnection.value = {
+            connectionId,
+            fromCardId: connection.fromCardId,
+            toCardId: connection.toCardId,
+            fromCardName: connection.fromCardName,
+            toCardName: connection.toCardName,
+            interfaces: connection.dbConnections
           }
-        })
+          connectionDetailsVisible.value = true
+        }
       }
     }
   })

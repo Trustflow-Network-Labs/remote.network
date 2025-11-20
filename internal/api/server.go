@@ -527,6 +527,16 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		}
 	})))
 
+	// Job executions routes (protected with JWT authentication)
+	mux.Handle("/api/job-executions/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if it's an interfaces request
+		if strings.HasSuffix(r.URL.Path, "/interfaces") {
+			s.handleGetJobExecutionInterfaces(w, r)
+			return
+		}
+		http.Error(w, "Not found", http.StatusNotFound)
+	})))
+
 	// WebSocket endpoint
 	mux.HandleFunc("/api/ws", s.handleWebSocket)
 
