@@ -287,8 +287,9 @@ type RemoteServiceInfo struct {
 
 // RemoteServiceInterface represents a service interface from a remote peer
 type RemoteServiceInterface struct {
-	InterfaceType string `json:"interface_type"` // STDIN, STDOUT, MOUNT
+	InterfaceType string `json:"interface_type"`           // STDIN, STDOUT, MOUNT
 	Path          string `json:"path,omitempty"`
+	MountFunction string `json:"mount_function,omitempty"` // INPUT, OUTPUT, BOTH (for MOUNT interfaces)
 }
 
 // DockerOperationStartPayload reports that a Docker operation has started

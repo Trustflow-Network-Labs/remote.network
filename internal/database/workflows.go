@@ -265,6 +265,7 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 	}
 
 	type JobDef struct {
+		NodeID              int64          `json:"node_id"` // Workflow node ID for mapping after job execution creation
 		Name                string         `json:"name"`
 		ServiceID           int64          `json:"service_id"`
 		ServiceType         string         `json:"service_type"`
@@ -283,11 +284,29 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 		nodeMap[node.ID] = node
 	}
 
+	// Helper function to find interface path from node's interfaces
+	findInterfacePath := func(node *WorkflowNode, interfaceType string) string {
+		if node.Interfaces == nil {
+			return ""
+		}
+		for _, iface := range node.Interfaces {
+			if ifaceMap, ok := iface.(map[string]interface{}); ok {
+				if ifType, ok := ifaceMap["interface_type"].(string); ok && ifType == interfaceType {
+					if path, ok := ifaceMap["path"].(string); ok {
+						return path
+					}
+				}
+			}
+		}
+		return ""
+	}
+
 	// Process each node
 	for _, node := range nodes {
 		sm.logger.Debug(fmt.Sprintf("Processing node %d (%s)", node.ID, node.ServiceName), "database")
 
 		job := JobDef{
+			NodeID:         node.ID, // Store node ID for mapping after job execution creation
 			Name:           node.ServiceName,
 			ServiceID:      node.ServiceID,
 			ServiceType:    node.ServiceType,
@@ -296,7 +315,30 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 			Interfaces: []InterfaceDef{},
 		}
 
-		// Map to track interfaces by type to avoid duplicates
+		// Get entrypoint and commands from docker_service_details if this is a DOCKER service
+		if node.ServiceType == "DOCKER" {
+			dockerDetails, err := sm.GetDockerServiceDetails(node.ServiceID)
+			if err == nil && dockerDetails != nil {
+				// Parse entrypoint from JSON
+				if dockerDetails.Entrypoint != "" {
+					var entrypoint []string
+					if err := json.Unmarshal([]byte(dockerDetails.Entrypoint), &entrypoint); err == nil {
+						job.Entrypoint = entrypoint
+						sm.logger.Debug(fmt.Sprintf("  Setting entrypoint: %v", entrypoint), "database")
+					}
+				}
+				// Parse cmd from JSON
+				if dockerDetails.Cmd != "" {
+					var commands []string
+					if err := json.Unmarshal([]byte(dockerDetails.Cmd), &commands); err == nil {
+						job.Commands = commands
+						sm.logger.Debug(fmt.Sprintf("  Setting commands: %v", commands), "database")
+					}
+				}
+			}
+		}
+
+		// Map to track interfaces by type+path to avoid duplicates
 		interfaceMap := make(map[string]*InterfaceDef)
 
 		// Track if this job has any incoming connections
@@ -309,39 +351,56 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 
 				// This node outputs data via FromInterfaceType
 				interfaceType := conn.FromInterfaceType
-				if _, exists := interfaceMap[interfaceType]; !exists {
-					interfaceMap[interfaceType] = &InterfaceDef{
+
+				// Get the actual interface path from this node's interfaces
+				fromPath := findInterfacePath(node, interfaceType)
+				if fromPath == "" {
+					fromPath = "output" + string(os.PathSeparator) // Default fallback
+				}
+
+				interfaceKey := interfaceType + ":" + fromPath
+				if _, exists := interfaceMap[interfaceKey]; !exists {
+					interfaceMap[interfaceKey] = &InterfaceDef{
 						Type:           interfaceType,
-						Path:           "output" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/output/
+						Path:           fromPath,
 						InterfacePeers: []InterfacePeerDef{},
 					}
 				}
 
-				// Determine destination peer
+				// Determine destination peer and path
 				var destPeerID string
 				var destJobID *int64
+				var destPath string
 
 				if conn.ToNodeID == nil {
 					// Destination is local peer (self-peer)
 					destPeerID = localPeerID
 					destJobID = nil
+					destPath = "input" + string(os.PathSeparator) // Default for local peer
 				} else {
 					// Destination is another workflow node
 					destNode := nodeMap[*conn.ToNodeID]
 					if destNode != nil {
 						destPeerID = destNode.PeerID
 						destJobID = conn.ToNodeID
+						// Get the actual destination interface path
+						destPath = findInterfacePath(destNode, conn.ToInterfaceType)
+						if destPath == "" {
+							destPath = "input" + string(os.PathSeparator) // Default fallback
+						}
 					} else {
 						sm.logger.Warn(fmt.Sprintf("  Destination node %d not found, skipping connection", *conn.ToNodeID), "database")
 						continue
 					}
 				}
 
-				// Add destination as RECEIVER peer
-				interfaceMap[interfaceType].InterfacePeers = append(interfaceMap[interfaceType].InterfacePeers, InterfacePeerDef{
+				sm.logger.Debug(fmt.Sprintf("    Source path: %s, Dest path: %s", fromPath, destPath), "database")
+
+				// Add destination as RECEIVER peer - PeerPath is where data should be SENT TO
+				interfaceMap[interfaceKey].InterfacePeers = append(interfaceMap[interfaceKey].InterfacePeers, InterfacePeerDef{
 					PeerNodeID:        destPeerID,
 					PeerJobID:         destJobID,
-					PeerPath:          "input" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/input/
+					PeerPath:          destPath, // Actual destination path (e.g., /app for MOUNT)
 					PeerMountFunction: "OUTPUT",
 					DutyAcknowledged:  false,
 				})
@@ -358,39 +417,56 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 
 				// This node receives data via ToInterfaceType
 				interfaceType := conn.ToInterfaceType
-				if _, exists := interfaceMap[interfaceType]; !exists {
-					interfaceMap[interfaceType] = &InterfaceDef{
+
+				// Get the actual interface path from this node's interfaces
+				toPath := findInterfacePath(node, interfaceType)
+				if toPath == "" {
+					toPath = "input" + string(os.PathSeparator) // Default fallback
+				}
+
+				interfaceKey := interfaceType + ":" + toPath
+				if _, exists := interfaceMap[interfaceKey]; !exists {
+					interfaceMap[interfaceKey] = &InterfaceDef{
 						Type:           interfaceType,
-						Path:           "input" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/input/
+						Path:           toPath, // Actual interface path (e.g., /app for MOUNT)
 						InterfacePeers: []InterfacePeerDef{},
 					}
 				}
 
-				// Determine source peer
+				// Determine source peer and path
 				var srcPeerID string
 				var srcJobID *int64
+				var srcPath string
 
 				if conn.FromNodeID == nil {
 					// Source is local peer (self-peer)
 					srcPeerID = localPeerID
 					srcJobID = nil
+					srcPath = "output" + string(os.PathSeparator) // Default for local peer
 				} else {
 					// Source is another workflow node
 					srcNode := nodeMap[*conn.FromNodeID]
 					if srcNode != nil {
 						srcPeerID = srcNode.PeerID
 						srcJobID = conn.FromNodeID
+						// Get the actual source interface path
+						srcPath = findInterfacePath(srcNode, conn.FromInterfaceType)
+						if srcPath == "" {
+							srcPath = "output" + string(os.PathSeparator) // Default fallback
+						}
 					} else {
 						sm.logger.Warn(fmt.Sprintf("  Source node %d not found, skipping connection", *conn.FromNodeID), "database")
 						continue
 					}
 				}
 
-				// Add source as PROVIDER peer
-				interfaceMap[interfaceType].InterfacePeers = append(interfaceMap[interfaceType].InterfacePeers, InterfacePeerDef{
+				sm.logger.Debug(fmt.Sprintf("    Source path: %s, Dest path: %s", srcPath, toPath), "database")
+
+				// Add source as PROVIDER peer - PeerPath is where source outputs FROM
+				interfaceMap[interfaceKey].InterfacePeers = append(interfaceMap[interfaceKey].InterfacePeers, InterfacePeerDef{
 					PeerNodeID:        srcPeerID,
 					PeerJobID:         srcJobID,
-					PeerPath:          "output" + string(os.PathSeparator), // Path template (directory) - will be resolved to workflows/{peer_id}/{wf_id}/jobs/{job_id}/output/
+					PeerPath:          srcPath, // Source's output path
 					PeerMountFunction: "INPUT",
 					DutyAcknowledged:  false,
 				})

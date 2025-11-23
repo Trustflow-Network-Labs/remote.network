@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
@@ -62,8 +63,9 @@ func (dm *DependencyManager) initDarwinDependencies() error {
 		// Get storage path for volume mounting using utils.GetAppPaths
 		paths := utils.GetAppPaths("")
 		storagePath := paths.DataDir
+		quotedPath := strconv.Quote(storagePath)
 
-		cmd := exec.Command("sh", "-c", fmt.Sprintf("colima start --mount %s:w", storagePath))
+		cmd := exec.Command("sh", "-c", fmt.Sprintf("colima start --mount %s:w", quotedPath))
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -72,7 +74,7 @@ func (dm *DependencyManager) initDarwinDependencies() error {
 
 		// Wait and check again
 		if !dm.isColimaRunning() {
-			return fmt.Errorf("Colima failed to start")
+			return fmt.Errorf("colima failed to start")
 		}
 
 		fmt.Println("✅ Colima started successfully.")
@@ -94,7 +96,7 @@ func (dm *DependencyManager) initDarwinDependencies() error {
 	if maxApiVersion != "" {
 		fmt.Printf("export DOCKER_API_VERSION=%s\n", maxApiVersion)
 	}
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	return nil
 }

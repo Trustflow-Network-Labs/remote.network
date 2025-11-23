@@ -23,16 +23,22 @@
           <div class="config-grid">
             <div class="config-item">
               <label>{{ $t('message.services.entrypoint') }}</label>
-              <div class="config-value">
-                <code v-if="entrypoint && entrypoint.length > 0">{{ entrypoint.join(' ') }}</code>
-                <span v-else class="empty-value">{{ $t('message.common.notSet') }}</span>
+              <div class="config-input">
+                <InputText
+                  v-model="editableEntrypoint"
+                  :placeholder="$t('message.services.entrypointPlaceholder')"
+                />
+                <small class="help-text">{{ $t('message.services.entrypointHelp') }}</small>
               </div>
             </div>
             <div class="config-item">
               <label>{{ $t('message.services.cmd') }}</label>
-              <div class="config-value">
-                <code v-if="cmd && cmd.length > 0">{{ cmd.join(' ') }}</code>
-                <span v-else class="empty-value">{{ $t('message.common.notSet') }}</span>
+              <div class="config-input">
+                <InputText
+                  v-model="editableCmd"
+                  :placeholder="$t('message.services.cmdPlaceholder')"
+                />
+                <small class="help-text">{{ $t('message.services.cmdHelp') }}</small>
               </div>
             </div>
           </div>
@@ -163,12 +169,14 @@ const props = defineProps<Props>()
 
 const emit = defineEmits<{
   'update:visible': [value: boolean]
-  confirm: [interfaces: ServiceInterface[]]
+  confirm: [data: { interfaces: ServiceInterface[], entrypoint: string[], cmd: string[] }]
   cancel: []
 }>()
 
 // Local state
 const interfaces = ref<ServiceInterface[]>([])
+const editableEntrypoint = ref<string>('')
+const editableCmd = ref<string>('')
 
 // Interface types
 const interfaceTypes = [
@@ -190,12 +198,25 @@ const mountFunctionTypes = [
 watch(() => props.visible, (newVisible) => {
   if (newVisible) {
     // Initialize interfaces from suggested interfaces
-    interfaces.value = props.suggestedInterfaces.map(iface => ({
-      interface_type: iface.interface_type || iface.InterfaceType || '',
-      path: iface.path || iface.Path || '',
-      description: iface.description || iface.Description || '',
-      mount_function: iface.mount_function || iface.MountFunction || undefined
-    }))
+    interfaces.value = props.suggestedInterfaces.map(iface => {
+      const interfaceType = iface.interface_type || iface.InterfaceType || ''
+      const mountFunction = iface.mount_function || iface.MountFunction || (interfaceType === 'MOUNT' ? 'BOTH' : undefined)
+
+      return {
+        interface_type: interfaceType,
+        path: iface.path || iface.Path || '',
+        description: iface.description || iface.Description || '',
+        mount_function: mountFunction
+      }
+    })
+
+    // Initialize entrypoint and cmd as space-separated strings
+    editableEntrypoint.value = props.entrypoint && props.entrypoint.length > 0
+      ? props.entrypoint.join(' ')
+      : ''
+    editableCmd.value = props.cmd && props.cmd.length > 0
+      ? props.cmd.join(' ')
+      : ''
   }
 }, { immediate: true })
 
@@ -204,9 +225,18 @@ const addInterface = () => {
     interface_type: '',
     path: '',
     description: '',
-    mount_function: undefined
+    mount_function: 'BOTH' // Default to BOTH for new interfaces
   })
 }
+
+// Watch for interface type changes and set default mount_function for MOUNT interfaces
+watch(() => interfaces.value, (newInterfaces) => {
+  newInterfaces.forEach(iface => {
+    if (iface.interface_type === 'MOUNT' && !iface.mount_function) {
+      iface.mount_function = 'BOTH'
+    }
+  })
+}, { deep: true })
 
 const removeInterface = (index: number) => {
   interfaces.value.splice(index, 1)
@@ -223,7 +253,19 @@ const handleConfirm = () => {
     return true
   })
 
-  emit('confirm', validInterfaces)
+  // Parse entrypoint and cmd from space-separated strings to arrays
+  const entrypoint = editableEntrypoint.value.trim()
+    ? editableEntrypoint.value.trim().split(/\s+/)
+    : []
+  const cmd = editableCmd.value.trim()
+    ? editableCmd.value.trim().split(/\s+/)
+    : []
+
+  emit('confirm', {
+    interfaces: validInterfaces,
+    entrypoint,
+    cmd
+  })
   emit('update:visible', false)
 }
 
@@ -293,6 +335,24 @@ const handleCancel = () => {
       font-size: vars.$font-size-sm;
       text-transform: uppercase;
       margin-bottom: vars.$spacing-xs;
+    }
+
+    .config-input {
+      display: flex;
+      flex-direction: column;
+      gap: vars.$spacing-xs;
+
+      :deep(.p-inputtext) {
+        width: 100%;
+        font-family: 'Courier New', monospace;
+        font-size: vars.$font-size-sm;
+      }
+
+      .help-text {
+        color: vars.$color-text-secondary;
+        font-size: vars.$font-size-xs;
+        font-style: italic;
+      }
     }
 
     .config-value {

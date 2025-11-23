@@ -14,6 +14,16 @@ export interface PricingModel {
   unit?: PricingUnit
 }
 
+export interface ServiceInterface {
+  id: number
+  service_id: number
+  interface_type: 'STDIN' | 'STDOUT' | 'STDERR' | 'LOGS' | 'MOUNT'
+  path: string
+  mount_function?: 'INPUT' | 'OUTPUT' | 'BOTH'
+  description?: string
+  created_at?: string
+}
+
 export interface Service {
   id?: number
   service_type?: string  // 'DATA', 'DOCKER', 'STANDALONE'
@@ -28,6 +38,7 @@ export interface Service {
   pricing_type?: PricingType
   pricing_interval?: number
   pricing_unit?: PricingUnit
+  interfaces?: ServiceInterface[]  // Service interfaces defining allowed inputs/outputs
   created_at?: string
   updated_at?: string
 }

@@ -255,6 +255,10 @@ func (wm *WorkflowManager) ExecuteWorkflow(workflowID int64) (*database.Workflow
 // executeWorkflowJobs broadcasts job execution requests to all peers
 // Jobs are executed asynchronously on their assigned peers
 // Workflow status is determined by periodic status polling, not synchronous waiting
+//
+// Uses TWO-PHASE job submission to correctly map node_id to job_execution_id:
+// - Phase 1: Create all job executions (without interfaces) and build mapping
+// - Phase 2: Create interfaces with corrected PeerJobID values
 func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 	wm.logger.Info(fmt.Sprintf("Broadcasting job execution requests for workflow_job %d", execution.WorkflowJobID), "workflow_manager")
 
@@ -262,14 +266,25 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 	execution.Status = "running"
 	execution.mu.Unlock()
 
-	// Send execution requests to all peers for their respective jobs
-	// No synchronous waiting - peers will execute based on their constraints
+	// ============== PHASE 1: Create job executions and build mapping ==============
+	wm.logger.Info("Phase 1: Creating job executions and building node_id to job_execution_id mapping", "workflow_manager")
+
+	// Map node_id -> job_execution_id (to fix PeerJobID values in phase 2)
+	nodeIDToJobIDMap := make(map[int64]int64)
+
+	// Track job info for phase 2
+	type jobInfo struct {
+		workflowJob  *types.WorkflowJob
+		jobExecution *database.JobExecution
+	}
+	jobInfos := make([]jobInfo, 0, len(execution.Definition.Jobs))
+
 	for _, workflowJob := range execution.Definition.Jobs {
 		jobName := workflowJob.JobName
-		wm.logger.Info(fmt.Sprintf("Sending job execution request for '%s' to peer %s",
-			jobName, workflowJob.ExecutorPeerID[:8]), "workflow_manager")
+		wm.logger.Info(fmt.Sprintf("Phase 1: Creating job execution for '%s' (node_id: %d)",
+			jobName, workflowJob.NodeID), "workflow_manager")
 
-		// Create job execution request
+		// Create job execution request (without interfaces in phase 1)
 		request := &types.JobExecutionRequest{
 			WorkflowID:          execution.WorkflowID,
 			WorkflowJobID:       execution.WorkflowJobID,
@@ -280,27 +295,54 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 			Entrypoint:          workflowJob.Entrypoint,
 			Commands:            workflowJob.Commands,
 			ExecutionConstraint: workflowJob.ExecutionConstraint,
-			Interfaces:          workflowJob.Interfaces,
+			Interfaces:          workflowJob.Interfaces, // Passed but not created in phase 1
 			OrderingPeerID:      wm.peerManager.GetPeerID(),
 			RequestedAt:         time.Now(),
 		}
 
-		// Submit job to job manager (non-blocking)
-		// Job manager will route to appropriate peer
-		jobExecution, err := wm.jobManager.SubmitJob(request)
+		// Submit job WITHOUT interfaces (skipInterfaces=true)
+		jobExecution, err := wm.jobManager.SubmitJobWithOptions(request, nil, true)
 		if err != nil {
-			wm.logger.Error(fmt.Sprintf("Failed to submit job '%s': %v", jobName, err), "workflow_manager")
-			// Continue with other jobs even if one fails to submit
+			wm.logger.Error(fmt.Sprintf("Failed to create job execution for '%s': %v", jobName, err), "workflow_manager")
 			continue
 		}
+
+		// Build mapping: node_id -> job_execution_id
+		nodeIDToJobIDMap[workflowJob.NodeID] = jobExecution.ID
+		wm.logger.Info(fmt.Sprintf("Mapped node_id %d -> job_execution_id %d", workflowJob.NodeID, jobExecution.ID), "workflow_manager")
+
+		// Track for phase 2
+		jobInfos = append(jobInfos, jobInfo{
+			workflowJob:  workflowJob,
+			jobExecution: jobExecution,
+		})
 
 		// Track job execution
 		execution.mu.Lock()
 		execution.JobExecutions[jobName] = jobExecution
 		execution.mu.Unlock()
+	}
 
-		wm.logger.Info(fmt.Sprintf("Job '%s' execution request sent (job_execution_id: %d)",
-			jobName, jobExecution.ID), "workflow_manager")
+	wm.logger.Info(fmt.Sprintf("Phase 1 complete: Created %d job executions, mapping: %v",
+		len(nodeIDToJobIDMap), nodeIDToJobIDMap), "workflow_manager")
+
+	// ============== PHASE 2: Create interfaces with corrected PeerJobID ==============
+	wm.logger.Info("Phase 2: Creating interfaces with corrected PeerJobID mapping", "workflow_manager")
+
+	for _, info := range jobInfos {
+		wm.logger.Info(fmt.Sprintf("Phase 2: Creating interfaces for job '%s' (job_execution_id: %d)",
+			info.workflowJob.JobName, info.jobExecution.ID), "workflow_manager")
+
+		// Create interfaces with the mapping
+		err := wm.jobManager.CreateJobInterfaces(info.jobExecution, info.workflowJob.Interfaces, nodeIDToJobIDMap)
+		if err != nil {
+			wm.logger.Error(fmt.Sprintf("Failed to create interfaces for job '%s': %v",
+				info.workflowJob.JobName, err), "workflow_manager")
+			continue
+		}
+
+		wm.logger.Info(fmt.Sprintf("Job '%s' fully created (job_execution_id: %d)",
+			info.workflowJob.JobName, info.jobExecution.ID), "workflow_manager")
 	}
 
 	wm.logger.Info(fmt.Sprintf("All job execution requests sent for workflow_job %d. Jobs will execute based on their constraints.",
@@ -321,6 +363,7 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 	// Parse JSON definition
 	var jsonDef struct {
 		Jobs []struct {
+			NodeID              int64    `json:"node_id"` // Workflow node ID for mapping
 			Name                string   `json:"name"`
 			ServiceID           int64    `json:"service_id"`
 			ServiceType         string   `json:"service_type"`
@@ -369,6 +412,7 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 	// Parse each job
 	for _, jobDef := range jsonDef.Jobs {
 		job := &types.WorkflowJob{
+			NodeID:              jobDef.NodeID, // Store node ID for mapping
 			JobName:             jobDef.Name,
 			ServiceID:           jobDef.ServiceID,
 			ServiceType:         jobDef.ServiceType,

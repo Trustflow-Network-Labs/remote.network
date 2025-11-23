@@ -168,7 +168,7 @@ func (ds *DockerService) detectInterfacesFromImage(cli *client.Client, imageName
 	var suggestions []SuggestedInterface
 
 	// Inspect image
-	inspect, _, err := cli.ImageInspectWithRaw(ctx, imageName)
+	inspect, err := cli.ImageInspect(ctx, imageName)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -176,6 +176,13 @@ func (ds *DockerService) detectInterfacesFromImage(cli *client.Client, imageName
 	// Extract entrypoint and cmd (these are NOT interfaces, they're configuration)
 	entrypoint := inspect.Config.Entrypoint
 	cmd := inspect.Config.Cmd
+
+	// Detect STDIN (most CLI containers can accept input via stdin)
+	suggestions = append(suggestions, SuggestedInterface{
+		InterfaceType: "STDIN",
+		Path:          "",
+		Description:   "Container standard input",
+	})
 
 	// Detect STDOUT (most containers output to stdout)
 	suggestions = append(suggestions, SuggestedInterface{
@@ -199,23 +206,28 @@ func (ds *DockerService) detectInterfacesFromImage(cli *client.Client, imageName
 	})
 
 	// Detect MOUNT interfaces from exposed volumes
+	mountPathsSeen := make(map[string]bool)
 	if inspect.Config.Volumes != nil {
 		for volumePath := range inspect.Config.Volumes {
 			suggestions = append(suggestions, SuggestedInterface{
 				InterfaceType: "MOUNT",
 				Path:          volumePath,
+				MountFunction: "BOTH",
 				Description:   fmt.Sprintf("Volume mount point: %s", volumePath),
 			})
+			mountPathsSeen[volumePath] = true
 		}
 	}
 
 	// Detect additional MOUNT interfaces from working dir
-	if inspect.Config.WorkingDir != "" {
+	if inspect.Config.WorkingDir != "" && !mountPathsSeen[inspect.Config.WorkingDir] {
 		suggestions = append(suggestions, SuggestedInterface{
 			InterfaceType: "MOUNT",
 			Path:          inspect.Config.WorkingDir,
+			MountFunction: "BOTH",
 			Description:   fmt.Sprintf("Working directory: %s", inspect.Config.WorkingDir),
 		})
+		mountPathsSeen[inspect.Config.WorkingDir] = true
 	}
 
 	return suggestions, entrypoint, cmd, nil
@@ -226,28 +238,47 @@ func (ds *DockerService) detectInterfacesFromCompose(project *composetypes.Proje
 	var suggestions []SuggestedInterface
 	seenPaths := make(map[string]bool)
 
-	for _, svc := range project.Services {
-		// STDIN/STDOUT
-		if svc.StdinOpen || svc.Tty {
-			if !seenPaths["STDIN"] {
-				suggestions = append(suggestions, SuggestedInterface{
-					InterfaceType: "STDIN",
-					Path:          "",
-					Description:   "Service accepts input via STDIN",
-				})
-				seenPaths["STDIN"] = true
-			}
-		}
+	// Add default STDIN interface (most CLI services can accept input)
+	if !seenPaths["STDIN"] {
+		suggestions = append(suggestions, SuggestedInterface{
+			InterfaceType: "STDIN",
+			Path:          "",
+			Description:   "Service accepts input via STDIN",
+		})
+		seenPaths["STDIN"] = true
+	}
 
-		// STDOUT (assume all services output)
-		if !seenPaths["STDOUT"] {
-			suggestions = append(suggestions, SuggestedInterface{
-				InterfaceType: "STDOUT",
-				Path:          "",
-				Description:   "Service outputs to STDOUT",
-			})
-			seenPaths["STDOUT"] = true
-		}
+	// Add default STDOUT interface (assume all services output)
+	if !seenPaths["STDOUT"] {
+		suggestions = append(suggestions, SuggestedInterface{
+			InterfaceType: "STDOUT",
+			Path:          "",
+			Description:   "Service outputs to STDOUT",
+		})
+		seenPaths["STDOUT"] = true
+	}
+
+	// Add default STDERR interface
+	if !seenPaths["STDERR"] {
+		suggestions = append(suggestions, SuggestedInterface{
+			InterfaceType: "STDERR",
+			Path:          "",
+			Description:   "Service error output",
+		})
+		seenPaths["STDERR"] = true
+	}
+
+	// Add default LOGS interface
+	if !seenPaths["LOGS"] {
+		suggestions = append(suggestions, SuggestedInterface{
+			InterfaceType: "LOGS",
+			Path:          "",
+			Description:   "Service logs (combined stdout/stderr)",
+		})
+		seenPaths["LOGS"] = true
+	}
+
+	for _, svc := range project.Services {
 
 		// MOUNT interfaces from volumes
 		for _, volume := range svc.Volumes {
@@ -255,6 +286,7 @@ func (ds *DockerService) detectInterfacesFromCompose(project *composetypes.Proje
 				suggestions = append(suggestions, SuggestedInterface{
 					InterfaceType: "MOUNT",
 					Path:          volume.Target,
+					MountFunction: "BOTH",
 					Description:   fmt.Sprintf("Volume mount: %s", volume.Target),
 				})
 				seenPaths[volume.Target] = true
@@ -268,7 +300,7 @@ func (ds *DockerService) detectInterfacesFromCompose(project *composetypes.Proje
 // Helper methods for Docker operations
 
 func (ds *DockerService) imageExistsLocally(cli *client.Client, imageName string) (bool, error) {
-	_, _, err := cli.ImageInspectWithRaw(context.Background(), imageName)
+	_, err := cli.ImageInspect(context.Background(), imageName)
 	if err == nil {
 		return true, nil
 	}

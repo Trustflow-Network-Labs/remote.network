@@ -322,6 +322,25 @@ func (jm *JobManager) executeDataService(job *database.JobExecution, service *da
 		return
 	}
 
+	// Transfer outputs to connected jobs/peers
+	appPaths := utils.GetAppPaths("")
+	inputDir := filepath.Join(
+		appPaths.DataDir,
+		"workflows",
+		job.OrderingPeerID,
+		fmt.Sprintf("%d", job.WorkflowJobID),
+		"jobs",
+		fmt.Sprintf("%d", job.ID),
+		"input",
+	)
+
+	err = jm.transferDataServiceOutputs(job, job.WorkflowJobID, inputDir)
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to transfer DATA service outputs: %v", err), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to transfer outputs: %v", err))
+		return
+	}
+
 	// Update status to COMPLETED
 	err = jm.db.UpdateJobStatus(job.ID, types.JobStatusCompleted, "")
 	if err != nil {
@@ -331,6 +350,7 @@ func (jm *JobManager) executeDataService(job *database.JobExecution, service *da
 
 	// Send status update
 	jm.sendStatusUpdate(job.ID, job.WorkflowJobID, types.JobStatusCompleted, "")
+	jm.logger.Info(fmt.Sprintf("DATA service job %d completed successfully", job.ID), "job_manager")
 }
 
 // executeDockerService executes a DOCKER service job
@@ -371,6 +391,10 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 		return
 	}
 
+	// Parse entrypoint and commands from job execution
+	entrypoint, _ := database.UnmarshalStringSlice(job.Entrypoint)
+	commands, _ := database.UnmarshalStringSlice(job.Commands)
+
 	// Build relative output paths
 	inputs := []string{}
 	outputs := []string{}
@@ -380,10 +404,53 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 	// Relative path prefix for outputs
 	relPathPrefix := filepath.Join("workflows", job.OrderingPeerID, fmt.Sprintf("%d", job.WorkflowJobID), "jobs", fmt.Sprintf("%d", job.ID), "output")
 
+	// Get job interfaces to check for input peers
+	jobInterfaces, err := jm.db.GetJobInterfaces(job.ID)
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to get job interfaces: %v", err), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to get job interfaces: %v", err))
+		return
+	}
+
+	// Process STDIN interfaces - stream file contents to docker STDIN
+	for _, jobIface := range jobInterfaces {
+		if jobIface.InterfaceType == "STDIN" {
+			peers, err := jm.db.GetJobInterfacePeers(jobIface.ID)
+			if err == nil && len(peers) > 0 {
+				for _, peer := range peers {
+					if peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth {
+						// Read file contents from input directory and stream to STDIN
+						entries, err := os.ReadDir(inputDir)
+						if err != nil {
+							jm.logger.Warn(fmt.Sprintf("Failed to read input directory for STDIN: %v", err), "job_manager")
+							continue
+						}
+
+						for _, entry := range entries {
+							if !entry.IsDir() {
+								filePath := filepath.Join(inputDir, entry.Name())
+								content, err := os.ReadFile(filePath)
+								if err != nil {
+									jm.logger.Warn(fmt.Sprintf("Failed to read file for STDIN: %v", err), "job_manager")
+									continue
+								}
+
+								// Add file content to inputs for streaming to STDIN
+								inputs = append(inputs, string(content))
+								jm.logger.Info(fmt.Sprintf("Adding file content to STDIN: %s (%d bytes)", entry.Name(), len(content)), "job_manager")
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
 	for _, iface := range interfaces {
 		switch iface.InterfaceType {
 		case "STDIN":
-			// TODO: Handle STDIN from input_mapping
+			// STDIN is handled above by reading file contents and streaming to docker STDIN
 		case "STDOUT":
 			outputs = append(outputs, filepath.Join(relPathPrefix, "stdout.txt"))
 		case "STDERR":
@@ -391,9 +458,48 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 		case "LOGS":
 			outputs = append(outputs, filepath.Join(relPathPrefix, "logs.txt"))
 		case "MOUNT":
-			if iface.Path != "" {
+			// Get peers to determine mount function
+			peers, err := jm.db.GetJobInterfacePeers(iface.ID)
+			if err != nil {
+				jm.logger.Warn(fmt.Sprintf("Failed to get interface peers for MOUNT: %v", err), "job_manager")
+				continue
+			}
+
+			// Check if this mount is used for INPUT or BOTH
+			hasInputFunction := false
+			for _, peer := range peers {
+				if peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth {
+					hasInputFunction = true
+					break
+				}
+			}
+
+			if hasInputFunction && iface.Path != "" {
+				// Mount for INPUT: mount the mounts directory containing input files
 				hostPath := filepath.Join(workflowJobDir, "mounts", filepath.Base(iface.Path))
+
+				// Ensure the directory exists
+				if err := os.MkdirAll(hostPath, 0755); err != nil {
+					jm.logger.Error(fmt.Sprintf("Failed to create INPUT mount directory %s: %v", hostPath, err), "job_manager")
+					jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to create INPUT mount directory: %v", err))
+					return
+				}
+
 				mounts[hostPath] = iface.Path
+				jm.logger.Info(fmt.Sprintf("Adding INPUT mount: %s -> %s", hostPath, iface.Path), "job_manager")
+			} else if iface.Path != "" {
+				// Mount for OUTPUT: mount the mounts directory for output files
+				hostPath := filepath.Join(workflowJobDir, "mounts", filepath.Base(iface.Path))
+
+				// Ensure the directory exists
+				if err := os.MkdirAll(hostPath, 0755); err != nil {
+					jm.logger.Error(fmt.Sprintf("Failed to create OUTPUT mount directory %s: %v", hostPath, err), "job_manager")
+					jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to create OUTPUT mount directory: %v", err))
+					return
+				}
+
+				mounts[hostPath] = iface.Path
+				jm.logger.Info(fmt.Sprintf("Adding OUTPUT mount: %s -> %s", hostPath, iface.Path), "job_manager")
 			}
 		}
 	}
@@ -402,6 +508,8 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 	config := &services.ExecutionConfig{
 		ServiceID:      service.ID,
 		JobExecutionID: job.ID,
+		Entrypoint:     entrypoint,
+		Commands:       commands,
 		Inputs:         inputs,
 		Outputs:        outputs,
 		Mounts:         mounts,
@@ -493,7 +601,7 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 
 		case "MOUNT":
 			// Get peers to check if any are OUTPUT or BOTH
-			peers, err := jm.db.GetJobInterfacePeers(iface.ID)
+			mountPeers, err := jm.db.GetJobInterfacePeers(iface.ID)
 			if err != nil {
 				jm.logger.Error(fmt.Sprintf("Failed to get interface peers for MOUNT: %v", err), "job_manager")
 				continue
@@ -501,7 +609,7 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 
 			// Check if any peer is OUTPUT or BOTH
 			hasOutputPeer := false
-			for _, peer := range peers {
+			for _, peer := range mountPeers {
 				if peer.PeerMountFunction == types.MountFunctionOutput || peer.PeerMountFunction == types.MountFunctionBoth {
 					hasOutputPeer = true
 					break
@@ -509,14 +617,111 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 			}
 
 			if hasOutputPeer && iface.Path != "" {
-				// This is a MOUNT used for output
-				outputFilePath = filepath.Join(workflowJobDir, "mounts", iface.Path)
-				outputFileName = filepath.Base(iface.Path)
-				isOutputInterface = true
+				// This is a MOUNT used for output - iterate through all files in the mount directory
+				mountDir := filepath.Join(workflowJobDir, "mounts", filepath.Base(iface.Path))
+
+				// Check if mount directory exists
+				if _, err := os.Stat(mountDir); os.IsNotExist(err) {
+					jm.logger.Warn(fmt.Sprintf("MOUNT output directory not found: %s", mountDir), "job_manager")
+					continue
+				}
+
+				// Read all files in the mount directory
+				entries, err := os.ReadDir(mountDir)
+				if err != nil {
+					jm.logger.Warn(fmt.Sprintf("Failed to read MOUNT directory: %v", err), "job_manager")
+					continue
+				}
+
+				// Transfer each file to each receiver peer
+				for _, entry := range entries {
+					if entry.IsDir() {
+						continue // Skip subdirectories for now
+					}
+
+					mountFilePath := filepath.Join(mountDir, entry.Name())
+					mountFileName := entry.Name()
+
+					for _, peer := range mountPeers {
+						// Only transfer if peer is OUTPUT or BOTH
+						if peer.PeerMountFunction != types.MountFunctionOutput && peer.PeerMountFunction != types.MountFunctionBoth {
+							continue
+						}
+
+						jm.logger.Info(fmt.Sprintf("Transferring MOUNT file %s to peer %s", mountFileName, peer.PeerNodeID[:8]), "job_manager")
+
+						// Check if this is a local transfer (same peer)
+						if peer.PeerNodeID == jm.peerManager.GetPeerID() {
+							err = jm.transferOutputLocally(job, workflowID, peer, mountFilePath, mountFileName)
+						} else {
+							err = jm.transferOutputRemotely(job, peer, mountFilePath, iface.InterfaceType)
+						}
+
+						if err != nil {
+							jm.logger.Error(fmt.Sprintf("Failed to transfer MOUNT file to peer %s: %v", peer.PeerNodeID[:8], err), "job_manager")
+						}
+					}
+				}
 			}
+			continue // MOUNT handled separately, skip the common transfer logic below
 		}
 
 		if !isOutputInterface {
+			continue
+		}
+
+		// Get peers that should receive this output (for STDOUT/STDERR/LOGS)
+		peers, err := jm.db.GetJobInterfacePeers(iface.ID)
+		if err != nil {
+			jm.logger.Error(fmt.Sprintf("Failed to get interface peers: %v", err), "job_manager")
+			continue
+		}
+
+		// Check if output file exists
+		if _, err := os.Stat(outputFilePath); os.IsNotExist(err) {
+			jm.logger.Warn(fmt.Sprintf("Output path not found: %s", outputFilePath), "job_manager")
+			continue
+		}
+
+		// Transfer to each receiver peer (for STDOUT/STDERR/LOGS)
+		for _, peer := range peers {
+			// For STD interfaces, only transfer to OUTPUT peers
+			if peer.PeerMountFunction != types.MountFunctionOutput {
+				continue
+			}
+
+			jm.logger.Info(fmt.Sprintf("Transferring %s to peer %s", iface.InterfaceType, peer.PeerNodeID[:8]), "job_manager")
+
+			// Check if this is a local transfer (same peer)
+			if peer.PeerNodeID == jm.peerManager.GetPeerID() {
+				err = jm.transferOutputLocally(job, workflowID, peer, outputFilePath, outputFileName)
+			} else {
+				err = jm.transferOutputRemotely(job, peer, outputFilePath, iface.InterfaceType)
+			}
+
+			if err != nil {
+				jm.logger.Error(fmt.Sprintf("Failed to transfer output to peer %s: %v", peer.PeerNodeID[:8], err), "job_manager")
+			}
+		}
+	}
+
+	return nil
+}
+
+// transferDataServiceOutputs transfers DATA service outputs to connected jobs/peers
+// For DATA services, files in the input directory are treated as STDOUT outputs
+func (jm *JobManager) transferDataServiceOutputs(job *database.JobExecution, workflowID int64, inputDir string) error {
+	jm.logger.Info(fmt.Sprintf("Transferring DATA service outputs for job %d", job.ID), "job_manager")
+
+	// Get job interfaces to find STDOUT connections
+	jobInterfaces, err := jm.db.GetJobInterfaces(job.ID)
+	if err != nil {
+		return fmt.Errorf("failed to get job interfaces: %w", err)
+	}
+
+	// Find STDOUT interface
+	for _, iface := range jobInterfaces {
+		if iface.InterfaceType != "STDOUT" {
 			continue
 		}
 
@@ -527,40 +732,38 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 			continue
 		}
 
-		// Check if output file/directory exists
-		if _, err := os.Stat(outputFilePath); os.IsNotExist(err) {
-			jm.logger.Warn(fmt.Sprintf("Output path not found: %s", outputFilePath), "job_manager")
+		// Get all files in the input directory (these are the data files to transfer)
+		entries, err := os.ReadDir(inputDir)
+		if err != nil {
+			jm.logger.Warn(fmt.Sprintf("Failed to read input directory: %v", err), "job_manager")
 			continue
 		}
 
-		// Transfer to each receiver peer
-		for _, peer := range peers {
-			// For MOUNT interfaces, only transfer if peer is OUTPUT or BOTH
-			if iface.InterfaceType == "MOUNT" {
-				if peer.PeerMountFunction != types.MountFunctionOutput && peer.PeerMountFunction != types.MountFunctionBoth {
-					continue
-				}
-			} else {
-				// For STD interfaces, only transfer to OUTPUT peers
-				if peer.PeerMountFunction != types.MountFunctionOutput {
-					continue
-				}
+		// Transfer each file to each receiver peer
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
 			}
 
-			jm.logger.Info(fmt.Sprintf("Transferring %s to peer %s", iface.InterfaceType, peer.PeerNodeID[:8]), "job_manager")
+			outputFilePath := filepath.Join(inputDir, entry.Name())
+			outputFileName := entry.Name()
 
-			// Check if this is a local transfer (same peer)
-			if peer.PeerNodeID == jm.peerManager.GetPeerID() {
-				// Local copy: output/ -> input/
-				err = jm.transferOutputLocally(job, workflowID, peer, outputFilePath, outputFileName)
-			} else {
-				// Remote P2P transfer
-				err = jm.transferOutputRemotely(job, peer, outputFilePath, iface.InterfaceType)
-			}
+			for _, peer := range peers {
+				jm.logger.Info(fmt.Sprintf("Transferring DATA file %s to peer %s", outputFileName, peer.PeerNodeID[:8]), "job_manager")
 
-			if err != nil {
-				jm.logger.Error(fmt.Sprintf("Failed to transfer output to peer %s: %v", peer.PeerNodeID[:8], err), "job_manager")
-				// Continue with other transfers
+				// Check if this is a local transfer (same peer)
+				if peer.PeerNodeID == jm.peerManager.GetPeerID() {
+					// Local copy: input/ -> receiving job's input/
+					err = jm.transferOutputLocally(job, workflowID, peer, outputFilePath, outputFileName)
+				} else {
+					// Remote P2P transfer
+					err = jm.transferOutputRemotely(job, peer, outputFilePath, iface.InterfaceType)
+				}
+
+				if err != nil {
+					jm.logger.Error(fmt.Sprintf("Failed to transfer output to peer %s: %v", peer.PeerNodeID[:8], err), "job_manager")
+					// Continue with other transfers
+				}
 			}
 		}
 	}
@@ -568,7 +771,7 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 	return nil
 }
 
-// transferOutputLocally copies output file to receiving job's input directory
+// transferOutputLocally moves output file to receiving job's input directory (falls back to copy+delete if move fails)
 func (jm *JobManager) transferOutputLocally(job *database.JobExecution, workflowID int64, peer *database.JobInterfacePeer, outputFilePath, fileName string) error {
 	// Validate receiving job ID is specified
 	if peer.PeerJobID == nil || *peer.PeerJobID == 0 {
@@ -576,45 +779,83 @@ func (jm *JobManager) transferOutputLocally(job *database.JobExecution, workflow
 	}
 	receivingJobID := *peer.PeerJobID
 
-	// Build destination path: workflows/{ordering_peer}/{workflow_id}/jobs/{receiving_job_id}/input/{fileName}
+	// Determine destination based on peer interface type
+	// If peer_path is empty, it's a stream interface (STDIN) -> use input directory
+	// If peer_path is set, it's a MOUNT interface -> use mounts directory
 	appPaths := utils.GetAppPaths("")
-	destPath := filepath.Join(
-		appPaths.DataDir,
-		"workflows",
-		job.OrderingPeerID,
-		fmt.Sprintf("%d", workflowID),
-		"jobs",
-		fmt.Sprintf("%d", receivingJobID),
-		"input",
-		fileName,
-	)
+	var destPath string
+
+	if peer.PeerPath != "" {
+		// MOUNT interface: transfer to mounts/<basename(peer_path)>/{fileName}
+		destPath = filepath.Join(
+			appPaths.DataDir,
+			"workflows",
+			job.OrderingPeerID,
+			fmt.Sprintf("%d", workflowID),
+			"jobs",
+			fmt.Sprintf("%d", receivingJobID),
+			"mounts",
+			filepath.Base(peer.PeerPath),
+			fileName,
+		)
+		jm.logger.Info(fmt.Sprintf("Transferring to MOUNT interface at %s", destPath), "job_manager")
+	} else {
+		// Stream interface (STDIN): transfer to input directory
+		destPath = filepath.Join(
+			appPaths.DataDir,
+			"workflows",
+			job.OrderingPeerID,
+			fmt.Sprintf("%d", workflowID),
+			"jobs",
+			fmt.Sprintf("%d", receivingJobID),
+			"input",
+			fileName,
+		)
+		jm.logger.Info(fmt.Sprintf("Transferring to stream interface (input directory) at %s", destPath), "job_manager")
+	}
 
 	// Create destination directory
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Copy file
-	jm.logger.Info(fmt.Sprintf("Copying %s to %s", outputFilePath, destPath), "job_manager")
-
-	sourceFile, err := os.Open(outputFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to open source file: %w", err)
-	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer destFile.Close()
-
-	_, err = io.Copy(destFile, sourceFile)
-	if err != nil {
-		return fmt.Errorf("failed to copy file: %w", err)
+	// Check if source file exists
+	if _, err := os.Stat(outputFilePath); os.IsNotExist(err) {
+		return fmt.Errorf("source file not found: %s", outputFilePath)
 	}
 
-	jm.logger.Info(fmt.Sprintf("Successfully copied output to local job %d", receivingJobID), "job_manager")
+	// Move file (more efficient than copy for local transfers)
+	jm.logger.Info(fmt.Sprintf("Moving %s to %s", outputFilePath, destPath), "job_manager")
+
+	err := os.Rename(outputFilePath, destPath)
+	if err != nil {
+		// If rename fails (e.g., cross-device), fall back to copy+delete
+		jm.logger.Warn(fmt.Sprintf("Move failed, falling back to copy: %v", err), "job_manager")
+
+		sourceFile, err := os.Open(outputFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to open source file: %w", err)
+		}
+		defer sourceFile.Close()
+
+		destFile, err := os.Create(destPath)
+		if err != nil {
+			return fmt.Errorf("failed to create destination file: %w", err)
+		}
+		defer destFile.Close()
+
+		_, err = io.Copy(destFile, sourceFile)
+		if err != nil {
+			return fmt.Errorf("failed to copy file: %w", err)
+		}
+
+		// Delete source after successful copy
+		if err := os.Remove(outputFilePath); err != nil {
+			jm.logger.Warn(fmt.Sprintf("Failed to remove source file after copy: %v", err), "job_manager")
+		}
+	}
+
+	jm.logger.Info(fmt.Sprintf("Successfully transferred output to local job %d", receivingJobID), "job_manager")
 	return nil
 }
 
@@ -974,7 +1215,15 @@ func (jm *JobManager) processStatusUpdate(update *types.JobStatusUpdate) {
 
 // SubmitJob creates and submits a job for execution
 func (jm *JobManager) SubmitJob(request *types.JobExecutionRequest) (*database.JobExecution, error) {
-	jm.logger.Info(fmt.Sprintf("Submitting job for workflow job %d", request.WorkflowJobID), "job_manager")
+	return jm.SubmitJobWithOptions(request, nil, false)
+}
+
+// SubmitJobWithOptions creates and submits a job with optional node_id to job_execution_id mapping
+// The mapping is used to fix PeerJobID values (which are initially set to workflow_node IDs)
+// to the actual job_execution IDs.
+// If skipInterfaces is true, only the job execution is created (interfaces are skipped for first pass).
+func (jm *JobManager) SubmitJobWithOptions(request *types.JobExecutionRequest, nodeIDToJobIDMap map[int64]int64, skipInterfaces bool) (*database.JobExecution, error) {
+	jm.logger.Info(fmt.Sprintf("Submitting job for workflow job %d (skipInterfaces: %v)", request.WorkflowJobID, skipInterfaces), "job_manager")
 
 	// Application-level validation for workflow_job reference
 	// Note: workflow_job_id is a soft reference (no FK) to support distributed P2P execution.
@@ -1034,6 +1283,12 @@ func (jm *JobManager) SubmitJob(request *types.JobExecutionRequest) (*database.J
 		return nil, err
 	}
 
+	// Skip interface creation if requested (used in first pass of two-phase job submission)
+	if skipInterfaces {
+		jm.logger.Debug(fmt.Sprintf("Skipping interface creation for job %d (first pass)", job.ID), "job_manager")
+		return job, nil
+	}
+
 	// Create job interfaces
 	for _, iface := range request.Interfaces {
 		jobInterface := &database.JobInterface{
@@ -1050,10 +1305,21 @@ func (jm *JobManager) SubmitJob(request *types.JobExecutionRequest) (*database.J
 
 		// Create interface peers
 		for _, peer := range iface.InterfacePeers {
+			// Fix PeerJobID if mapping is provided
+			// PeerJobID is initially set to workflow_node ID, we need to map it to job_execution ID
+			peerJobID := peer.PeerJobID
+			if nodeIDToJobIDMap != nil && peer.PeerJobID != nil {
+				if mappedID, ok := nodeIDToJobIDMap[*peer.PeerJobID]; ok {
+					peerJobID = &mappedID
+					jm.logger.Debug(fmt.Sprintf("Mapped PeerJobID: node_id %d -> job_execution_id %d",
+						*peer.PeerJobID, mappedID), "job_manager")
+				}
+			}
+
 			jobInterfacePeer := &database.JobInterfacePeer{
 				JobInterfaceID:    jobInterface.ID,
 				PeerNodeID:        peer.PeerNodeID,
-				PeerJobID:         peer.PeerJobID,
+				PeerJobID:         peerJobID,
 				PeerPath:          peer.PeerPath,
 				PeerMountFunction: peer.PeerMountFunction,
 				DutyAcknowledged:  peer.DutyAcknowledged,
@@ -1089,6 +1355,80 @@ func (jm *JobManager) SubmitJob(request *types.JobExecutionRequest) (*database.J
 
 	jm.logger.Info(fmt.Sprintf("Job %d created with status %s", job.ID, initialStatus), "job_manager")
 	return job, nil
+}
+
+// CreateJobInterfaces creates interfaces for an existing job execution (used in second pass of two-phase submission)
+func (jm *JobManager) CreateJobInterfaces(job *database.JobExecution, interfaces []*types.JobInterface, nodeIDToJobIDMap map[int64]int64) error {
+	jm.logger.Info(fmt.Sprintf("Creating interfaces for job %d with mapping", job.ID), "job_manager")
+
+	// Create job interfaces
+	for _, iface := range interfaces {
+		jobInterface := &database.JobInterface{
+			JobExecutionID: job.ID,
+			InterfaceType:  iface.Type,
+			Path:           iface.Path,
+		}
+
+		err := jm.db.CreateJobInterface(jobInterface)
+		if err != nil {
+			jm.logger.Error(fmt.Sprintf("Failed to create job interface: %v", err), "job_manager")
+			continue
+		}
+
+		// Create interface peers with corrected PeerJobID
+		for _, peer := range iface.InterfacePeers {
+			// Fix PeerJobID using the mapping
+			peerJobID := peer.PeerJobID
+			if nodeIDToJobIDMap != nil && peer.PeerJobID != nil {
+				if mappedID, ok := nodeIDToJobIDMap[*peer.PeerJobID]; ok {
+					peerJobID = &mappedID
+					jm.logger.Debug(fmt.Sprintf("Mapped PeerJobID: node_id %d -> job_execution_id %d",
+						*peer.PeerJobID, mappedID), "job_manager")
+				}
+			}
+
+			jobInterfacePeer := &database.JobInterfacePeer{
+				JobInterfaceID:    jobInterface.ID,
+				PeerNodeID:        peer.PeerNodeID,
+				PeerJobID:         peerJobID,
+				PeerPath:          peer.PeerPath,
+				PeerMountFunction: peer.PeerMountFunction,
+				DutyAcknowledged:  peer.DutyAcknowledged,
+			}
+
+			err := jm.db.CreateJobInterfacePeer(jobInterfacePeer)
+			if err != nil {
+				jm.logger.Error(fmt.Sprintf("Failed to create job interface peer: %v", err), "job_manager")
+			}
+		}
+	}
+
+	// Check and update job status based on execution constraint
+	if job.ExecutionConstraint == types.ExecutionConstraintInputsReady {
+		ready, err := jm.checkInputsReady(job)
+		if err != nil {
+			jm.logger.Error(fmt.Sprintf("Failed to check inputs for job %d: %v", job.ID, err), "job_manager")
+		} else if ready {
+			err = jm.db.UpdateJobStatus(job.ID, types.JobStatusReady, "")
+			if err != nil {
+				jm.logger.Error(fmt.Sprintf("Failed to update job %d status: %v", job.ID, err), "job_manager")
+			} else {
+				job.Status = types.JobStatusReady
+				jm.logger.Info(fmt.Sprintf("Job %d status updated to READY (inputs ready)", job.ID), "job_manager")
+			}
+		}
+	} else {
+		// No input constraints, set to READY
+		err := jm.db.UpdateJobStatus(job.ID, types.JobStatusReady, "")
+		if err != nil {
+			jm.logger.Error(fmt.Sprintf("Failed to update job %d status: %v", job.ID, err), "job_manager")
+		} else {
+			job.Status = types.JobStatusReady
+		}
+	}
+
+	jm.logger.Info(fmt.Sprintf("Interfaces created for job %d", job.ID), "job_manager")
+	return nil
 }
 
 // CancelJob cancels a running job
@@ -1518,9 +1858,10 @@ func (jm *JobManager) checkInputsReady(job *database.JobExecution) (bool, error)
 		return false, fmt.Errorf("failed to get job interfaces: %v", err)
 	}
 
-	// For each STDIN interface, check if data exists from all provider peers
+	// For each STDIN or MOUNT interface, check if data exists from all provider peers
 	for _, iface := range interfaces {
-		if iface.InterfaceType != "STDIN" {
+		// Skip if not an input-capable interface
+		if iface.InterfaceType != "STDIN" && iface.InterfaceType != "MOUNT" {
 			continue
 		}
 
@@ -1536,19 +1877,67 @@ func (jm *JobManager) checkInputsReady(job *database.JobExecution) (bool, error)
 				continue
 			}
 
-			// Build expected input data path
-			// <DataDir>/workflows/<ordering_peer>/<workflow_id>/job/<job_id>/input/<sender_peer>/
+			// Build expected input data path based on interface type
 			appPaths := utils.GetAppPaths("")
-			inputPath := filepath.Join(
-				appPaths.DataDir,
-				"workflows",
-				job.OrderingPeerID,
-				fmt.Sprintf("%d", job.WorkflowJobID),
-				"job",
-				fmt.Sprintf("%d", job.ID),
-				"input",
-				peer.PeerNodeID,
-			)
+			var inputPath string
+
+			if iface.InterfaceType == "STDIN" {
+				// <DataDir>/workflows/<ordering_peer>/<workflow_id>/jobs/<job_id>/input/
+				inputPath = filepath.Join(
+					appPaths.DataDir,
+					"workflows",
+					job.OrderingPeerID,
+					fmt.Sprintf("%d", job.WorkflowJobID),
+					"jobs",
+					fmt.Sprintf("%d", job.ID),
+					"input",
+				)
+			} else if iface.InterfaceType == "MOUNT" {
+				// For MOUNT interfaces, check the mounts directory
+				// <DataDir>/workflows/<ordering_peer>/<workflow_id>/jobs/<job_id>/mounts/<mount_path_basename>/
+				//
+				// Important: peer.PeerPath on the receiver side is where the SENDER outputs FROM,
+				// not where they sent TO. We need to query the sender's peer record to find
+				// where they actually sent the data (their peer_path pointing to us).
+				var mountPath string
+
+				// Try to find where the sender sent data by querying their peer records
+				if peer.PeerJobID != nil {
+					senderDestPath, err := jm.db.GetSenderDestinationPath(*peer.PeerJobID, job.ID)
+					if err == nil && senderDestPath != "" {
+						mountPath = senderDestPath
+					}
+				}
+
+				// Fallback to iface.Path if sender lookup failed
+				if mountPath == "" {
+					mountPath = iface.Path
+				}
+
+				if mountPath != "" {
+					inputPath = filepath.Join(
+						appPaths.DataDir,
+						"workflows",
+						job.OrderingPeerID,
+						fmt.Sprintf("%d", job.WorkflowJobID),
+						"jobs",
+						fmt.Sprintf("%d", job.ID),
+						"mounts",
+						filepath.Base(mountPath),
+					)
+				} else {
+					// If no mount path specified, use default input directory
+					inputPath = filepath.Join(
+						appPaths.DataDir,
+						"workflows",
+						job.OrderingPeerID,
+						fmt.Sprintf("%d", job.WorkflowJobID),
+						"jobs",
+						fmt.Sprintf("%d", job.ID),
+						"input",
+					)
+				}
+			}
 
 			// Check if directory exists and has content
 			exists, err := utils.PathExistsWithContent(inputPath)
@@ -1557,13 +1946,13 @@ func (jm *JobManager) checkInputsReady(job *database.JobExecution) (bool, error)
 			}
 
 			if !exists {
-				jm.logger.Debug(fmt.Sprintf("Job %d input not ready: waiting for data from peer %s at %s",
-					job.ID, peer.PeerNodeID[:8], inputPath), "job_manager")
+				jm.logger.Debug(fmt.Sprintf("Job %d input not ready: waiting for data from peer %s at %s (%s interface)",
+					job.ID, peer.PeerNodeID[:8], inputPath, iface.InterfaceType), "job_manager")
 				return false, nil
 			}
 
-			jm.logger.Debug(fmt.Sprintf("Job %d found input from peer %s at %s",
-				job.ID, peer.PeerNodeID[:8], inputPath), "job_manager")
+			jm.logger.Debug(fmt.Sprintf("Job %d found input from peer %s at %s (%s interface)",
+				job.ID, peer.PeerNodeID[:8], inputPath, iface.InterfaceType), "job_manager")
 		}
 	}
 

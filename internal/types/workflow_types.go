@@ -17,6 +17,7 @@ type WorkflowDefinition struct {
 type WorkflowJob struct {
 	ID                  int64              `json:"id"`
 	WorkflowID          int64              `json:"workflow_id"`
+	NodeID              int64              `json:"node_id"`      // Workflow node ID this job was created from (for mapping)
 	JobName             string             `json:"job_name"`
 	ServiceID           int64              `json:"service_id"`
 	ServiceType         string             `json:"service_type"` // DATA, DOCKER, STANDALONE

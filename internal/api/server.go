@@ -408,6 +408,10 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			s.handleUpdateServiceInterfaces(w, r)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/config") {
+			s.handleUpdateDockerServiceConfig(w, r)
+			return
+		}
 		http.Error(w, "Not found", http.StatusNotFound)
 	})))
 

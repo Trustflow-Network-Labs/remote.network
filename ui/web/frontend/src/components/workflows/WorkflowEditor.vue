@@ -134,6 +134,21 @@ const pendingConnection = ref<{
   toInterfaces: []
 })
 
+// Watch for dialog close to reset state (handles X button, click outside, etc.)
+watch(interfaceSelectorVisible, (isVisible) => {
+  if (!isVisible) {
+    // Reset pending connection when dialog closes
+    pendingConnection.value = {
+      fromCardId: '',
+      toCardId: '',
+      fromCardName: '',
+      toCardName: '',
+      fromInterfaces: [],
+      toInterfaces: []
+    }
+  }
+})
+
 // Connection details dialog state
 const connectionDetailsVisible = ref(false)
 const selectedConnection = ref<{
@@ -786,6 +801,11 @@ async function loadWorkflow() {
 function handleConnectorClick(event: Event, cardId: string | number, connectorType: 'input' | 'output') {
   event.stopPropagation()
 
+  // Prevent connector clicks while interface selector dialog is open
+  if (interfaceSelectorVisible.value) {
+    return
+  }
+
   // Prevent starting a new connection immediately after completing one
   if (justCompletedConnection) {
     justCompletedConnection = false
@@ -997,7 +1017,7 @@ async function createConnection(fromCardId: string | number, toCardId: string | 
   interfaceSelectorVisible.value = true
 }
 
-async function onInterfacesSelected(selectedInterfaces: string[]) {
+async function onInterfacesSelected(data: { sourceOutputs: string[], destinationInputs: string[] }) {
   const { fromCardId, toCardId, fromCardName, toCardName } = pendingConnection.value
 
   // Save to database - check if workflow exists first
@@ -1025,32 +1045,35 @@ async function onInterfacesSelected(selectedInterfaces: string[]) {
       toNodeId = toCard?.job.id || null
     }
 
-    // Create connections for each selected interface and collect their IDs
+    // Create connections for each combination of source output and destination input
     const createdConnections: Array<{
       id: number
       from_interface_type: string
       to_interface_type: string
     }> = []
 
-    for (const interfaceType of selectedInterfaces) {
-      const connection = {
-        from_node_id: fromNodeId,
-        from_interface_type: interfaceType,  // STDOUT, STDERR, LOGS, or MOUNT
-        to_node_id: toNodeId,
-        to_interface_type: 'STDIN'  // Always STDIN for now (can be enhanced later)
-      }
+    // Create connection for each source output to each destination input
+    for (const sourceOutput of data.sourceOutputs) {
+      for (const destInput of data.destinationInputs) {
+        const connection = {
+          from_node_id: fromNodeId,
+          from_interface_type: sourceOutput,  // STDOUT, STDERR, LOGS, or MOUNT
+          to_node_id: toNodeId,
+          to_interface_type: destInput  // STDIN or MOUNT
+        }
 
-      const result = await workflowsStore.addWorkflowConnection(
-        workflowsStore.currentWorkflow.id,
-        connection
-      )
+        const result = await workflowsStore.addWorkflowConnection(
+          workflowsStore.currentWorkflow.id,
+          connection
+        )
 
-      if (result && result.connection) {
-        createdConnections.push({
-          id: result.connection.id,
-          from_interface_type: interfaceType,
-          to_interface_type: 'STDIN'
-        })
+        if (result && result.connection) {
+          createdConnections.push({
+            id: result.connection.id,
+            from_interface_type: sourceOutput,
+            to_interface_type: destInput
+          })
+        }
       }
     }
 
@@ -1101,15 +1124,19 @@ async function onInterfacesSelected(selectedInterfaces: string[]) {
       toCardName,
       dbConnections: createdConnections,
       svgElement: svgElement || undefined,
-      interfaces: selectedInterfaces  // Store which interfaces are connected (legacy)
+      interfaces: data.sourceOutputs  // Store which source interfaces are connected
     })
 
+    const totalConnections = createdConnections.length
     toast.add({
       severity: 'success',
       summary: t('message.common.success'),
-      detail: `Connection created (${selectedInterfaces.length} interface${selectedInterfaces.length > 1 ? 's' : ''})`,
+      detail: `Connection created (${totalConnections} interface${totalConnections > 1 ? 's' : ''})`,
       life: 3000
     })
+
+    // Close dialog (watcher will reset state automatically)
+    interfaceSelectorVisible.value = false
 
   } catch (error: any) {
     toast.add({
@@ -1118,19 +1145,15 @@ async function onInterfacesSelected(selectedInterfaces: string[]) {
       detail: error.message || 'Failed to create connection',
       life: 5000
     })
+
+    // Close dialog (watcher will reset state automatically)
+    interfaceSelectorVisible.value = false
   }
 }
 
 function onInterfaceSelectorCancel() {
+  // Just close dialog, watcher will reset state automatically
   interfaceSelectorVisible.value = false
-  pendingConnection.value = {
-    fromCardId: '',
-    toCardId: '',
-    fromCardName: '',
-    toCardName: '',
-    fromInterfaces: [],
-    toInterfaces: []
-  }
 }
 
 async function onDeleteConnection() {
@@ -1331,7 +1354,13 @@ function clearConnectionsUI() {
 }
 
 function setupConnectorHandlers() {
-  // Set up click handlers for all connectors
+  // Remove existing handlers by cloning and replacing (cleanest way to remove all listeners)
+  document.querySelectorAll('.card-rip-connector.allowed').forEach(connector => {
+    const clone = connector.cloneNode(true)
+    connector.parentNode?.replaceChild(clone, connector)
+  })
+
+  // Set up fresh click handlers for all connectors
   document.querySelectorAll('.card-rip-connector.allowed').forEach(connector => {
     const cardId = connector.getAttribute('data-card-id')
     const connectorType = connector.getAttribute('data-connector') as 'input' | 'output'

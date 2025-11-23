@@ -533,6 +533,30 @@ func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInter
 	return peers, nil
 }
 
+// GetSenderDestinationPath finds the destination path that a sender job used when sending data to a receiver job.
+// This queries the sender's job_interface_peers to find the peer_path they used as the transfer destination.
+func (sm *SQLiteManager) GetSenderDestinationPath(senderJobID int64, receiverJobID int64) (string, error) {
+	var peerPath string
+	err := sm.db.QueryRow(`
+		SELECT jip.peer_path
+		FROM job_interface_peers jip
+		JOIN job_interfaces ji ON jip.job_interface_id = ji.id
+		WHERE ji.job_execution_id = ?
+		  AND jip.peer_job_id = ?
+		  AND jip.peer_mount_function IN ('OUTPUT', 'BOTH')
+		LIMIT 1
+	`, senderJobID, receiverJobID).Scan(&peerPath)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil // No matching record found
+		}
+		return "", err
+	}
+
+	return peerPath, nil
+}
+
 // ValidateJobInputsReady checks if all STDIN interfaces have their data ready
 func (sm *SQLiteManager) ValidateJobInputsReady(jobExecutionID int64) (bool, error) {
 	// Get all STDIN interfaces for this job

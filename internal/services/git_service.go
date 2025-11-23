@@ -227,7 +227,8 @@ func (gs *GitService) CloneOrPull(repoURL, branch, username, password string) (s
 		return "", err
 	}
 
-	repo, err := git.PlainClone(path, false, cloneOptions)
+	var repo *git.Repository
+	_, err = git.PlainClone(path, false, cloneOptions)
 	if err != nil {
 		if err == git.ErrRepositoryAlreadyExists {
 			gs.logger.Info(fmt.Sprintf("Repository already exists, pulling latest changes: %s", path), "git")

@@ -54,8 +54,9 @@ type ServiceSearchResult struct {
 
 // ServiceInterface represents a service interface for remote service info
 type ServiceInterface struct {
-	InterfaceType string `json:"interface_type"` // STDIN, STDOUT, MOUNT
+	InterfaceType string `json:"interface_type"`           // STDIN, STDOUT, MOUNT
 	Path          string `json:"path,omitempty"`
+	MountFunction string `json:"mount_function,omitempty"` // INPUT, OUTPUT, BOTH (for MOUNT interfaces)
 }
 
 // ServiceSearchResponse represents the response to a service search query
@@ -123,6 +124,7 @@ func (sqh *ServiceQueryHandler) HandleServiceSearchRequest(msg *QUICMessage, rem
 				result.Interfaces = append(result.Interfaces, ServiceInterface{
 					InterfaceType: iface.InterfaceType,
 					Path:          iface.Path,
+					MountFunction: iface.MountFunction,
 				})
 			}
 		}

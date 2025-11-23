@@ -72,6 +72,7 @@ func (ds *DockerService) generateContainerName(jobExecutionID int64, serviceName
 type SuggestedInterface struct {
 	InterfaceType string `json:"interface_type"` // STDIN, STDOUT, STDERR, LOGS, MOUNT
 	Path          string `json:"path"`           // Optional path for MOUNT interfaces
+	MountFunction string `json:"mount_function"` // INPUT, OUTPUT, BOTH (for MOUNT interfaces)
 	Description   string `json:"description"`    // Human-readable description
 }
 
@@ -83,12 +84,12 @@ type EventBroadcaster interface {
 
 // DockerService handles Docker service operations
 type DockerService struct {
-	dbManager       *database.SQLiteManager
-	logger          *utils.LogsManager
-	configMgr       *utils.ConfigManager
-	appPaths        *utils.AppPaths
-	depManager      *dependencies.DependencyManager
-	gitService      *GitService
+	dbManager        *database.SQLiteManager
+	logger           *utils.LogsManager
+	configMgr        *utils.ConfigManager
+	appPaths         *utils.AppPaths
+	depManager       *dependencies.DependencyManager
+	gitService       *GitService
 	eventBroadcaster EventBroadcaster // Optional event broadcaster for real-time updates
 }
 
@@ -126,7 +127,7 @@ func (ds *DockerService) CreateFromRegistry(
 
 	// Check Docker dependencies
 	if err := ds.checkDependencies(); err != nil {
-		return nil, nil, fmt.Errorf("Docker dependencies not met: %w", err)
+		return nil, nil, fmt.Errorf("docker dependencies not met: %w", err)
 	}
 
 	// Create Docker client
@@ -208,6 +209,8 @@ func (ds *DockerService) CreateFromRegistry(
 				ServiceID:     service.ID,
 				InterfaceType: suggested.InterfaceType,
 				Path:          suggested.Path,
+				MountFunction: suggested.MountFunction,
+				Description:   suggested.Description,
 			})
 		}
 	}
@@ -232,7 +235,7 @@ func (ds *DockerService) CreateFromGitRepo(
 
 	// Check Docker dependencies
 	if err := ds.checkDependencies(); err != nil {
-		return nil, nil, fmt.Errorf("Docker dependencies not met: %w", err)
+		return nil, nil, fmt.Errorf("docker dependencies not met: %w", err)
 	}
 
 	// Clone or pull repository
@@ -388,6 +391,8 @@ func (ds *DockerService) CreateFromGitRepo(
 				ServiceID:     service.ID,
 				InterfaceType: suggested.InterfaceType,
 				Path:          suggested.Path,
+				MountFunction: suggested.MountFunction,
+				Description:   suggested.Description,
 			})
 		}
 	}
@@ -412,7 +417,7 @@ func (ds *DockerService) CreateFromLocalDirectory(
 
 	// Check Docker dependencies
 	if err := ds.checkDependencies(); err != nil {
-		return nil, nil, fmt.Errorf("Docker dependencies not met: %w", err)
+		return nil, nil, fmt.Errorf("docker dependencies not met: %w", err)
 	}
 
 	// Validate path exists
@@ -528,9 +533,9 @@ func (ds *DockerService) CreateFromLocalDirectory(
 		Description: description,
 		Status:      "ACTIVE",
 		Capabilities: map[string]interface{}{
-			"source":      "local",
-			"local_path":  localPath,
-			"image_name":  imageName,
+			"source":     "local",
+			"local_path": localPath,
+			"image_name": imageName,
 		},
 		PricingAmount:   0.0,
 		PricingType:     "ONE_TIME",
@@ -576,6 +581,8 @@ func (ds *DockerService) CreateFromLocalDirectory(
 				ServiceID:     service.ID,
 				InterfaceType: suggested.InterfaceType,
 				Path:          suggested.Path,
+				MountFunction: suggested.MountFunction,
+				Description:   suggested.Description,
 			})
 		}
 	}

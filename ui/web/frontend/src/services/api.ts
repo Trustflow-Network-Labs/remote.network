@@ -241,6 +241,14 @@ class APIClient {
   }
 
   /**
+   * Update Docker service configuration (entrypoint and cmd)
+   */
+  async updateDockerServiceConfig(serviceId: number, config: { entrypoint: string, cmd: string }) {
+    const response = await this.client.put(`/api/services/docker/${serviceId}/config`, config)
+    return response.data
+  }
+
+  /**
    * Get Docker service details
    */
   async getDockerServiceDetails(serviceId: number) {

@@ -1320,26 +1320,67 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 		return fmt.Errorf("failed to get job execution: %v", err)
 	}
 
-	// Construct hierarchical path: workflows/{ordering_peer_id}/{workflow_job_id}/jobs/{job_id}/{template}
+	// Determine the destination job ID
+	// If peer.PeerJobID is set, we're transferring to a different job (the receiver)
+	// Otherwise, we're transferring to the same job (rare case)
+	destJobID := job.ID
+	if peer.PeerJobID != nil && *peer.PeerJobID != 0 {
+		destJobID = *peer.PeerJobID
+		dsw.logger.Info(fmt.Sprintf("Transferring to receiver job %d (sender job %d)", destJobID, job.ID), "data_worker")
+	}
+
+	// Construct hierarchical path: workflows/{ordering_peer_id}/{workflow_job_id}/jobs/{dest_job_id}/{destDir}
 	// This follows the libp2p distributed P2P pattern for clear file organization
+	//
+	// Path conventions for destination directories:
+	// - STDIN interface: peer.PeerPath = "input/" -> jobs/<id>/input/
+	// - MOUNT interface: peer.PeerPath = "/app" or "/" -> jobs/<id>/mounts/<basename>/
+	//
+	// For MOUNT interfaces, we need to add the "mounts/" prefix and use the basename of the mount path
 	appPaths := utils.GetAppPaths("remote-network")
+
+	// Determine the destination directory based on the path type
+	var destDir string
+	peerPath := peer.PeerPath
+
+	if peerPath == "" || strings.HasPrefix(peerPath, "input") {
+		// STDIN interface or empty path: use input/ directory
+		destDir = "input"
+	} else if strings.HasPrefix(peerPath, "output") {
+		// Output directory
+		destDir = peerPath
+	} else {
+		// MOUNT interface: path is a mount path like "/" or "/app" or "/asdasdf/fsddf"
+		// Convert to mounts/<full_path>/ structure (strip leading "/" only)
+		// Examples:
+		//   "/" -> "mounts/"
+		//   "/app" -> "mounts/app/"
+		//   "/asdasdf/fsddf" -> "mounts/asdasdf/fsddf/"
+		mountPath := strings.TrimPrefix(peerPath, "/")
+		if mountPath == "" {
+			// For root mount "/", use "mounts" directly
+			destDir = "mounts"
+		} else {
+			// For named mounts like "/app" or "/asdasdf/fsddf", preserve full path
+			destDir = filepath.Join("mounts", mountPath)
+		}
+		dsw.logger.Info(fmt.Sprintf("MOUNT interface detected: path '%s' -> destDir '%s'", peerPath, destDir), "data_worker")
+	}
+
 	hierarchicalPath := filepath.Join(
 		appPaths.DataDir,
 		"workflows",
 		job.OrderingPeerID, // Full peer ID to prevent collisions
 		fmt.Sprintf("%d", job.WorkflowJobID),
 		"jobs",
-		fmt.Sprintf("%d", job.ID),
-		peer.PeerPath, // e.g., "input/" or "output/"
+		fmt.Sprintf("%d", destJobID), // Use destination job ID, not sender's
+		destDir,
 	)
 
-	// Preserve directory indicator - filepath.Join() removes trailing separators
-	// Re-add it if the template indicated a directory
-	if strings.HasSuffix(peer.PeerPath, string(os.PathSeparator)) && !strings.HasSuffix(hierarchicalPath, string(os.PathSeparator)) {
-		hierarchicalPath += string(os.PathSeparator)
-	}
+	// Add trailing separator to indicate directory
+	hierarchicalPath += string(os.PathSeparator)
 
-	dsw.logger.Info(fmt.Sprintf("Resolved path template '%s' to hierarchical path: %s", peer.PeerPath, hierarchicalPath), "data_worker")
+	dsw.logger.Info(fmt.Sprintf("Resolved path '%s' to hierarchical path: %s", peer.PeerPath, hierarchicalPath), "data_worker")
 
 	// Determine if hierarchicalPath is a directory (ends with separator) or a file
 	isDir := strings.HasSuffix(hierarchicalPath, string(os.PathSeparator))

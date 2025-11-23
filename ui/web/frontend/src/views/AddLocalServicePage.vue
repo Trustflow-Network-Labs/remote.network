@@ -899,7 +899,7 @@ async function finishWizard() {
 }
 
 // Handle interface review dialog confirm
-async function handleInterfaceConfirm(interfaces: any[]) {
+async function handleInterfaceConfirm(data: { interfaces: any[], entrypoint: string[], cmd: string[] }) {
   try {
     const serviceId = dockerServiceResponse.value?.service?.id
     if (!serviceId) {
@@ -907,7 +907,15 @@ async function handleInterfaceConfirm(interfaces: any[]) {
     }
 
     // Update service interfaces
-    await api.updateDockerServiceInterfaces(serviceId, interfaces)
+    await api.updateDockerServiceInterfaces(serviceId, data.interfaces)
+
+    // Update entrypoint and cmd if service is Docker
+    if (dockerServiceResponse.value) {
+      await api.updateDockerServiceConfig(serviceId, {
+        entrypoint: JSON.stringify(data.entrypoint),
+        cmd: JSON.stringify(data.cmd)
+      })
+    }
 
     toast.add({
       severity: 'success',

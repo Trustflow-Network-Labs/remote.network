@@ -137,6 +137,7 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 						remoteInterfaces = append(remoteInterfaces, RemoteServiceInterface{
 							InterfaceType: iface.InterfaceType,
 							Path:          iface.Path,
+							MountFunction: iface.MountFunction,
 						})
 					}
 				}
@@ -897,6 +898,7 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 				interfaces = append(interfaces, RemoteServiceInterface{
 					InterfaceType: iface.InterfaceType,
 					Path:          iface.Path,
+					MountFunction: iface.MountFunction,
 				})
 			}
 		}
@@ -1170,6 +1172,7 @@ func (ssh *ServiceSearchHandler) queryPeerViaRelay(ctx context.Context, targetPe
 				interfaces = append(interfaces, RemoteServiceInterface{
 					InterfaceType: iface.InterfaceType,
 					Path:          iface.Path,
+					MountFunction: iface.MountFunction,
 				})
 			}
 		}
@@ -1346,6 +1349,7 @@ func (ssh *ServiceSearchHandler) queryPeerViaConnection(ctx context.Context, qui
 				interfaces = append(interfaces, RemoteServiceInterface{
 					InterfaceType: iface.InterfaceType,
 					Path:          iface.Path,
+					MountFunction: iface.MountFunction,
 				})
 			}
 		}

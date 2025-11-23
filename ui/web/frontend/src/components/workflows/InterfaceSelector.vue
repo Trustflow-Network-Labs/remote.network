@@ -17,12 +17,11 @@
 
         <div v-for="iface in availableOutputInterfaces" :key="iface.interface_type" class="interface-item">
           <Checkbox
-            v-model="selectedInterfaces"
-            :inputId="`interface-${iface.interface_type}`"
+            v-model="selectedSourceOutputs"
+            :inputId="`source-${iface.interface_type}`"
             :value="iface.interface_type"
-            :disabled="!canSelectInterface(iface)"
           />
-          <label :for="`interface-${iface.interface_type}`" class="interface-label">
+          <label :for="`source-${iface.interface_type}`" class="interface-label">
             <span class="interface-type">{{ iface.interface_type }}</span>
             <span v-if="iface.mount_function" class="mount-function">
               ({{ iface.mount_function }})
@@ -40,15 +39,19 @@
           {{ $t('message.workflows.noInputInterfaces') }}
         </div>
 
-        <div v-for="iface in availableInputInterfaces" :key="iface.interface_type" class="interface-item readonly">
-          <i class="pi pi-arrow-down"></i>
-          <span class="interface-label">
+        <div v-for="iface in availableInputInterfaces" :key="iface.interface_type" class="interface-item">
+          <Checkbox
+            v-model="selectedDestinationInputs"
+            :inputId="`dest-${iface.interface_type}`"
+            :value="iface.interface_type"
+          />
+          <label :for="`dest-${iface.interface_type}`" class="interface-label">
             <span class="interface-type">{{ iface.interface_type }}</span>
             <span v-if="iface.mount_function" class="mount-function">
               ({{ iface.mount_function }})
             </span>
             <span class="interface-path">{{ iface.path }}</span>
-          </span>
+          </label>
         </div>
       </div>
     </div>
@@ -64,7 +67,7 @@
         :label="$t('message.common.create')"
         icon="pi pi-check"
         @click="confirm"
-        :disabled="selectedInterfaces.length === 0"
+        :disabled="selectedSourceOutputs.length === 0 || selectedDestinationInputs.length === 0"
       />
     </template>
   </Dialog>
@@ -88,19 +91,25 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits<{
   'update:visible': [value: boolean]
-  'confirm': [selectedInterfaces: string[]]
+  'confirm': [data: { sourceOutputs: string[], destinationInputs: string[] }]
   'cancel': []
 }>()
 
 const isVisible = ref(props.visible)
-const selectedInterfaces = ref<string[]>([])
+const selectedSourceOutputs = ref<string[]>([])
+const selectedDestinationInputs = ref<string[]>([])
 
 // Watch for prop changes
 watch(() => props.visible, (newVal) => {
   isVisible.value = newVal
   if (newVal) {
-    // Select all available output interfaces by default
-    selectedInterfaces.value = availableOutputInterfaces.value.map(iface => iface.interface_type)
+    // Select all available source outputs by default
+    selectedSourceOutputs.value = availableOutputInterfaces.value.map(iface => iface.interface_type)
+
+    // Select the first destination input by default (user can change)
+    if (availableInputInterfaces.value.length > 0) {
+      selectedDestinationInputs.value = [availableInputInterfaces.value[0].interface_type]
+    }
   }
 })
 
@@ -108,7 +117,9 @@ watch(() => props.visible, (newVal) => {
 const availableOutputInterfaces = computed(() => {
   return props.fromInterfaces.filter(iface => {
     if (iface.interface_type === 'MOUNT') {
-      return iface.mount_function === 'OUTPUT' || iface.mount_function === 'BOTH'
+      // If mount_function is not set, treat as BOTH (backwards compatibility)
+      const mountFunc = iface.mount_function || 'BOTH'
+      return mountFunc === 'OUTPUT' || mountFunc === 'BOTH'
     }
     return iface.interface_type === 'STDOUT' ||
            iface.interface_type === 'STDERR' ||
@@ -120,24 +131,23 @@ const availableOutputInterfaces = computed(() => {
 const availableInputInterfaces = computed(() => {
   return props.toInterfaces.filter(iface => {
     if (iface.interface_type === 'MOUNT') {
-      return iface.mount_function === 'INPUT' || iface.mount_function === 'BOTH'
+      // If mount_function is not set, treat as BOTH (backwards compatibility)
+      const mountFunc = iface.mount_function || 'BOTH'
+      return mountFunc === 'INPUT' || mountFunc === 'BOTH'
     }
     return iface.interface_type === 'STDIN'
   })
 })
-
-// Check if an interface can be selected
-function canSelectInterface(iface: ServiceInterface): boolean {
-  // Always allow selection of output interfaces
-  return true
-}
 
 function onVisibilityChange(value: boolean) {
   emit('update:visible', value)
 }
 
 function confirm() {
-  emit('confirm', selectedInterfaces.value)
+  emit('confirm', {
+    sourceOutputs: selectedSourceOutputs.value,
+    destinationInputs: selectedDestinationInputs.value
+  })
   isVisible.value = false
 }
 
@@ -193,21 +203,12 @@ function cancel() {
   background: var(--surface-50);
 }
 
-.interface-item.readonly {
-  background: var(--surface-100);
-  cursor: default;
-}
-
 .interface-label {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   flex: 1;
   cursor: pointer;
-}
-
-.interface-item.readonly .interface-label {
-  cursor: default;
 }
 
 .interface-type {

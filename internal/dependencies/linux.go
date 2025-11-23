@@ -67,7 +67,7 @@ func (dm *DependencyManager) initLinuxDependencies() error {
 
 		// Wait and check again
 		if !dm.isDockerRunningLinux() {
-			return fmt.Errorf("Docker service failed to start")
+			return fmt.Errorf("docker service failed to start")
 		}
 
 		fmt.Println("✅ Docker service started successfully.")

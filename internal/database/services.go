@@ -35,6 +35,8 @@ type ServiceInterface struct {
 	ServiceID     int64     `json:"service_id"`
 	InterfaceType string    `json:"interface_type"` // STDIN, STDOUT, MOUNT
 	Path          string    `json:"path"`           // Optional path for MOUNT interfaces
+	MountFunction string    `json:"mount_function"` // INPUT, OUTPUT, BOTH (for MOUNT interfaces)
+	Description   string    `json:"description"`    // Optional description
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -129,6 +131,8 @@ func (sm *SQLiteManager) InitServicesTable() error {
 		service_id INTEGER NOT NULL,
 		interface_type TEXT CHECK(interface_type IN ('STDIN', 'STDOUT', 'STDERR', 'LOGS', 'MOUNT')) NOT NULL,
 		path TEXT,
+		mount_function TEXT CHECK(mount_function IN ('INPUT', 'OUTPUT', 'BOTH')) DEFAULT 'BOTH',
+		description TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE
 	);
@@ -472,16 +476,39 @@ func (sm *SQLiteManager) UpdateServiceStatus(id int64, status string) error {
 
 // AddServiceInterface adds an interface to a service
 func (sm *SQLiteManager) AddServiceInterface(serviceInterface *ServiceInterface) error {
+	// Set default mount_function for MOUNT interfaces if not provided
+	if serviceInterface.InterfaceType == "MOUNT" && serviceInterface.MountFunction == "" {
+		serviceInterface.MountFunction = "BOTH"
+	}
+
 	query := `
-		INSERT INTO service_interfaces (service_id, interface_type, path)
-		VALUES (?, ?, ?)
+		INSERT INTO service_interfaces (service_id, interface_type, path, mount_function, description)
+		VALUES (?, ?, ?, ?, ?)
 	`
+
+	// Prepare mount_function value - NULL for non-MOUNT interfaces
+	var mountFunction interface{}
+	if serviceInterface.InterfaceType == "MOUNT" {
+		mountFunction = serviceInterface.MountFunction
+	} else {
+		mountFunction = nil
+	}
+
+	// Prepare description value - NULL if empty
+	var description interface{}
+	if serviceInterface.Description != "" {
+		description = serviceInterface.Description
+	} else {
+		description = nil
+	}
 
 	result, err := sm.db.Exec(
 		query,
 		serviceInterface.ServiceID,
 		serviceInterface.InterfaceType,
 		serviceInterface.Path,
+		mountFunction,
+		description,
 	)
 
 	if err != nil {
@@ -504,7 +531,7 @@ func (sm *SQLiteManager) AddServiceInterface(serviceInterface *ServiceInterface)
 // GetServiceInterfaces retrieves all interfaces for a service
 func (sm *SQLiteManager) GetServiceInterfaces(serviceID int64) ([]*ServiceInterface, error) {
 	query := `
-		SELECT id, service_id, interface_type, path, created_at
+		SELECT id, service_id, interface_type, path, mount_function, description, created_at
 		FROM service_interfaces
 		WHERE service_id = ?
 		ORDER BY created_at ASC
@@ -521,18 +548,30 @@ func (sm *SQLiteManager) GetServiceInterfaces(serviceID int64) ([]*ServiceInterf
 
 	for rows.Next() {
 		var si ServiceInterface
+		var mountFunction sql.NullString
+		var description sql.NullString
 
 		err := rows.Scan(
 			&si.ID,
 			&si.ServiceID,
 			&si.InterfaceType,
 			&si.Path,
+			&mountFunction,
+			&description,
 			&si.CreatedAt,
 		)
 
 		if err != nil {
 			sm.logger.Error("Failed to scan service interface", "database")
 			continue
+		}
+
+		// Handle nullable fields
+		if mountFunction.Valid {
+			si.MountFunction = mountFunction.String
+		}
+		if description.Valid {
+			si.Description = description.String
 		}
 
 		interfaces = append(interfaces, &si)

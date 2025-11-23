@@ -463,14 +463,31 @@ const openEditInterfaces = async () => {
   showEditInterfaces.value = true
 }
 
-const handleSaveInterfaces = async (interfaces: any[]) => {
+const handleSaveInterfaces = async (data: { interfaces: any[], entrypoint: string[], cmd: string[] }) => {
   try {
-    await api.updateDockerServiceInterfaces(service.value.id, interfaces)
+    // Update interfaces
+    await api.updateDockerServiceInterfaces(service.value.id, data.interfaces)
+
+    // Update entrypoint and cmd if provided
+    if (dockerDetails.value) {
+      await api.updateDockerServiceConfig(service.value.id, {
+        entrypoint: JSON.stringify(data.entrypoint),
+        cmd: JSON.stringify(data.cmd)
+      })
+    }
 
     // Refresh interfaces
     const interfacesResponse = await api.getServiceInterfaces(service.value.id)
     if (interfacesResponse && interfacesResponse.interfaces) {
       serviceInterfaces.value = interfacesResponse.interfaces
+    }
+
+    // Refresh docker details to get updated entrypoint/cmd
+    if (dockerDetails.value) {
+      const dockerResponse = await api.getDockerServiceDetails(service.value.id)
+      if (dockerResponse && dockerResponse.details) {
+        dockerDetails.value = dockerResponse.details
+      }
     }
 
     toast.add({

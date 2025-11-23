@@ -10,6 +10,7 @@ import (
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api/websocket"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/google/shlex"
 )
 
 // Request types for Docker service creation
@@ -532,4 +533,186 @@ func (s *APIServer) handleUpdateServiceInterfaces(w http.ResponseWriter, r *http
 		"success": true,
 		"message": "Interfaces updated successfully",
 	})
+}
+
+// handleUpdateDockerServiceConfig handles PUT /api/services/docker/{id}/config
+func (s *APIServer) handleUpdateDockerServiceConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/api/services/docker/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 1 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Entrypoint string `json:"entrypoint"`
+		Cmd        string `json:"cmd"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Updating config for Docker service ID: %d", id), "api")
+	s.logger.Debug(fmt.Sprintf("Raw entrypoint from UI: %q", req.Entrypoint), "api")
+	s.logger.Debug(fmt.Sprintf("Raw cmd from UI: %q", req.Cmd), "api")
+
+	// Get existing details
+	details, err := s.dbManager.GetDockerServiceDetails(id)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get Docker service details: %v", err), "api")
+		http.Error(w, "Failed to retrieve Docker service details", http.StatusInternalServerError)
+		return
+	}
+
+	if details == nil {
+		http.Error(w, "Docker service not found", http.StatusNotFound)
+		return
+	}
+
+	// Parse entrypoint - handles shell command format like: markitdown
+	// or: "arg with spaces" -o output
+	if req.Entrypoint != "" {
+		parsed, err := parseShellCommand(req.Entrypoint)
+		if err != nil {
+			s.logger.Error(fmt.Sprintf("Failed to parse entrypoint: %v", err), "api")
+			http.Error(w, "Invalid entrypoint format", http.StatusBadRequest)
+			return
+		}
+		s.logger.Debug(fmt.Sprintf("Parsed entrypoint: %s", parsed), "api")
+		details.Entrypoint = parsed
+	} else {
+		details.Entrypoint = ""
+	}
+
+	// Parse cmd - handles shell command format
+	if req.Cmd != "" {
+		parsed, err := parseShellCommand(req.Cmd)
+		if err != nil {
+			s.logger.Error(fmt.Sprintf("Failed to parse cmd: %v", err), "api")
+			http.Error(w, "Invalid cmd format", http.StatusBadRequest)
+			return
+		}
+		s.logger.Debug(fmt.Sprintf("Parsed cmd: %s", parsed), "api")
+		details.Cmd = parsed
+	} else {
+		details.Cmd = ""
+	}
+
+	if err := s.dbManager.UpdateDockerServiceDetails(details); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to update docker service config: %v", err), "api")
+		http.Error(w, "Failed to update configuration", http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
+
+	// Update peer metadata
+	go s.updatePeerMetadataAfterServiceChange()
+
+	s.logger.Info(fmt.Sprintf("Updated config for Docker service ID: %d", id), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Configuration updated successfully",
+	})
+}
+
+// parseShellCommand parses a shell command string into JSON array format
+// Handles both formats:
+// - Shell command: markitdown "file.pdf" -o "output.md"
+// - Already JSON: ["markitdown", "file.pdf", "-o", "output.md"]
+func parseShellCommand(input string) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", nil
+	}
+
+	// Check if input is already a valid JSON array
+	if strings.HasPrefix(input, "[") && strings.HasSuffix(input, "]") {
+		var arr []string
+		if err := json.Unmarshal([]byte(input), &arr); err == nil {
+			// It's valid JSON - but check if it looks malformed
+			// (contains elements with unmatched quotes like `"Masdar` or `Journal.pdf"`)
+			isMalformed := false
+			for _, elem := range arr {
+				// Check for elements that start or end with quote but not both
+				startsWithQuote := strings.HasPrefix(elem, "\"")
+				endsWithQuote := strings.HasSuffix(elem, "\"")
+				if startsWithQuote != endsWithQuote {
+					isMalformed = true
+					break
+				}
+			}
+			if !isMalformed {
+				// Valid JSON with clean content, return as-is
+				return input, nil
+			}
+			// Malformed JSON content - reconstruct by joining and re-parsing
+			// Join all elements with spaces, handling the malformed quotes
+			reconstructed := strings.Join(arr, " ")
+			// Clean up the malformed quotes (they're literal chars now)
+			// and re-parse with shlex
+			parts, err := shlex.Split(reconstructed)
+			if err != nil {
+				// Can't recover, return as-is
+				return input, nil
+			}
+			jsonBytes, _ := json.Marshal(parts)
+			return string(jsonBytes), nil
+		}
+		// Not valid JSON, fall through to shell parsing
+	}
+
+	// Parse as shell command using shlex
+	parts, err := shlex.Split(input)
+	if err != nil {
+		return "", err
+	}
+
+	// Convert to JSON array
+	jsonBytes, err := json.Marshal(parts)
+	if err != nil {
+		return "", err
+	}
+
+	return string(jsonBytes), nil
+}
+
+// shlexJoin converts a JSON array back to shell command format for display
+func shlexJoin(jsonArray string) string {
+	if jsonArray == "" {
+		return ""
+	}
+
+	var args []string
+	if err := json.Unmarshal([]byte(jsonArray), &args); err != nil {
+		return jsonArray // Return as-is if not valid JSON
+	}
+
+	// Quote args that need quoting
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		if strings.ContainsAny(arg, " \t\n\"'") {
+			quoted[i] = strconv.Quote(arg)
+		} else {
+			quoted[i] = arg
+		}
+	}
+	return strings.Join(quoted, " ")
 }

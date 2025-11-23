@@ -621,6 +621,9 @@ async function copyOrderingPeerId(peerId: string) {
 function formatDateTime(dateStr: string): string {
   if (!dateStr) return '-'
 
+  // Go zero time - job hasn't started/completed yet
+  if (dateStr === '0001-01-01T00:00:00Z') return '-'
+
   const date = new Date(dateStr)
 
   // Check if date is valid

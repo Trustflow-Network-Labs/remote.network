@@ -22,6 +22,8 @@ import (
 type ExecutionConfig struct {
 	ServiceID      int64
 	JobExecutionID int64             // Job execution ID for unique container naming
+	Entrypoint     []string          // Container entrypoint override
+	Commands       []string          // Container commands/args
 	Inputs         []string          // STDIN inputs
 	Outputs        []string          // STDOUT output paths
 	Mounts         map[string]string // Host path -> Container path
@@ -47,7 +49,7 @@ func (ds *DockerService) ExecuteService(config *ExecutionConfig) (*ExecutionResu
 
 	// Check dependencies
 	if err := ds.checkDependencies(); err != nil {
-		result.Error = fmt.Errorf("Docker dependencies not met: %w", err)
+		result.Error = fmt.Errorf("docker dependencies not met: %w", err)
 		return result, result.Error
 	}
 
@@ -70,14 +72,7 @@ func (ds *DockerService) ExecuteService(config *ExecutionConfig) (*ExecutionResu
 	}
 
 	if dockerDetails == nil {
-		result.Error = fmt.Errorf("Docker service details not found: %d", config.ServiceID)
-		return result, result.Error
-	}
-
-	// Get service interfaces
-	interfaces, err := ds.dbManager.GetServiceInterfaces(config.ServiceID)
-	if err != nil {
-		result.Error = fmt.Errorf("failed to get service interfaces: %w", err)
+		result.Error = fmt.Errorf("docker service details not found: %d", config.ServiceID)
 		return result, result.Error
 	}
 
@@ -92,11 +87,11 @@ func (ds *DockerService) ExecuteService(config *ExecutionConfig) (*ExecutionResu
 	// Execute based on service source
 	if dockerDetails.ComposePath != "" {
 		// Execute docker-compose stack
-		return ds.executeComposeService(cli, service.Name, dockerDetails, config, interfaces)
+		return ds.executeComposeService(cli, service.Name, dockerDetails, config)
 	}
 
 	// Execute single container
-	return ds.executeSingleContainer(cli, service.Name, dockerDetails, config, interfaces)
+	return ds.executeSingleContainer(cli, service.Name, dockerDetails, config)
 }
 
 // executeSingleContainer runs a single Docker container
@@ -105,7 +100,6 @@ func (ds *DockerService) executeSingleContainer(
 	serviceName string,
 	details *database.DockerServiceDetails,
 	config *ExecutionConfig,
-	interfaces []*database.ServiceInterface,
 ) (*ExecutionResult, error) {
 	result := &ExecutionResult{}
 	startTime := time.Now()
@@ -125,7 +119,7 @@ func (ds *DockerService) executeSingleContainer(
 	}
 
 	// Build container configuration
-	containerConfig, hostConfig, networkConfig := ds.buildContainerConfig(imageName, config, interfaces)
+	containerConfig, hostConfig, networkConfig := ds.buildContainerConfig(imageName, config)
 
 	// Generate unique container name
 	containerName := ds.generateContainerName(config.JobExecutionID, serviceName)
@@ -269,7 +263,7 @@ func (ds *DockerService) getContainerLogs(ctx context.Context, cli *client.Clien
 	logOptions := container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
-		Timestamps: true,  // Include timestamps for better logging
+		Timestamps: true, // Include timestamps for better logging
 		Details:    false,
 	}
 
@@ -309,7 +303,6 @@ func (ds *DockerService) executeComposeService(
 	serviceName string,
 	details *database.DockerServiceDetails,
 	config *ExecutionConfig,
-	interfaces []*database.ServiceInterface,
 ) (*ExecutionResult, error) {
 	result := &ExecutionResult{}
 	startTime := time.Now()
@@ -349,7 +342,7 @@ func (ds *DockerService) executeComposeService(
 	}
 
 	// Execute as single container
-	result, err = ds.executeSingleContainer(cli, serviceName, tempDetails, config, interfaces)
+	result, err = ds.executeSingleContainer(cli, serviceName, tempDetails, config)
 	result.Duration = time.Since(startTime)
 
 	return result, err
@@ -359,7 +352,6 @@ func (ds *DockerService) executeComposeService(
 func (ds *DockerService) buildContainerConfig(
 	imageName string,
 	config *ExecutionConfig,
-	interfaces []*database.ServiceInterface,
 ) (*container.Config, *container.HostConfig, *network.NetworkingConfig) {
 	// Container config
 	containerConfig := &container.Config{
@@ -370,6 +362,16 @@ func (ds *DockerService) buildContainerConfig(
 		Tty:          false,
 		OpenStdin:    len(config.Inputs) > 0,
 		StdinOnce:    true,
+	}
+
+	// Set entrypoint if provided (overrides image default)
+	if len(config.Entrypoint) > 0 {
+		containerConfig.Entrypoint = config.Entrypoint
+	}
+
+	// Set commands/args if provided
+	if len(config.Commands) > 0 {
+		containerConfig.Cmd = config.Commands
 	}
 
 	// Add environment variables
@@ -386,32 +388,31 @@ func (ds *DockerService) buildContainerConfig(
 		AutoRemove: false, // We'll remove manually for better control
 	}
 
-	// Add mounts from config
+	// Add mounts from config (these are the actual workflow job paths built by job_manager.go)
+	// All MOUNT interfaces are handled via config.Mounts which contains the correct paths
 	var mounts []mount.Mount
 	for hostPath, containerPath := range config.Mounts {
+		// Verify the source path exists before adding mount
+		if _, err := os.Stat(hostPath); os.IsNotExist(err) {
+			ds.logger.Error(fmt.Sprintf("Mount source path does not exist: %s", hostPath), "docker")
+			// Try to create it
+			if mkdirErr := os.MkdirAll(hostPath, 0755); mkdirErr != nil {
+				ds.logger.Error(fmt.Sprintf("Failed to create mount directory: %v", mkdirErr), "docker")
+			} else {
+				ds.logger.Info(fmt.Sprintf("Created mount directory: %s", hostPath), "docker")
+			}
+		} else if err != nil {
+			ds.logger.Error(fmt.Sprintf("Error checking mount source path: %v", err), "docker")
+		} else {
+			ds.logger.Info(fmt.Sprintf("Mount source path verified: %s", hostPath), "docker")
+		}
+
 		mounts = append(mounts, mount.Mount{
 			Type:   mount.TypeBind,
 			Source: hostPath,
 			Target: containerPath,
 		})
-	}
-
-	// Add mounts from interfaces
-	for _, iface := range interfaces {
-		if iface.InterfaceType == "MOUNT" && iface.Path != "" {
-			// Create mount point on host
-			hostPath := filepath.Join(ds.appPaths.DataDir, "mounts", fmt.Sprintf("service_%d", config.ServiceID), filepath.Base(iface.Path))
-			if err := os.MkdirAll(hostPath, 0755); err != nil {
-				ds.logger.Warn(fmt.Sprintf("Failed to create mount directory: %v", err), "docker")
-				continue
-			}
-
-			mounts = append(mounts, mount.Mount{
-				Type:   mount.TypeBind,
-				Source: hostPath,
-				Target: iface.Path,
-			})
-		}
+		ds.logger.Info(fmt.Sprintf("Adding mount: %s -> %s", hostPath, containerPath), "docker")
 	}
 
 	hostConfig.Mounts = mounts
