@@ -10,6 +10,7 @@ require (
 	github.com/docker/docker v28.1.1+incompatible
 	github.com/go-git/go-git/v5 v5.13.2
 	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
@@ -61,7 +62,6 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
-	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/huandu/xstrings v1.3.2 // indirect
 	github.com/imdario/mergo v0.3.16 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
