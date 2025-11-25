@@ -1548,7 +1548,7 @@ func (jm *JobManager) SubmitJobWithOptions(request *types.JobExecutionRequest, n
 
 	if isLocalWorkflow {
 		// Validate workflow_job exists for local workflows
-		_, err := jm.db.GetWorkflowJobs(request.WorkflowID)
+		_, err := jm.db.GetWorkflowJobByID(request.WorkflowJobID)
 		if err != nil {
 			jm.logger.Error(fmt.Sprintf("Workflow job %d not found for local workflow: %v",
 				request.WorkflowJobID, err), "job_manager")
