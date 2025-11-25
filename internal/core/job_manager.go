@@ -198,11 +198,16 @@ func (jm *JobManager) processJobQueue() {
 
 	for _, job := range jobs {
 		// Check if job should be executed on a remote peer
+		// NOTE: In the new architecture, remote jobs should NOT have job_executions on orchestrator
+		// They are sent directly via workflow_manager.sendRemoteJobRequest()
+		// This check is kept as a safety fallback for any edge cases
 		if job.ExecutorPeerID != localPeerID {
-			jm.logger.Info(fmt.Sprintf("Job %d should be executed on peer %s (not local peer %s), sending to remote peer",
-				job.ID, job.ExecutorPeerID[:8], localPeerID[:8]), "job_manager")
+			jm.logger.Warn(fmt.Sprintf("UNEXPECTED: Job %d has executor_peer_id=%s but exists in local job_executions (orchestrator should not create job_executions for remote jobs). This may indicate old architecture behavior.",
+				job.ID, job.ExecutorPeerID[:8]), "job_manager")
+			jm.logger.Info(fmt.Sprintf("Sending job %d to remote peer %s as fallback",
+				job.ID, job.ExecutorPeerID[:8]), "job_manager")
 
-			// Send job to remote peer for execution
+			// Send job to remote peer for execution (legacy fallback)
 			go jm.sendJobToRemotePeer(job)
 			continue
 		}
@@ -2133,8 +2138,10 @@ func (jm *JobManager) ensurePeerConnection(peerID string) error {
 }
 
 // sendJobToRemotePeer sends a job execution request to a remote peer
+// LEGACY: In the new architecture, remote jobs are sent via workflow_manager.sendRemoteJobRequest()
+// This function is kept as a fallback for edge cases or direct API job submissions
 func (jm *JobManager) sendJobToRemotePeer(job *database.JobExecution) {
-	jm.logger.Info(fmt.Sprintf("Sending job %d to remote peer %s for execution", job.ID, job.ExecutorPeerID[:8]), "job_manager")
+	jm.logger.Warn(fmt.Sprintf("LEGACY: Sending job %d to remote peer %s via sendJobToRemotePeer (should use workflow_manager for workflow jobs)", job.ID, job.ExecutorPeerID[:8]), "job_manager")
 
 	// Ensure connection to peer exists
 	if err := jm.ensurePeerConnection(job.ExecutorPeerID); err != nil {
