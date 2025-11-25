@@ -18,10 +18,27 @@ type Workflow struct {
 	UpdatedAt   time.Time              `json:"updated_at"`
 }
 
-// WorkflowJob represents an execution instance of a workflow
+// WorkflowExecution represents a single execution instance of a workflow
+type WorkflowExecution struct {
+	ID         int64     `json:"id"`
+	WorkflowID int64     `json:"workflow_id"`
+	Status     string    `json:"status"` // "pending", "running", "completed", "failed", "cancelled"
+	Error      string    `json:"error,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// WorkflowJob represents a single job within a workflow execution
 type WorkflowJob struct {
 	ID                    int64                  `json:"id"`
-	WorkflowID            int64                  `json:"workflow_id"`
+	WorkflowExecutionID   int64                  `json:"workflow_execution_id"` // Links to workflow_executions table
+	WorkflowID            int64                  `json:"workflow_id"`           // For quick reference
+	NodeID                int64                  `json:"node_id"`               // Workflow node ID from design
+	JobName               string                 `json:"job_name"`
+	ServiceID             int64                  `json:"service_id"`
+	ExecutorPeerID        string                 `json:"executor_peer_id"`
 	RemoteJobExecutionID  *int64                 `json:"remote_job_execution_id,omitempty"` // ID from executor peer's job_executions table
 	Status                string                 `json:"status"` // "pending", "running", "completed", "failed"
 	Result                map[string]interface{} `json:"result,omitempty"`
@@ -42,21 +59,43 @@ func (sm *SQLiteManager) InitWorkflowsTable() error {
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
-	CREATE TABLE IF NOT EXISTS workflow_jobs (
+	CREATE TABLE IF NOT EXISTS workflow_executions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		workflow_id INTEGER NOT NULL,
-		remote_job_execution_id INTEGER,
-		status TEXT NOT NULL,
-		result TEXT,
+		status TEXT CHECK(status IN ('pending', 'running', 'completed', 'failed', 'cancelled')) NOT NULL DEFAULT 'pending',
 		error TEXT,
+		started_at DATETIME,
+		completed_at DATETIME,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 	);
 
+	CREATE TABLE IF NOT EXISTS workflow_jobs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		workflow_execution_id INTEGER NOT NULL,
+		workflow_id INTEGER NOT NULL,
+		node_id INTEGER NOT NULL,
+		job_name TEXT NOT NULL,
+		service_id INTEGER NOT NULL,
+		executor_peer_id TEXT NOT NULL,
+		remote_job_execution_id INTEGER,
+		status TEXT CHECK(status IN ('pending', 'running', 'completed', 'failed')) NOT NULL DEFAULT 'pending',
+		result TEXT,
+		error TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (workflow_execution_id) REFERENCES workflow_executions(id) ON DELETE CASCADE,
+		FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_workflows_name ON workflows(name);
+	CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow_id ON workflow_executions(workflow_id);
+	CREATE INDEX IF NOT EXISTS idx_workflow_executions_status ON workflow_executions(status);
+	CREATE INDEX IF NOT EXISTS idx_workflow_jobs_workflow_execution_id ON workflow_jobs(workflow_execution_id);
 	CREATE INDEX IF NOT EXISTS idx_workflow_jobs_workflow_id ON workflow_jobs(workflow_id);
 	CREATE INDEX IF NOT EXISTS idx_workflow_jobs_status ON workflow_jobs(status);
+	CREATE INDEX IF NOT EXISTS idx_workflow_jobs_executor_peer_id ON workflow_jobs(executor_peer_id);
 	`
 
 	_, err := sm.db.Exec(createTableSQL)
@@ -518,11 +557,48 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 	return nil
 }
 
-// CreateWorkflowJob creates a new workflow job (execution instance)
-func (sm *SQLiteManager) CreateWorkflowJob(workflowID int64) (*WorkflowJob, error) {
+// CreateWorkflowExecution creates a new workflow execution instance
+func (sm *SQLiteManager) CreateWorkflowExecution(workflowID int64) (*WorkflowExecution, error) {
+	now := time.Now()
 	result, err := sm.db.Exec(
-		"INSERT INTO workflow_jobs (workflow_id, status) VALUES (?, ?)",
+		"INSERT INTO workflow_executions (workflow_id, status, started_at) VALUES (?, ?, ?)",
 		workflowID,
+		"pending",
+		now,
+	)
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to create workflow execution: %v", err), "database")
+		return nil, err
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+
+	execution := &WorkflowExecution{
+		ID:         id,
+		WorkflowID: workflowID,
+		Status:     "pending",
+		StartedAt:  now,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+
+	sm.logger.Info(fmt.Sprintf("Workflow execution created: ID %d for workflow %d", id, workflowID), "database")
+	return execution, nil
+}
+
+// CreateWorkflowJob creates a new workflow job within an execution
+func (sm *SQLiteManager) CreateWorkflowJob(executionID, workflowID, nodeID int64, jobName string, serviceID int64, executorPeerID string) (*WorkflowJob, error) {
+	result, err := sm.db.Exec(
+		"INSERT INTO workflow_jobs (workflow_execution_id, workflow_id, node_id, job_name, service_id, executor_peer_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		executionID,
+		workflowID,
+		nodeID,
+		jobName,
+		serviceID,
+		executorPeerID,
 		"pending",
 	)
 	if err != nil {
@@ -536,14 +612,19 @@ func (sm *SQLiteManager) CreateWorkflowJob(workflowID int64) (*WorkflowJob, erro
 	}
 
 	job := &WorkflowJob{
-		ID:         id,
-		WorkflowID: workflowID,
-		Status:     "pending",
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:                  id,
+		WorkflowExecutionID: executionID,
+		WorkflowID:          workflowID,
+		NodeID:              nodeID,
+		JobName:             jobName,
+		ServiceID:           serviceID,
+		ExecutorPeerID:      executorPeerID,
+		Status:              "pending",
+		CreatedAt:           time.Now(),
+		UpdatedAt:           time.Now(),
 	}
 
-	sm.logger.Info(fmt.Sprintf("Workflow job created: ID %d for workflow %d", id, workflowID), "database")
+	sm.logger.Info(fmt.Sprintf("Workflow job created: ID %d (execution:%d, node:%d, name:%s)", id, executionID, nodeID, jobName), "database")
 	return job, nil
 }
 
@@ -575,11 +656,11 @@ func (sm *SQLiteManager) UpdateWorkflowJobStatus(jobID int64, status string, res
 	return nil
 }
 
-// GetWorkflowJobs retrieves all jobs for a specific workflow
-func (sm *SQLiteManager) GetWorkflowJobs(workflowID int64) ([]*WorkflowJob, error) {
+// GetWorkflowJobsByExecution retrieves all jobs for a specific workflow execution
+func (sm *SQLiteManager) GetWorkflowJobsByExecution(executionID int64) ([]*WorkflowJob, error) {
 	rows, err := sm.db.Query(
-		"SELECT id, workflow_id, remote_job_execution_id, status, result, error, created_at, updated_at FROM workflow_jobs WHERE workflow_id = ? ORDER BY created_at DESC",
-		workflowID,
+		"SELECT id, workflow_execution_id, workflow_id, node_id, job_name, service_id, executor_peer_id, remote_job_execution_id, status, result, error, created_at, updated_at FROM workflow_jobs WHERE workflow_execution_id = ? ORDER BY created_at ASC",
+		executionID,
 	)
 	if err != nil {
 		sm.logger.Error(fmt.Sprintf("Failed to get workflow jobs: %v", err), "database")
@@ -596,7 +677,12 @@ func (sm *SQLiteManager) GetWorkflowJobs(workflowID int64) ([]*WorkflowJob, erro
 
 		err := rows.Scan(
 			&job.ID,
+			&job.WorkflowExecutionID,
 			&job.WorkflowID,
+			&job.NodeID,
+			&job.JobName,
+			&job.ServiceID,
+			&job.ExecutorPeerID,
 			&remoteJobExecID,
 			&job.Status,
 			&resultJSON,
@@ -638,11 +724,13 @@ func (sm *SQLiteManager) GetWorkflowJobByID(id int64) (*WorkflowJob, error) {
 	var resultStr, errorStr sql.NullString
 
 	err := sm.db.QueryRow(`
-		SELECT id, workflow_id, remote_job_execution_id, status, result, error, created_at, updated_at
+		SELECT id, workflow_execution_id, workflow_id, node_id, job_name, service_id, executor_peer_id,
+		       remote_job_execution_id, status, result, error, created_at, updated_at
 		FROM workflow_jobs
 		WHERE id = ?
 	`, id).Scan(
-		&job.ID, &job.WorkflowID, &remoteJobExecID, &job.Status,
+		&job.ID, &job.WorkflowExecutionID, &job.WorkflowID, &job.NodeID, &job.JobName,
+		&job.ServiceID, &job.ExecutorPeerID, &remoteJobExecID, &job.Status,
 		&resultStr, &errorStr, &job.CreatedAt, &job.UpdatedAt,
 	)
 
