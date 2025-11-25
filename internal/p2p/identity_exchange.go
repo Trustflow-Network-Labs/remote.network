@@ -13,15 +13,16 @@ import (
 
 // IdentityExchanger handles Phase 3 identity and known peers exchange
 type IdentityExchanger struct {
-	keyPair          *crypto.KeyPair
-	dhtNodeID        string // DHT routing node ID
-	dbManager        *database.SQLiteManager
-	logger           *utils.LogsManager
-	config           *utils.ConfigManager
-	metadataFetcher  *MetadataFetcher // For fetching service counts from DHT
-	ourNodeType      string           // "public" or "private"
-	isRelay          bool             // Are we offering relay services?
-	isStore          bool             // Has BEP_44 storage enabled?
+	keyPair            *crypto.KeyPair
+	dhtNodeID          string // DHT routing node ID
+	dbManager          *database.SQLiteManager
+	logger             *utils.LogsManager
+	config             *utils.ConfigManager
+	metadataFetcher    *MetadataFetcher // For fetching service counts from DHT
+	ourNodeType        string           // "public" or "private"
+	isRelay            bool             // Are we offering relay services?
+	isStore            bool             // Has BEP_44 storage enabled?
+	onRelayDiscovered  func(*database.PeerMetadata) // Callback when relay peer discovered
 }
 
 // NewIdentityExchanger creates a new identity exchanger
@@ -63,6 +64,11 @@ func NewIdentityExchanger(
 // SetMetadataFetcher sets the metadata fetcher (called after initialization)
 func (ie *IdentityExchanger) SetMetadataFetcher(fetcher *MetadataFetcher) {
 	ie.metadataFetcher = fetcher
+}
+
+// SetRelayDiscoveryCallback sets the callback for when relay peers are discovered
+func (ie *IdentityExchanger) SetRelayDiscoveryCallback(callback func(*database.PeerMetadata)) {
+	ie.onRelayDiscovered = callback
 }
 
 // PerformHandshake performs the complete identity + known peers exchange
@@ -184,6 +190,13 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 				// Update the knownPeer struct for return value
 				knownPeer.FilesCount = metadata.FilesCount
 				knownPeer.AppsCount = metadata.AppsCount
+			}
+
+			// Notify relay manager if this is a relay peer with valid metadata
+			if metadata.NetworkInfo.IsRelay && ie.onRelayDiscovered != nil {
+				ie.logger.Info(fmt.Sprintf("Discovered relay peer %s via identity exchange, notifying relay manager",
+					remoteIdentity.PeerID[:8]), "identity-exchange")
+				go ie.onRelayDiscovered(metadata)
 			}
 		} else {
 			ie.logger.Debug(fmt.Sprintf("Could not fetch service counts from DHT for peer %s: %v (will be updated later by PeerValidator)",

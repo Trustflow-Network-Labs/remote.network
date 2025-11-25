@@ -204,7 +204,12 @@ export default {
       to: 'To',
       connectedInterfaces: 'Connected Interfaces',
       noInterfacesConnected: 'No interfaces connected',
-      deleteConnection: 'Delete Connection'
+      deleteConnection: 'Delete Connection',
+      configureJob: 'Configure Job',
+      dockerDefaultsNote: 'Leave empty to use service defaults. Values set here override the service\'s default configuration.',
+      noConfigForType: 'No configuration options available for this service type.',
+      jobConfigSaved: 'Job configuration saved',
+      jobConfigError: 'Failed to save job configuration'
     },
     services: {
       title: 'Services',

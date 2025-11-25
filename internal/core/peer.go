@@ -209,13 +209,15 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 		logger.Info("Hole puncher initialized for NAT traversal", "core")
 	}
 
-	// Set up relay discovery callback for NAT peers
+	// Set up relay discovery callback for NAT peers on identity exchanger
+	// This triggers when relays are discovered during identity exchange (QUIC handshake)
 	if relayManager != nil {
-		quic.SetRelayDiscoveryCallback(func(metadata *database.PeerMetadata) {
+		identityExchanger.SetRelayDiscoveryCallback(func(metadata *database.PeerMetadata) {
 			if err := relayManager.AddRelayCandidate(metadata); err != nil {
 				logger.Debug(fmt.Sprintf("Failed to add relay candidate %s: %v", metadata.NodeID, err), "core")
 			} else {
-				logger.Debug(fmt.Sprintf("Added relay candidate: %s", metadata.NodeID), "core")
+				logger.Info(fmt.Sprintf("Added relay candidate from identity exchange: %s (endpoint: %s)",
+					metadata.PeerID[:8], metadata.NetworkInfo.RelayEndpoint), "core")
 			}
 		})
 	}

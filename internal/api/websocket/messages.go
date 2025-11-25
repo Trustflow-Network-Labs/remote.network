@@ -280,6 +280,8 @@ type RemoteServiceInfo struct {
 	Capabilities    map[string]interface{} `json:"capabilities,omitempty"`
 	Hash            string                 `json:"hash,omitempty"`
 	SizeBytes       int64                  `json:"size_bytes,omitempty"`
+	Entrypoint      []string               `json:"entrypoint,omitempty"` // For DOCKER services
+	Cmd             []string               `json:"cmd,omitempty"`        // For DOCKER services
 	PeerID          string                 `json:"peer_id"` // ID of peer offering this service
 	PeerName        string                 `json:"peer_name,omitempty"`
 	Interfaces      []RemoteServiceInterface `json:"interfaces,omitempty"` // Service interfaces

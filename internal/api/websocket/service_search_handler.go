@@ -168,6 +168,27 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 					}
 				}
 
+				// Add docker-specific fields for DOCKER services
+				if service.ServiceType == "DOCKER" {
+					dockerDetails, err := ssh.dbManager.GetDockerServiceDetails(service.ID)
+					if err == nil && dockerDetails != nil {
+						// Parse entrypoint from JSON
+						if dockerDetails.Entrypoint != "" {
+							var entrypoint []string
+							if err := json.Unmarshal([]byte(dockerDetails.Entrypoint), &entrypoint); err == nil {
+								remoteService.Entrypoint = entrypoint
+							}
+						}
+						// Parse cmd from JSON
+						if dockerDetails.Cmd != "" {
+							var cmd []string
+							if err := json.Unmarshal([]byte(dockerDetails.Cmd), &cmd); err == nil {
+								remoteService.Cmd = cmd
+							}
+						}
+					}
+				}
+
 				localServices = append(localServices, remoteService)
 			}
 
@@ -917,6 +938,8 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 			Capabilities:    svc.Capabilities,
 			Hash:            svc.Hash,
 			SizeBytes:       svc.SizeBytes,
+			Entrypoint:      svc.Entrypoint,
+			Cmd:             svc.Cmd,
 			PeerID:          servicePeerID,
 			Interfaces:      interfaces,
 		})
@@ -1191,6 +1214,8 @@ func (ssh *ServiceSearchHandler) queryPeerViaRelay(ctx context.Context, targetPe
 			Capabilities:    svc.Capabilities,
 			Hash:            svc.Hash,
 			SizeBytes:       svc.SizeBytes,
+			Entrypoint:      svc.Entrypoint,
+			Cmd:             svc.Cmd,
 			PeerID:          targetPeerID,
 			Interfaces:      interfaces,
 		})
@@ -1368,6 +1393,8 @@ func (ssh *ServiceSearchHandler) queryPeerViaConnection(ctx context.Context, qui
 			Capabilities:    svc.Capabilities,
 			Hash:            svc.Hash,
 			SizeBytes:       svc.SizeBytes,
+			Entrypoint:      svc.Entrypoint,
+			Cmd:             svc.Cmd,
 			PeerID:          peerID, // Use peer ID for relay session queries
 			Interfaces:      interfaces,
 		})

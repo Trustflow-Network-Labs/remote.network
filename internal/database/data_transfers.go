@@ -324,6 +324,24 @@ func (sm *SQLiteManager) GetStalledTransfers(timeout time.Duration) ([]*DataTran
 	return sm.scanTransfers(rows)
 }
 
+// HasPendingTransfersForJob checks if there are any active/pending incoming transfers for a job
+func (sm *SQLiteManager) HasPendingTransfersForJob(jobExecutionID int64) (bool, error) {
+	query := `
+		SELECT COUNT(*) FROM data_transfers
+		WHERE job_execution_id = ?
+		  AND direction = 'incoming'
+		  AND status IN ('active', 'pending', 'paused')
+	`
+
+	var count int
+	err := sm.db.QueryRow(query, jobExecutionID).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("failed to check pending transfers: %v", err)
+	}
+
+	return count > 0, nil
+}
+
 // CompleteTransfer marks a transfer as completed
 func (sm *SQLiteManager) CompleteTransfer(transferID string) error {
 	query := `

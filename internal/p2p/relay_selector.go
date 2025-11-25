@@ -84,10 +84,11 @@ func (rs *RelaySelector) AddCandidate(metadata *database.PeerMetadata) error {
 		UnavailableMsg:  "",
 	}
 
-	rs.candidates[metadata.NodeID] = candidate
+	// Use PeerID as the map key (persistent identifier)
+	rs.candidates[metadata.PeerID] = candidate
 	totalCandidates := len(rs.candidates)
-	rs.logger.Debug(fmt.Sprintf("Added relay candidate: %s (endpoint: %s, reputation: %.2f, pricing: %.4f)",
-		metadata.NodeID, candidate.Endpoint, candidate.ReputationScore, candidate.PricingPerGB), "relay-selector")
+	rs.logger.Debug(fmt.Sprintf("Added relay candidate: %s (PeerID: %s, endpoint: %s, reputation: %.2f, pricing: %.4f)",
+		metadata.NodeID, metadata.PeerID[:8], candidate.Endpoint, candidate.ReputationScore, candidate.PricingPerGB), "relay-selector")
 	rs.logger.Info(fmt.Sprintf("Total relay candidates: %d", totalCandidates), "relay-selector")
 
 	return nil
@@ -115,13 +116,13 @@ func (rs *RelaySelector) ClearCandidates() {
 
 // UpdateCandidateLastSeen updates the LastSeen timestamp for a candidate
 // This prevents actively-used relays from being removed as stale
-func (rs *RelaySelector) UpdateCandidateLastSeen(nodeID string) {
+func (rs *RelaySelector) UpdateCandidateLastSeen(peerID string) {
 	rs.candidatesMutex.Lock()
 	defer rs.candidatesMutex.Unlock()
 
-	if candidate, ok := rs.candidates[nodeID]; ok {
+	if candidate, ok := rs.candidates[peerID]; ok {
 		candidate.LastSeen = time.Now()
-		rs.logger.Debug(fmt.Sprintf("Updated LastSeen for relay candidate: %s", nodeID), "relay-selector")
+		rs.logger.Debug(fmt.Sprintf("Updated LastSeen for relay candidate: %s", peerID[:8]), "relay-selector")
 	}
 }
 
@@ -132,19 +133,15 @@ func (rs *RelaySelector) GetCandidateCount() int {
 	return len(rs.candidates)
 }
 
-// HasCandidate checks if a relay candidate already exists by PeerID or NodeID
+// HasCandidate checks if a relay candidate already exists by PeerID
 // This prevents duplicate additions from metadata discovery callbacks
 func (rs *RelaySelector) HasCandidate(peerID string) bool {
 	rs.candidatesMutex.RLock()
 	defer rs.candidatesMutex.RUnlock()
 
-	// Check by PeerID or DHTNodeID
-	for _, candidate := range rs.candidates {
-		if candidate.PeerID == peerID || candidate.NodeID == peerID {
-			return true
-		}
-	}
-	return false
+	// Check by PeerID (map key)
+	_, exists := rs.candidates[peerID]
+	return exists
 }
 
 // MeasureLatency measures latency to a relay candidate using QUIC ping
@@ -156,7 +153,7 @@ func (rs *RelaySelector) MeasureLatency(candidate *RelayCandidate) (time.Duratio
 	if err != nil {
 		// Mark relay as unavailable when ping fails
 		rs.candidatesMutex.Lock()
-		if c, exists := rs.candidates[candidate.NodeID]; exists {
+		if c, exists := rs.candidates[candidate.PeerID]; exists {
 			c.IsAvailable = false
 			c.UnavailableMsg = fmt.Sprintf("Ping timeout: %v", err)
 			c.LastFailure = time.Now()
@@ -164,7 +161,7 @@ func (rs *RelaySelector) MeasureLatency(candidate *RelayCandidate) (time.Duratio
 		}
 		rs.candidatesMutex.Unlock()
 
-		rs.logger.Warn(fmt.Sprintf("Relay %s marked as unavailable: ping failed", candidate.NodeID[:8]), "relay-selector")
+		rs.logger.Warn(fmt.Sprintf("Relay %s (PeerID: %s) marked as unavailable: ping failed", candidate.NodeID[:8], candidate.PeerID[:8]), "relay-selector")
 		return 0, fmt.Errorf("failed to ping relay %s: %v", candidate.NodeID, err)
 	}
 
@@ -172,7 +169,7 @@ func (rs *RelaySelector) MeasureLatency(candidate *RelayCandidate) (time.Duratio
 
 	// Update candidate latency and mark as available (successful ping)
 	rs.candidatesMutex.Lock()
-	if c, exists := rs.candidates[candidate.NodeID]; exists {
+	if c, exists := rs.candidates[candidate.PeerID]; exists {
 		c.Latency = latency
 		c.IsAvailable = true
 		c.UnavailableMsg = ""
@@ -180,7 +177,7 @@ func (rs *RelaySelector) MeasureLatency(candidate *RelayCandidate) (time.Duratio
 	}
 	rs.candidatesMutex.Unlock()
 
-	rs.logger.Debug(fmt.Sprintf("Measured latency to %s: %v", candidate.NodeID, latency), "relay-selector")
+	rs.logger.Debug(fmt.Sprintf("Measured latency to %s (PeerID: %s): %v", candidate.NodeID, candidate.PeerID[:8], latency), "relay-selector")
 	return latency, nil
 }
 

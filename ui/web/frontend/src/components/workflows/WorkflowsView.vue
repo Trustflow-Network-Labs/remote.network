@@ -660,6 +660,10 @@ function formatDateTime(dateStr: string): string {
 function calculateDuration(startStr: string, endStr: string): string {
   if (!startStr || !endStr) return '-'
 
+  // Go zero time - job hasn't started/completed yet
+  const goZeroTime = '0001-01-01T00:00:00Z'
+  if (startStr === goZeroTime || endStr === goZeroTime) return '-'
+
   const start = new Date(startStr)
   const end = new Date(endStr)
 
@@ -673,7 +677,7 @@ function calculateDuration(startStr: string, endStr: string): string {
 
   // If duration is negative or unreasonably large, something is wrong
   if (diffMs < 0 || diffMs > 365 * 24 * 60 * 60 * 1000) {
-    console.warn('Duration out of reasonable range:', diffMs)
+    // Don't spam console, just return '-'
     return '-'
   }
 
@@ -694,6 +698,9 @@ function calculateDuration(startStr: string, endStr: string): string {
 function getRunningTime(startStr: string): string {
   if (!startStr) return '-'
 
+  // Go zero time - job hasn't started yet
+  if (startStr === '0001-01-01T00:00:00Z') return '-'
+
   const start = new Date(startStr)
 
   // Check if date is valid
@@ -707,7 +714,7 @@ function getRunningTime(startStr: string): string {
 
   // If the difference is negative or unreasonably large, return '-'
   if (diffMs < 0 || diffMs > 365 * 24 * 60 * 60 * 1000) {
-    console.warn('Running time out of reasonable range:', diffMs)
+    // Don't spam console, just return '-'
     return '-'
   }
 

@@ -154,10 +154,22 @@ func (rm *RelayManager) Start() error {
 
 	go rm.periodicRelayEvaluation()
 
-	// Note: No initial relay selection needed here
-	// Relays will be discovered via metadata query service callbacks (line 86-143)
-	// Each discovery triggers async measurement and SelectAndConnectRelay() if no relay is connected
-	// This prevents race conditions and allows natural, event-driven relay selection
+	// Check if relays were already discovered during bootstrap (before Start() was called)
+	// These candidates were added via the QUIC callback but haven't been measured or connected to yet
+	// We need to process them now that the relay manager is running
+	candidateCount := rm.selector.GetCandidateCount()
+	if candidateCount > 0 {
+		rm.logger.Info(fmt.Sprintf("Found %d pre-existing relay candidates from bootstrap, triggering initial connection...", candidateCount), "relay-manager")
+		go func() {
+			// Measure all pre-existing candidates
+			rm.selector.MeasureAllCandidates()
+
+			// Select and connect to best relay
+			if err := rm.SelectAndConnectRelay(); err != nil {
+				rm.logger.Warn(fmt.Sprintf("Failed to connect to pre-existing relay candidates: %v", err), "relay-manager")
+			}
+		}()
+	}
 
 	return nil
 }
@@ -180,9 +192,42 @@ func (rm *RelayManager) Stop() {
 	rm.logger.Info("Relay manager stopped", "relay-manager")
 }
 
-// AddRelayCandidate adds a discovered relay peer
+// AddRelayCandidate adds a discovered relay peer and triggers selection if not connected
 func (rm *RelayManager) AddRelayCandidate(metadata *database.PeerMetadata) error {
-	return rm.selector.AddCandidate(metadata)
+	// Check if this candidate already exists (prevent duplicate selection storms)
+	isNewCandidate := !rm.selector.HasCandidate(metadata.PeerID)
+
+	err := rm.selector.AddCandidate(metadata)
+	if err != nil {
+		return err
+	}
+
+	// Only trigger immediate selection if we're not connected AND this is a NEW candidate
+	rm.relayMutex.RLock()
+	currentRelay := rm.currentRelay
+	rm.relayMutex.RUnlock()
+
+	if currentRelay == nil && isNewCandidate {
+		rm.logger.Info(fmt.Sprintf("New relay candidate %s added while not connected, triggering immediate relay selection",
+			metadata.PeerID[:8]), "relay-manager")
+
+		// Trigger selection in background to not block the caller
+		go func() {
+			// Measure this specific candidate first
+			rm.selector.MeasureCandidate(metadata.PeerID)
+
+			// Then try to select and connect to best relay
+			if err := rm.SelectAndConnectRelay(); err != nil {
+				rm.logger.Debug(fmt.Sprintf("Failed to select relay after adding candidate %s: %v",
+					metadata.PeerID[:8], err), "relay-manager")
+			}
+		}()
+	} else if !isNewCandidate {
+		rm.logger.Debug(fmt.Sprintf("Relay candidate %s already exists, skipping duplicate selection trigger",
+			metadata.PeerID[:8]), "relay-manager")
+	}
+
+	return nil
 }
 
 // SelectAndConnectRelay selects the best relay from existing measurements and establishes connection
@@ -374,7 +419,7 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 	rm.relayMutex.Unlock()
 
 	// Update LastSeen to prevent this relay from being marked as stale
-	rm.selector.UpdateCandidateLastSeen(relay.NodeID)
+	rm.selector.UpdateCandidateLastSeen(relay.PeerID)
 
 	// Reset failure count on successful connection
 	relay.FailureCount = 0

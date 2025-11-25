@@ -28,6 +28,10 @@ export interface WorkflowJob {
   pricing_interval?: number
   pricing_unit?: string
   interfaces?: ServiceInterface[]  // Service interfaces defining allowed inputs/outputs
+  // Docker configuration from remote service (populated from remote search results)
+  // Can be overridden by user in job configuration dialog
+  entrypoint?: string[]  // Container entrypoint from remote service
+  cmd?: string[]         // Container cmd from remote service (note: backend uses 'commands' in some places)
   created_at: string
 }
 

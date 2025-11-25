@@ -402,6 +402,9 @@ watch(() => workflowsStore.currentUIState, (uiState) => {
 
 // Initialize on mount
 onMounted(async () => {
+  // Clear remote services to ensure fresh search results (avoid stale/outdated data)
+  servicesStore.clearRemoteServices()
+
   // Load peers for the filter
   await peersStore.fetchPeers()
 

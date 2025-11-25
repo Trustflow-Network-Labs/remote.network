@@ -62,6 +62,14 @@
         @delete="onDeleteConnection"
         @cancel="onConnectionDetailsCancel"
       />
+
+      <!-- Job Configuration Dialog -->
+      <JobConfigDialog
+        v-model:visible="jobConfigVisible"
+        :job="selectedJobForConfig"
+        @save="onJobConfigSave"
+        @cancel="onJobConfigCancel"
+      />
     </div>
   </AppLayout>
 </template>
@@ -83,6 +91,7 @@ import SelfPeerCard from './SelfPeerCard.vue'
 import WorkflowTools from './WorkflowTools.vue'
 import InterfaceSelector from './InterfaceSelector.vue'
 import ConnectionDetailsDialog from './ConnectionDetailsDialog.vue'
+import JobConfigDialog from './JobConfigDialog.vue'
 import { useWorkflowsStore } from '../../stores/workflows'
 import type { WorkflowJob, ServiceInterface } from '../../stores/workflows'
 
@@ -170,6 +179,10 @@ const selectedConnection = ref<{
   toCardName: '',
   interfaces: []
 })
+
+// Job configuration dialog state
+const jobConfigVisible = ref(false)
+const selectedJobForConfig = ref<WorkflowJob | null>(null)
 
 // Leader-line connections (must be reactive for computed properties to update)
 const connections = ref<Array<{
@@ -358,6 +371,8 @@ async function addServiceToWorkflow(service: any, x: number, y: number) {
       gui_x: x,
       gui_y: y,
       interfaces: service.interfaces || [], // Include service interfaces from remote service search
+      entrypoint: service.entrypoint || undefined, // Docker entrypoint from remote service
+      cmd: service.cmd || undefined, // Docker cmd from remote service
       pricing_amount: service.pricing_amount,
       pricing_type: service.pricing_type,
       pricing_interval: service.pricing_interval,
@@ -542,14 +557,44 @@ async function removeServiceCard(cardId: number) {
   }
 }
 
-function configureServiceCard(_cardId: number) {
-  // TODO: Implement service card configuration dialog
+function configureServiceCard(cardId: number) {
+  const card = serviceCards.value.find(c => c.id === cardId)
+  if (!card) {
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: 'Job not found',
+      life: 3000
+    })
+    return
+  }
+
+  selectedJobForConfig.value = card.job
+  jobConfigVisible.value = true
+}
+
+function onJobConfigSave(data: { entrypoint: string[], cmd: string[] }) {
+  if (!selectedJobForConfig.value) return
+
+  // Update the job in serviceCards
+  const card = serviceCards.value.find(c => c.job.id === selectedJobForConfig.value?.id)
+  if (card) {
+    card.job.entrypoint = data.entrypoint.length > 0 ? data.entrypoint : undefined
+    card.job.cmd = data.cmd.length > 0 ? data.cmd : undefined
+  }
+
   toast.add({
-    severity: 'info',
-    summary: t('message.common.info'),
-    detail: 'Configuration coming soon',
+    severity: 'success',
+    summary: t('message.common.success'),
+    detail: t('message.workflows.jobConfigSaved'),
     life: 3000
   })
+
+  selectedJobForConfig.value = null
+}
+
+function onJobConfigCancel() {
+  selectedJobForConfig.value = null
 }
 
 async function saveWorkflow(data: { name: string; description: string }) {

@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -47,9 +48,11 @@ type ServiceSearchResult struct {
 	PricingInterval int                   `json:"pricing_interval"`
 	PricingUnit    string                 `json:"pricing_unit"`
 	Capabilities   map[string]interface{} `json:"capabilities,omitempty"`
-	Hash           string                 `json:"hash,omitempty"`      // For DATA services
+	Hash           string                 `json:"hash,omitempty"`       // For DATA services
 	SizeBytes      int64                  `json:"size_bytes,omitempty"` // For DATA services
 	Interfaces     []ServiceInterface     `json:"interfaces,omitempty"` // Service interfaces (STDIN, STDOUT, MOUNT)
+	Entrypoint     []string               `json:"entrypoint,omitempty"` // For DOCKER services
+	Cmd            []string               `json:"cmd,omitempty"`        // For DOCKER services
 }
 
 // ServiceInterface represents a service interface for remote service info
@@ -113,6 +116,27 @@ func (sqh *ServiceQueryHandler) HandleServiceSearchRequest(msg *QUICMessage, rem
 			if err == nil && details != nil {
 				result.Hash = details.Hash
 				result.SizeBytes = details.SizeBytes
+			}
+		}
+
+		// For DOCKER services, include entrypoint and cmd
+		if service.ServiceType == "DOCKER" {
+			dockerDetails, err := sqh.dbManager.GetDockerServiceDetails(service.ID)
+			if err == nil && dockerDetails != nil {
+				// Parse entrypoint from JSON
+				if dockerDetails.Entrypoint != "" {
+					var entrypoint []string
+					if err := json.Unmarshal([]byte(dockerDetails.Entrypoint), &entrypoint); err == nil {
+						result.Entrypoint = entrypoint
+					}
+				}
+				// Parse cmd from JSON
+				if dockerDetails.Cmd != "" {
+					var cmd []string
+					if err := json.Unmarshal([]byte(dockerDetails.Cmd), &cmd); err == nil {
+						result.Cmd = cmd
+					}
+				}
 			}
 		}
 

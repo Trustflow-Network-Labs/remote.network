@@ -178,6 +178,74 @@ const interfaces = ref<ServiceInterface[]>([])
 const editableEntrypoint = ref<string>('')
 const editableCmd = ref<string>('')
 
+// Convert array of args to shell-like string (quote args with spaces)
+function argsToShellString(args: string[] | undefined | null): string {
+  if (!args || args.length === 0) return ''
+  return args.map(arg => {
+    // Quote arguments that contain spaces, quotes, or special chars
+    if (/[\s"'\\]/.test(arg)) {
+      // Escape any existing double quotes and wrap in double quotes
+      return `"${arg.replace(/"/g, '\\"')}"`
+    }
+    return arg
+  }).join(' ')
+}
+
+// Parse shell-like string to array of args (respects quotes)
+function shellStringToArgs(input: string): string[] {
+  const trimmed = input.trim()
+  if (!trimmed) return []
+
+  const args: string[] = []
+  let current = ''
+  let inQuote = false
+  let quoteChar = ''
+  let escaped = false
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const char = trimmed[i]
+
+    if (escaped) {
+      current += char
+      escaped = false
+      continue
+    }
+
+    if (char === '\\') {
+      escaped = true
+      continue
+    }
+
+    if ((char === '"' || char === "'") && !inQuote) {
+      inQuote = true
+      quoteChar = char
+      continue
+    }
+
+    if (char === quoteChar && inQuote) {
+      inQuote = false
+      quoteChar = ''
+      continue
+    }
+
+    if (char === ' ' && !inQuote) {
+      if (current) {
+        args.push(current)
+        current = ''
+      }
+      continue
+    }
+
+    current += char
+  }
+
+  if (current) {
+    args.push(current)
+  }
+
+  return args
+}
+
 // Interface types
 const interfaceTypes = [
   { label: 'STDIN (Standard Input)', value: 'STDIN' },
@@ -210,13 +278,9 @@ watch(() => props.visible, (newVisible) => {
       }
     })
 
-    // Initialize entrypoint and cmd as space-separated strings
-    editableEntrypoint.value = props.entrypoint && props.entrypoint.length > 0
-      ? props.entrypoint.join(' ')
-      : ''
-    editableCmd.value = props.cmd && props.cmd.length > 0
-      ? props.cmd.join(' ')
-      : ''
+    // Initialize entrypoint and cmd as shell-like strings (with quoted args)
+    editableEntrypoint.value = argsToShellString(props.entrypoint)
+    editableCmd.value = argsToShellString(props.cmd)
   }
 }, { immediate: true })
 
@@ -253,13 +317,9 @@ const handleConfirm = () => {
     return true
   })
 
-  // Parse entrypoint and cmd from space-separated strings to arrays
-  const entrypoint = editableEntrypoint.value.trim()
-    ? editableEntrypoint.value.trim().split(/\s+/)
-    : []
-  const cmd = editableCmd.value.trim()
-    ? editableCmd.value.trim().split(/\s+/)
-    : []
+  // Parse entrypoint and cmd from shell-like strings to arrays (respects quotes)
+  const entrypoint = shellStringToArgs(editableEntrypoint.value)
+  const cmd = shellStringToArgs(editableCmd.value)
 
   emit('confirm', {
     interfaces: validInterfaces,

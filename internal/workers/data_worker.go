@@ -33,6 +33,7 @@ type IncomingTransfer struct {
 	BytesReceived   int64
 	Passphrase      string // For encrypted transfers (memory-only, cleared after use)
 	Encrypted       bool   // Whether this transfer is encrypted
+	InterfaceType   string // Interface type (STDOUT, MOUNT, PACKAGE, etc.)
 	StartedAt       time.Time
 	LastChunkAt     time.Time
 	mu              sync.Mutex
@@ -381,19 +382,26 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 
 	// Check if job handler is available for actual transfer
 	if dsw.jobHandler != nil {
+		// Get destination job execution ID from peer record
+		var destJobExecID int64
+		if peer.PeerJobID != nil {
+			destJobExecID = *peer.PeerJobID
+		}
+
 		// Send transfer request using WorkflowJobID (shared identifier both peers understand)
 		transferRequest := &types.JobDataTransferRequest{
-			TransferID:        transferID, // Include transfer ID so both peers use the same one
-			WorkflowJobID:     job.WorkflowJobID,
-			InterfaceType:     types.InterfaceTypeStdout,
-			SourcePeerID:      dsw.peerID,
-			DestinationPeerID: peer.PeerNodeID,
-			SourcePath:        filePath,
-			DestinationPath:   peer.PeerPath,
-			DataHash:          dataDetails.Hash,
-			SizeBytes:         fileSize,
-			Passphrase:        keyData,
-			Encrypted:         encrypted,
+			TransferID:                transferID, // Include transfer ID so both peers use the same one
+			WorkflowJobID:             job.WorkflowJobID,
+			DestinationJobExecutionID: destJobExecID, // Destination job execution ID (receiver's job)
+			InterfaceType:             types.InterfaceTypeStdout,
+			SourcePeerID:              dsw.peerID,
+			DestinationPeerID:         peer.PeerNodeID,
+			SourcePath:                filePath,
+			DestinationPath:           peer.PeerPath,
+			DataHash:                  dataDetails.Hash,
+			SizeBytes:                 fileSize,
+			Passphrase:                keyData,
+			Encrypted:                 encrypted,
 		}
 
 		dsw.logger.Info(fmt.Sprintf("Sending transfer request for transfer ID %s to peer %s (encrypted: %v)", transferID, peer.PeerNodeID[:8], encrypted), "data_worker")
@@ -744,6 +752,11 @@ func (dsw *DataServiceWorker) InitializeIncomingTransfer(transferID string, jobE
 
 // InitializeIncomingTransferWithPassphrase creates a new incoming transfer state with optional encryption
 func (dsw *DataServiceWorker) InitializeIncomingTransferWithPassphrase(transferID string, jobExecutionID int64, sourcePeerID string, targetPath string, expectedHash string, expectedSize int64, totalChunks int, passphrase string, encrypted bool) error {
+	return dsw.InitializeIncomingTransferFull(transferID, jobExecutionID, sourcePeerID, targetPath, expectedHash, expectedSize, totalChunks, passphrase, encrypted, "")
+}
+
+// InitializeIncomingTransferFull creates a new incoming transfer state with all options
+func (dsw *DataServiceWorker) InitializeIncomingTransferFull(transferID string, jobExecutionID int64, sourcePeerID string, targetPath string, expectedHash string, expectedSize int64, totalChunks int, passphrase string, encrypted bool, interfaceType string) error {
 	dsw.transfersMu.Lock()
 	defer dsw.transfersMu.Unlock()
 
@@ -752,8 +765,8 @@ func (dsw *DataServiceWorker) InitializeIncomingTransferWithPassphrase(transferI
 		return nil // Already initialized
 	}
 
-	dsw.logger.Info(fmt.Sprintf("Initializing incoming transfer %s: %s (%d bytes, %d chunks, encrypted: %v)",
-		transferID, targetPath, expectedSize, totalChunks, encrypted), "data_worker")
+	dsw.logger.Info(fmt.Sprintf("Initializing incoming transfer %s: %s (%d bytes, %d chunks, encrypted: %v, type: %s)",
+		transferID, targetPath, expectedSize, totalChunks, encrypted, interfaceType), "data_worker")
 
 	// Determine if targetPath is a directory (ends with separator) or a file
 	// Following libp2p pattern: directories end with "/" or "\"
@@ -761,19 +774,21 @@ func (dsw *DataServiceWorker) InitializeIncomingTransferWithPassphrase(transferI
 
 	var actualFilePath string
 	if isDir {
-		// Create directory
-		if err := os.MkdirAll(targetPath, 0755); err != nil {
+		// Create directory with world-writable permissions for Docker container access
+		if err := os.MkdirAll(targetPath, 0777); err != nil {
 			return fmt.Errorf("failed to create target directory: %v", err)
 		}
+		os.Chmod(targetPath, 0777)
 		// Save file inside directory with transfer ID as filename
 		actualFilePath = filepath.Join(targetPath, transferID+".dat")
 		dsw.logger.Info(fmt.Sprintf("Target is directory, saving file as: %s", actualFilePath), "data_worker")
 	} else {
-		// Create parent directory
+		// Create parent directory with world-writable permissions for Docker container access
 		targetDir := filepath.Dir(targetPath)
-		if err := os.MkdirAll(targetDir, 0755); err != nil {
+		if err := os.MkdirAll(targetDir, 0777); err != nil {
 			return fmt.Errorf("failed to create parent directory: %v", err)
 		}
+		os.Chmod(targetDir, 0777)
 		actualFilePath = targetPath
 	}
 
@@ -797,6 +812,7 @@ func (dsw *DataServiceWorker) InitializeIncomingTransferWithPassphrase(transferI
 		BytesReceived:  0,
 		Passphrase:     passphrase, // Store passphrase temporarily in memory
 		Encrypted:      encrypted,
+		InterfaceType:  interfaceType,
 		StartedAt:      time.Now(),
 		LastChunkAt:    time.Now(),
 	}
@@ -1050,8 +1066,8 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 	extractDir := filepath.Dir(transfer.TargetPath)
 	dsw.logger.Info(fmt.Sprintf("Extracting transfer %s to directory: %s", transferID, extractDir), "data_worker")
 
-	// Ensure extraction directory exists
-	if err := os.MkdirAll(extractDir, 0755); err != nil {
+	// Ensure extraction directory exists with world-writable permissions for Docker container access
+	if err := os.MkdirAll(extractDir, 0777); err != nil {
 		dsw.logger.Error(fmt.Sprintf("Failed to create extraction directory for transfer %s: %v", transferID, err), "data_worker")
 		os.Remove(transfer.TargetPath)
 		delete(dsw.incomingTransfers, transferID)
@@ -1062,25 +1078,107 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 		return fmt.Errorf("failed to create extraction directory: %v", err)
 	}
 
-	// Decompress the tar.gz file
-	if err := utils.Decompress(transfer.TargetPath, extractDir); err != nil {
-		dsw.logger.Error(fmt.Sprintf("Decompression failed for transfer %s: %v", transferID, err), "data_worker")
-		os.Remove(transfer.TargetPath)
-		os.RemoveAll(extractDir)
-		delete(dsw.incomingTransfers, transferID)
-		// Clear passphrase from memory
-		if transfer.Passphrase != "" {
-			transfer.Passphrase = ""
+	// Check if this is a transfer package (PACKAGE interface type)
+	isTransferPackage := transfer.InterfaceType == types.InterfaceTypePackage
+
+	if isTransferPackage {
+		// Handle transfer package with manifest-based extraction
+		dsw.logger.Info(fmt.Sprintf("Transfer %s is a transfer package, using manifest-based extraction", transferID), "data_worker")
+
+		// Get the job's base directory for proper file placement
+		// The base directory is: workflows/{ordering_peer}/{workflow_job_id}/jobs/{job_id}/
+		job, err := dsw.db.GetJobExecution(transfer.JobExecutionID)
+		if err != nil || job == nil {
+			dsw.logger.Error(fmt.Sprintf("Failed to get job execution for transfer package %s: %v", transferID, err), "data_worker")
+			os.Remove(transfer.TargetPath)
+			delete(dsw.incomingTransfers, transferID)
+			if transfer.Passphrase != "" {
+				transfer.Passphrase = ""
+			}
+			return fmt.Errorf("failed to get job execution: %v", err)
 		}
-		return fmt.Errorf("decompression failed: %v", err)
-	}
 
-	// Remove the compressed archive after successful extraction
-	if err := os.Remove(transfer.TargetPath); err != nil {
-		dsw.logger.Warn(fmt.Sprintf("Failed to remove compressed archive for transfer %s: %v", transferID, err), "data_worker")
-	}
+		appPaths := utils.GetAppPaths("remote-network")
+		baseDir := filepath.Join(
+			appPaths.DataDir,
+			"workflows",
+			job.OrderingPeerID,
+			fmt.Sprintf("%d", job.WorkflowJobID),
+			"jobs",
+			fmt.Sprintf("%d", job.ID),
+		)
 
-	dsw.logger.Info(fmt.Sprintf("Transfer %s decompressed successfully to %s", transferID, extractDir), "data_worker")
+		// Use transfer package extractor
+		extractor := utils.NewTransferPackageExtractor(dsw.logger)
+		if err := extractor.ExtractAndPlace(transfer.TargetPath, baseDir); err != nil {
+			dsw.logger.Error(fmt.Sprintf("Transfer package extraction failed for %s: %v", transferID, err), "data_worker")
+			os.Remove(transfer.TargetPath)
+			delete(dsw.incomingTransfers, transferID)
+			if transfer.Passphrase != "" {
+				transfer.Passphrase = ""
+			}
+			return fmt.Errorf("transfer package extraction failed: %v", err)
+		}
+
+		// Remove the package archive after successful extraction
+		if err := os.Remove(transfer.TargetPath); err != nil {
+			dsw.logger.Warn(fmt.Sprintf("Failed to remove transfer package archive for %s: %v", transferID, err), "data_worker")
+		}
+
+		dsw.logger.Info(fmt.Sprintf("Transfer package %s extracted successfully to %s", transferID, baseDir), "data_worker")
+	} else {
+		// Standard decompression for DATA service transfers
+		if err := utils.Decompress(transfer.TargetPath, extractDir); err != nil {
+			dsw.logger.Error(fmt.Sprintf("Decompression failed for transfer %s: %v", transferID, err), "data_worker")
+			os.Remove(transfer.TargetPath)
+			os.RemoveAll(extractDir)
+			delete(dsw.incomingTransfers, transferID)
+			// Clear passphrase from memory
+			if transfer.Passphrase != "" {
+				transfer.Passphrase = ""
+			}
+			return fmt.Errorf("decompression failed: %v", err)
+		}
+
+		// Check if extracted content contains a manifest (backward compatibility check)
+		// In case the sender didn't set interface type correctly
+		manifestPath := filepath.Join(extractDir, types.TransferManifestFileName)
+		if _, err := os.Stat(manifestPath); err == nil {
+			dsw.logger.Info("Found manifest.json in extracted content, handling as transfer package", "data_worker")
+
+			// Get the job's base directory
+			job, err := dsw.db.GetJobExecution(transfer.JobExecutionID)
+			if err == nil && job != nil {
+				appPaths := utils.GetAppPaths("remote-network")
+				baseDir := filepath.Join(
+					appPaths.DataDir,
+					"workflows",
+					job.OrderingPeerID,
+					fmt.Sprintf("%d", job.WorkflowJobID),
+					"jobs",
+					fmt.Sprintf("%d", job.ID),
+				)
+
+				// Re-extract using package extractor for proper file placement
+				extractor := utils.NewTransferPackageExtractor(dsw.logger)
+				if err := extractor.ExtractAndPlace(transfer.TargetPath, baseDir); err != nil {
+					dsw.logger.Warn(fmt.Sprintf("Failed to re-extract as transfer package: %v", err), "data_worker")
+					// Continue with standard extraction results
+				} else {
+					// Clean up the original extraction directory contents
+					// since we've re-extracted properly
+					dsw.logger.Info(fmt.Sprintf("Transfer package re-extraction successful to %s", baseDir), "data_worker")
+				}
+			}
+		}
+
+		// Remove the compressed archive after successful extraction
+		if err := os.Remove(transfer.TargetPath); err != nil {
+			dsw.logger.Warn(fmt.Sprintf("Failed to remove compressed archive for transfer %s: %v", transferID, err), "data_worker")
+		}
+
+		dsw.logger.Info(fmt.Sprintf("Transfer %s decompressed successfully to %s", transferID, extractDir), "data_worker")
+	}
 
 	// Clear passphrase from memory immediately after use
 	if transfer.Passphrase != "" {
@@ -1320,62 +1418,73 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 		return fmt.Errorf("failed to get job execution: %v", err)
 	}
 
-	// Determine the destination job ID
-	// If peer.PeerJobID is set, we're transferring to a different job (the receiver)
-	// Otherwise, we're transferring to the same job (rare case)
-	destJobID := job.ID
-	if peer.PeerJobID != nil && *peer.PeerJobID != 0 {
-		destJobID = *peer.PeerJobID
-		dsw.logger.Info(fmt.Sprintf("Transferring to receiver job %d (sender job %d)", destJobID, job.ID), "data_worker")
-	}
-
-	// Construct hierarchical path: workflows/{ordering_peer_id}/{workflow_job_id}/jobs/{dest_job_id}/{destDir}
-	// This follows the libp2p distributed P2P pattern for clear file organization
-	//
-	// Path conventions for destination directories:
-	// - STDIN interface: peer.PeerPath = "input/" -> jobs/<id>/input/
-	// - MOUNT interface: peer.PeerPath = "/app" or "/" -> jobs/<id>/mounts/<basename>/
-	//
-	// For MOUNT interfaces, we need to add the "mounts/" prefix and use the basename of the mount path
 	appPaths := utils.GetAppPaths("remote-network")
+	var hierarchicalPath string
 
-	// Determine the destination directory based on the path type
-	var destDir string
-	peerPath := peer.PeerPath
-
-	if peerPath == "" || strings.HasPrefix(peerPath, "input") {
-		// STDIN interface or empty path: use input/ directory
-		destDir = "input"
-	} else if strings.HasPrefix(peerPath, "output") {
-		// Output directory
-		destDir = peerPath
+	// Check if this is a transfer to the requester (no receiving job) or to another job
+	if peer.PeerJobID == nil || *peer.PeerJobID == 0 {
+		// Transfer to workflow output (for the requester/user)
+		// Path: workflows/{ordering_peer}/{workflow_job_id}/output/
+		hierarchicalPath = filepath.Join(
+			appPaths.DataDir,
+			"workflows",
+			job.OrderingPeerID,
+			fmt.Sprintf("%d", job.WorkflowJobID),
+			"output",
+		)
+		dsw.logger.Info(fmt.Sprintf("Transferring to workflow output (requester) at %s", hierarchicalPath), "data_worker")
 	} else {
-		// MOUNT interface: path is a mount path like "/" or "/app" or "/asdasdf/fsddf"
-		// Convert to mounts/<full_path>/ structure (strip leading "/" only)
-		// Examples:
-		//   "/" -> "mounts/"
-		//   "/app" -> "mounts/app/"
-		//   "/asdasdf/fsddf" -> "mounts/asdasdf/fsddf/"
-		mountPath := strings.TrimPrefix(peerPath, "/")
-		if mountPath == "" {
-			// For root mount "/", use "mounts" directly
-			destDir = "mounts"
-		} else {
-			// For named mounts like "/app" or "/asdasdf/fsddf", preserve full path
-			destDir = filepath.Join("mounts", mountPath)
-		}
-		dsw.logger.Info(fmt.Sprintf("MOUNT interface detected: path '%s' -> destDir '%s'", peerPath, destDir), "data_worker")
-	}
+		// Transfer to another job's input
+		destJobID := *peer.PeerJobID
+		dsw.logger.Info(fmt.Sprintf("Transferring to receiver job %d (sender job %d)", destJobID, job.ID), "data_worker")
 
-	hierarchicalPath := filepath.Join(
-		appPaths.DataDir,
-		"workflows",
-		job.OrderingPeerID, // Full peer ID to prevent collisions
-		fmt.Sprintf("%d", job.WorkflowJobID),
-		"jobs",
-		fmt.Sprintf("%d", destJobID), // Use destination job ID, not sender's
-		destDir,
-	)
+		// Construct hierarchical path: workflows/{ordering_peer_id}/{workflow_job_id}/jobs/{dest_job_id}/{destDir}
+		// This follows the libp2p distributed P2P pattern for clear file organization
+		//
+		// Path conventions for destination directories:
+		// - STDIN interface: peer.PeerPath = "input/" -> jobs/<id>/input/
+		// - MOUNT interface: peer.PeerPath = "/app" or "/" -> jobs/<id>/mounts/<basename>/
+		//
+		// For MOUNT interfaces, we need to add the "mounts/" prefix and use the basename of the mount path
+
+		// Determine the destination directory based on the path type
+		var destDir string
+		peerPath := peer.PeerPath
+
+		if peerPath == "" || strings.HasPrefix(peerPath, "input") {
+			// STDIN interface or empty path: use input/ directory
+			destDir = "input"
+		} else if strings.HasPrefix(peerPath, "output") {
+			// Output directory
+			destDir = peerPath
+		} else {
+			// MOUNT interface: path is a mount path like "/" or "/app" or "/asdasdf/fsddf"
+			// Convert to mounts/<full_path>/ structure (strip leading "/" only)
+			// Examples:
+			//   "/" -> "mounts/"
+			//   "/app" -> "mounts/app/"
+			//   "/asdasdf/fsddf" -> "mounts/asdasdf/fsddf/"
+			mountPath := strings.TrimPrefix(peerPath, "/")
+			if mountPath == "" {
+				// For root mount "/", use "mounts" directly
+				destDir = "mounts"
+			} else {
+				// For named mounts like "/app" or "/asdasdf/fsddf", preserve full path
+				destDir = filepath.Join("mounts", mountPath)
+			}
+			dsw.logger.Info(fmt.Sprintf("MOUNT interface detected: path '%s' -> destDir '%s'", peerPath, destDir), "data_worker")
+		}
+
+		hierarchicalPath = filepath.Join(
+			appPaths.DataDir,
+			"workflows",
+			job.OrderingPeerID, // Full peer ID to prevent collisions
+			fmt.Sprintf("%d", job.WorkflowJobID),
+			"jobs",
+			fmt.Sprintf("%d", destJobID), // Use destination job ID, not sender's
+			destDir,
+		)
+	}
 
 	// Add trailing separator to indicate directory
 	hierarchicalPath += string(os.PathSeparator)
@@ -1390,16 +1499,18 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 	if isDir {
 		// hierarchicalPath is the extraction directory (e.g., input/)
 		extractDir = hierarchicalPath
-		if err := os.MkdirAll(extractDir, 0755); err != nil {
+		if err := os.MkdirAll(extractDir, 0777); err != nil {
 			return fmt.Errorf("failed to create destination directory: %v", err)
 		}
+		os.Chmod(extractDir, 0777)
 		dsw.logger.Info(fmt.Sprintf("Extracting to directory: %s", extractDir), "data_worker")
 	} else {
 		// hierarchicalPath is a file path - extract to parent directory
 		extractDir = filepath.Dir(hierarchicalPath)
-		if err := os.MkdirAll(extractDir, 0755); err != nil {
+		if err := os.MkdirAll(extractDir, 0777); err != nil {
 			return fmt.Errorf("failed to create parent directory: %v", err)
 		}
+		os.Chmod(extractDir, 0777)
 		dsw.logger.Info(fmt.Sprintf("Extracting to parent directory: %s", extractDir), "data_worker")
 	}
 

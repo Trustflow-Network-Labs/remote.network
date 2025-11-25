@@ -695,13 +695,10 @@ func (wm *WorkflowManager) validateDataTransferConstraints(jobs []*types.Workflo
 	}
 
 	for _, job := range jobs {
-		service, err := wm.db.GetService(job.ServiceID)
-		if err != nil || service == nil {
-			continue // Already validated in validateWorkflow
-		}
-
 		// Only check DATA services
-		if service.ServiceType != types.ServiceTypeData {
+		// Note: Use job.ServiceType directly - ServiceID refers to remote peer's local service ID
+		// and cannot be looked up in orchestrator's local database
+		if job.ServiceType != types.ServiceTypeData {
 			continue
 		}
 
@@ -747,18 +744,15 @@ func (wm *WorkflowManager) validateDataTransferConstraints(jobs []*types.Workflo
 				}
 
 				// Verify destination job is a computation job (DOCKER or STANDALONE)
-				destService, err := wm.db.GetService(destJob.ServiceID)
-				if err != nil || destService == nil {
-					return fmt.Errorf("DATA job '%s': destination service not found for job '%s'", job.JobName, destJob.JobName)
-				}
-
-				if destService.ServiceType != types.ServiceTypeDocker && destService.ServiceType != types.ServiceTypeStandalone {
+				// Note: Use destJob.ServiceType directly - ServiceID refers to remote peer's local service ID
+				// and cannot be looked up in orchestrator's local database
+				if destJob.ServiceType != types.ServiceTypeDocker && destJob.ServiceType != types.ServiceTypeStandalone {
 					return fmt.Errorf("DATA job '%s' cannot transfer to peer %s: destination job '%s' is %s, not DOCKER or STANDALONE (data can only be input for computation, not peer-to-peer download)",
-						job.JobName, destPeerID[:8], destJob.JobName, destService.ServiceType)
+						job.JobName, destPeerID[:8], destJob.JobName, destJob.ServiceType)
 				}
 
 				wm.logger.Debug(fmt.Sprintf("DATA job '%s' transfers to job '%s' (%s) as input: OK",
-					job.JobName, destJob.JobName, destService.ServiceType), "workflow_manager")
+					job.JobName, destJob.JobName, destJob.ServiceType), "workflow_manager")
 			}
 		}
 	}
@@ -767,23 +761,34 @@ func (wm *WorkflowManager) validateDataTransferConstraints(jobs []*types.Workflo
 	return nil
 }
 
-// findJobByPeerAndInputPath finds a job that runs on given peer and has given path as STDIN input
+// findJobByPeerAndInputPath finds a job that runs on given peer and has given path as input (STDIN or MOUNT)
 func (wm *WorkflowManager) findJobByPeerAndInputPath(jobs []*types.WorkflowJob, peerID string, inputPath string) *types.WorkflowJob {
 	for _, job := range jobs {
 		if job.ExecutorPeerID != peerID {
 			continue
 		}
 
-		// Check if this job has the path as STDIN input
+		// Check if this job has the path as input (STDIN or MOUNT interface)
 		for _, iface := range job.Interfaces {
-			if iface.Type != types.InterfaceTypeStdin {
+			// Check both STDIN and MOUNT interfaces for input
+			if iface.Type != types.InterfaceTypeStdin && iface.Type != types.InterfaceTypeMount {
 				continue
 			}
 
-			// Check if this interface has the matching path
+			// Check if this interface has the matching path as input
 			for _, peer := range iface.InterfacePeers {
 				if peer.PeerPath == inputPath && (peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth) {
 					return job
+				}
+			}
+
+			// For MOUNT interfaces, also check if the interface path matches (the receiving side)
+			if iface.Type == types.InterfaceTypeMount && iface.Path == inputPath {
+				// Check if any peer is providing input to this mount
+				for _, peer := range iface.InterfacePeers {
+					if peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth {
+						return job
+					}
 				}
 			}
 		}
@@ -926,11 +931,20 @@ func (wm *WorkflowManager) requestJobStatus(execution *WorkflowExecution, jobNam
 		return
 	}
 
+	// Refresh job from database to get latest RemoteJobExecutionID
+	// (it may have been updated after the in-memory cache was created)
+	freshJob, err := wm.db.GetJobExecution(jobExec.ID)
+	if err != nil || freshJob == nil {
+		wm.logger.Warn(fmt.Sprintf("Failed to refresh job %d from database: %v", jobExec.ID, err), "workflow_manager")
+		// Fall back to cached data
+		freshJob = jobExec
+	}
+
 	// Request status from executor peer
 	// Use remote_job_execution_id if this is a remote job
-	jobIDToQuery := jobExec.ID
-	if jobExec.RemoteJobExecutionID != nil {
-		jobIDToQuery = *jobExec.RemoteJobExecutionID
+	jobIDToQuery := freshJob.ID
+	if freshJob.RemoteJobExecutionID != nil {
+		jobIDToQuery = *freshJob.RemoteJobExecutionID
 	}
 
 	request := &types.JobStatusRequest{

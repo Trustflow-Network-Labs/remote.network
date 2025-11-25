@@ -315,26 +315,17 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 			Interfaces: []InterfaceDef{},
 		}
 
-		// Get entrypoint and commands from docker_service_details if this is a DOCKER service
+		// Get entrypoint and commands from WorkflowNode (populated from remote service search)
+		// NOTE: Do NOT read from local docker_service_details - service IDs are local to each peer.
+		// The entrypoint/cmd should come from the remote peer's service via search results.
 		if node.ServiceType == "DOCKER" {
-			dockerDetails, err := sm.GetDockerServiceDetails(node.ServiceID)
-			if err == nil && dockerDetails != nil {
-				// Parse entrypoint from JSON
-				if dockerDetails.Entrypoint != "" {
-					var entrypoint []string
-					if err := json.Unmarshal([]byte(dockerDetails.Entrypoint), &entrypoint); err == nil {
-						job.Entrypoint = entrypoint
-						sm.logger.Debug(fmt.Sprintf("  Setting entrypoint: %v", entrypoint), "database")
-					}
-				}
-				// Parse cmd from JSON
-				if dockerDetails.Cmd != "" {
-					var commands []string
-					if err := json.Unmarshal([]byte(dockerDetails.Cmd), &commands); err == nil {
-						job.Commands = commands
-						sm.logger.Debug(fmt.Sprintf("  Setting commands: %v", commands), "database")
-					}
-				}
+			if len(node.Entrypoint) > 0 {
+				job.Entrypoint = node.Entrypoint
+				sm.logger.Debug(fmt.Sprintf("  Setting entrypoint from node: %v", node.Entrypoint), "database")
+			}
+			if len(node.Cmd) > 0 {
+				job.Commands = node.Cmd
+				sm.logger.Debug(fmt.Sprintf("  Setting commands from node: %v", node.Cmd), "database")
 			}
 		}
 

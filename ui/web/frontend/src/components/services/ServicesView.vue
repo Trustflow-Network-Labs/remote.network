@@ -316,8 +316,8 @@ const { t } = useI18n()
 const confirm = useConfirm()
 const toast = useToast()
 
-const servicesStore = useServicesStore()
-const peersStore = usePeersStore()
+const servicesStore = useServicesStore() as any // TODO: Fix Pinia typing
+const peersStore = usePeersStore() as any // TODO: Fix Pinia typing
 const { copyToClipboard } = useClipboard()
 const { shorten } = useTextUtils()
 
@@ -335,7 +335,7 @@ const serviceTypeOptions = computed(() => [
 
 // Peer options for MultiSelect
 const peerOptions = computed(() => {
-  return peersStore.peers.map(peer => ({
+  return peersStore.peers.map((peer: any) => ({
     label: `${shorten(peer.peer_id, 6, 6)} ${peer.is_relay ? '(Relay)' : ''}`,
     value: peer.peer_id
   }))
@@ -572,6 +572,9 @@ function onRowClick(event: any) {
 }
 
 onMounted(async () => {
+  // Clear remote services to ensure fresh search results (avoid stale/outdated data)
+  servicesStore.clearRemoteServices()
+
   // Only fetch local services if not viewing peer-specific services
   if (!isPeerView.value) {
     await servicesStore.fetchServices()

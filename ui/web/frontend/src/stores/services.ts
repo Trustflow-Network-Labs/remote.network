@@ -39,6 +39,8 @@ export interface Service {
   pricing_interval?: number
   pricing_unit?: PricingUnit
   interfaces?: ServiceInterface[]  // Service interfaces defining allowed inputs/outputs
+  entrypoint?: string[]  // For DOCKER services - container entrypoint
+  cmd?: string[]         // For DOCKER services - container cmd
   created_at?: string
   updated_at?: string
 }
@@ -229,6 +231,13 @@ export const useServicesStore = defineStore('services', {
       } finally {
         this.remoteLoading = false
       }
+    },
+
+    // Clear remote services results (call when entering views to ensure fresh search)
+    clearRemoteServices() {
+      this.remoteServices = []
+      this.remoteLoading = false
+      this.error = null
     },
 
     // Initialize WebSocket subscription

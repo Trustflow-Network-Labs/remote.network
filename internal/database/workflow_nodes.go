@@ -21,6 +21,8 @@ type WorkflowNode struct {
 	InputMapping    map[string]interface{} `json:"input_mapping,omitempty"`  // Input connections
 	OutputMapping   map[string]interface{} `json:"output_mapping,omitempty"` // Output connections
 	Interfaces      []interface{}          `json:"interfaces,omitempty"`     // Service interfaces from remote service search
+	Entrypoint      []string               `json:"entrypoint,omitempty"`     // Docker entrypoint from remote service (for DOCKER services)
+	Cmd             []string               `json:"cmd,omitempty"`            // Docker cmd from remote service (for DOCKER services)
 	PricingAmount   float64                `json:"pricing_amount,omitempty"`
 	PricingType     string                 `json:"pricing_type,omitempty"`     // "ONE_TIME", "RECURRING"
 	PricingInterval int                    `json:"pricing_interval,omitempty"` // number of units
@@ -70,6 +72,8 @@ func (sm *SQLiteManager) InitWorkflowNodesTable() error {
 		input_mapping TEXT,
 		output_mapping TEXT,
 		interfaces TEXT,
+		entrypoint TEXT,
+		cmd TEXT,
 		pricing_amount REAL DEFAULT 0.0,
 		pricing_type TEXT,
 		pricing_interval INTEGER DEFAULT 1,
@@ -120,8 +124,62 @@ func (sm *SQLiteManager) InitWorkflowNodesTable() error {
 		return err
 	}
 
+	// Migration: Add entrypoint and cmd columns to existing workflow_nodes tables
+	migrations := []string{
+		`ALTER TABLE workflow_nodes ADD COLUMN entrypoint TEXT`,
+		`ALTER TABLE workflow_nodes ADD COLUMN cmd TEXT`,
+	}
+
+	for _, migration := range migrations {
+		_, err := sm.db.Exec(migration)
+		if err != nil {
+			// Ignore "duplicate column" errors - column already exists
+			if !isDuplicateColumnError(err) {
+				sm.logger.Warn(fmt.Sprintf("Migration warning (non-fatal): %v", err), "database")
+			}
+		}
+	}
+
 	sm.logger.Info("Workflow nodes tables initialized successfully", "database")
 	return nil
+}
+
+// isDuplicateColumnError checks if the error is a duplicate column error
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return len(errStr) > 0 && (contains(errStr, "duplicate column") || contains(errStr, "already exists"))
+}
+
+// contains checks if a string contains a substring (case-insensitive)
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		match := true
+		for j := 0; j < len(substr); j++ {
+			c1, c2 := s[i+j], substr[j]
+			// Case-insensitive comparison
+			if c1 >= 'A' && c1 <= 'Z' {
+				c1 += 32
+			}
+			if c2 >= 'A' && c2 <= 'Z' {
+				c2 += 32
+			}
+			if c1 != c2 {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // AddWorkflowNode adds a new node to a workflow
@@ -153,10 +211,19 @@ func (sm *SQLiteManager) AddWorkflowNode(node *WorkflowNode) error {
 		}
 	}
 
+	// Marshal entrypoint and cmd as JSON arrays
+	var entrypointJSON, cmdJSON []byte
+	if node.Entrypoint != nil {
+		entrypointJSON, _ = json.Marshal(node.Entrypoint)
+	}
+	if node.Cmd != nil {
+		cmdJSON, _ = json.Marshal(node.Cmd)
+	}
+
 	result, err := sm.db.Exec(`
-		INSERT INTO workflow_nodes (workflow_id, service_id, peer_id, service_name, service_type, "order", gui_x, gui_y, input_mapping, output_mapping, interfaces, pricing_amount, pricing_type, pricing_interval, pricing_unit)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, node.WorkflowID, node.ServiceID, node.PeerID, node.ServiceName, node.ServiceType, node.Order, node.GUIX, node.GUIY, inputMappingJSON, outputMappingJSON, interfacesJSON, node.PricingAmount, node.PricingType, node.PricingInterval, node.PricingUnit)
+		INSERT INTO workflow_nodes (workflow_id, service_id, peer_id, service_name, service_type, "order", gui_x, gui_y, input_mapping, output_mapping, interfaces, entrypoint, cmd, pricing_amount, pricing_type, pricing_interval, pricing_unit)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, node.WorkflowID, node.ServiceID, node.PeerID, node.ServiceName, node.ServiceType, node.Order, node.GUIX, node.GUIY, inputMappingJSON, outputMappingJSON, interfacesJSON, entrypointJSON, cmdJSON, node.PricingAmount, node.PricingType, node.PricingInterval, node.PricingUnit)
 
 	if err != nil {
 		return fmt.Errorf("failed to add workflow node: %v", err)
@@ -178,7 +245,7 @@ func (sm *SQLiteManager) AddWorkflowNode(node *WorkflowNode) error {
 func (sm *SQLiteManager) GetWorkflowNodes(workflowID int64) ([]*WorkflowNode, error) {
 	rows, err := sm.db.Query(`
 		SELECT id, workflow_id, service_id, peer_id, service_name, service_type, "order", gui_x, gui_y,
-		       input_mapping, output_mapping, interfaces, pricing_amount, pricing_type, pricing_interval, pricing_unit, created_at, updated_at
+		       input_mapping, output_mapping, interfaces, entrypoint, cmd, pricing_amount, pricing_type, pricing_interval, pricing_unit, created_at, updated_at
 		FROM workflow_nodes
 		WHERE workflow_id = ?
 		ORDER BY "order" ASC
@@ -192,14 +259,14 @@ func (sm *SQLiteManager) GetWorkflowNodes(workflowID int64) ([]*WorkflowNode, er
 	var nodes []*WorkflowNode
 	for rows.Next() {
 		node := &WorkflowNode{}
-		var inputMappingStr, outputMappingStr, interfacesStr sql.NullString
+		var inputMappingStr, outputMappingStr, interfacesStr, entrypointStr, cmdStr sql.NullString
 		var pricingType, pricingUnit sql.NullString
 		var pricingInterval sql.NullInt64
 
 		err := rows.Scan(
 			&node.ID, &node.WorkflowID, &node.ServiceID, &node.PeerID, &node.ServiceName,
 			&node.ServiceType, &node.Order, &node.GUIX, &node.GUIY,
-			&inputMappingStr, &outputMappingStr, &interfacesStr, &node.PricingAmount, &pricingType, &pricingInterval, &pricingUnit,
+			&inputMappingStr, &outputMappingStr, &interfacesStr, &entrypointStr, &cmdStr, &node.PricingAmount, &pricingType, &pricingInterval, &pricingUnit,
 			&node.CreatedAt, &node.UpdatedAt,
 		)
 		if err != nil {
@@ -223,6 +290,18 @@ func (sm *SQLiteManager) GetWorkflowNodes(workflowID int64) ([]*WorkflowNode, er
 			}
 		} else {
 			node.Interfaces = make([]interface{}, 0)
+		}
+
+		// Parse entrypoint and cmd JSON arrays
+		if entrypointStr.Valid {
+			if err := json.Unmarshal([]byte(entrypointStr.String), &node.Entrypoint); err != nil {
+				node.Entrypoint = nil
+			}
+		}
+		if cmdStr.Valid {
+			if err := json.Unmarshal([]byte(cmdStr.String), &node.Cmd); err != nil {
+				node.Cmd = nil
+			}
 		}
 
 		// Handle nullable pricing fields
