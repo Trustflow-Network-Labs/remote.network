@@ -1,0 +1,157 @@
+ Correct Architecture
+
+ Two Database Tables:
+ 1. workflow_jobs (orchestrator only): workflow_job_id=27, stores remote job_execution_id=12
+ 2. job_executions (executor only): job_execution_id=12, stores workflow_job_id=27
+
+ File Paths:
+ /workflows/<orchestrator_peer_id>/<workflow_job_id=27>/jobs/<executor_peer_id>/<job_execution_id=12>/<receiver_peer_id>/<receiver_job_execution_id>/...
+
+ Job Execution Flow:
+ 1. Orchestrator sends START signal to all job executor peers (no transfer coordination)
+ 2. Each executor checks input constraints and waits if inputs not ready
+ 3. When job completes, executor initiates output transfers to next jobs
+ 4. Receiving executor detects transfer completion and starts downstream job
+
+ ---
+ Implementation Plan
+
+ Phase 1: Fix Database Schema & ID Exchange
+
+ 1.1 Add Missing Field to workflow_jobs Table
+ - Add remote_job_execution_id INTEGER to workflow_jobs schema
+ - This stores the executor's job_execution_id (12 in example)
+ - Update CreateWorkflowJob and related queries
+
+ 1.2 Verify job_executions Schema
+ - Confirm workflow_job_id field exists (for storing orchestrator's workflow_job_id=27)
+ - Confirm remote_job_execution_id field exists (for orchestrator to store executor's ID)
+ - Both should already exist based on code review
+
+ 1.3 Fix ID Exchange in Remote Job Submission
+ - sendJobToRemotePeer(): Send workflow_job_id=27 in request
+ - Executor's HandleJobRequest(): Create job_execution, get ID=12, return to orchestrator
+ - Orchestrator stores: workflow_jobs.remote_job_execution_id = 12
+ - Executor stores: job_executions.workflow_job_id = 27
+
+ ---
+ Phase 2: Fix Path Construction
+
+ 2.1 Standardize Path Building Functions
+ - Create utility: BuildJobPath(orchestratorPeerID, workflowJobID, executorPeerID, jobExecutionID)
+ - Returns: /workflows/<orchestratorPeerID>/<workflowJobID>/jobs/<executorPeerID>/<jobExecutionID>
+
+ 2.2 Update Data Transfer Path Construction
+ - When sending data from Job A to Job B, lookup:
+   - Source: workflow_job_id_A, job_execution_id_A
+   - Destination: workflow_job_id_B, job_execution_id_B
+ - Build source path: .../jobs/<executor_A>/<job_exec_id_A>/output/...
+ - Build dest path: .../jobs/<executor_B>/<job_exec_id_B>/input/...
+
+ 2.3 Handle "Local Peer" Special Case
+ - When receiver is "Local Peer": use receiver_job_execution_id = 0
+ - Path: .../jobs/<orchestrator_peer_id>/<job_execution_id=0>/input/...
+
+ ---
+ Phase 3: Fix Interface Connection Routing
+
+ 3.1 Update interface_peers Table Usage
+ - Currently stores: PeerID, PeerJobID (unclear which ID)
+ - Should store: PeerID, WorkflowJobID, JobExecutionID (both IDs)
+ - When creating interfaces, populate both IDs from proper sources
+
+ 3.2 Fix Data Transfer Destination Lookup
+ - In transferDataToPeer(): lookup destination by interface connection
+ - Get both workflow_job_id AND job_execution_id for destination
+ - Use job_execution_id for path construction
+ - Use workflow_job_id for transfer request routing/validation
+
+ 3.3 Handle Local vs Remote Executors
+ - Local executor (same peer as orchestrator): Use local job_execution_id from database
+ - Remote executor: Use remote_job_execution_id stored in workflow_jobs table
+
+ ---
+ Phase 4: Fix Input Dependency Waiting
+
+ 4.1 Input Readiness Check Enhancement
+ - checkInputsReady(): Check if job has input interface connections defined
+ - For each input interface:
+   - Query interface_peers to find source jobs
+   - Check if source job has completed (query job status)
+   - Check if transfer exists and is complete (pending_transfers table)
+   - Check if files exist on filesystem at expected path
+ - Only return ready=true when ALL inputs satisfied
+
+ 4.2 Add Transfer Tracking
+ - When transfer is initiated, create pending_transfer record
+ - Include: source_job_execution_id, dest_job_execution_id, interface_type, status
+ - Update status as: initiated → transferring → decrypting → complete
+ - Use this to determine if inputs are "in flight" vs "not yet started"
+
+ 4.3 Periodic Input Checker
+ - startInputReadinessChecker(): Already exists, runs every 5 seconds
+ - Enhance to properly wait for:
+   - Transfers not yet initiated (source job not complete)
+   - Transfers in progress (pending_transfers status)
+   - Transfers complete but decrypting/decompressing
+
+ ---
+ Phase 5: Fix Workflow Start Signal & Job Execution
+
+ 5.1 Orchestrator StartWorkflow Changes
+ - Create all workflow_jobs (auto-increment IDs)
+ - For LOCAL jobs: Create job_executions, mark PENDING
+ - For REMOTE jobs: Send job creation request to executor peer
+ - Store returned remote_job_execution_id in workflow_jobs table
+ - Send START signal to all executor peers
+ - Do NOT coordinate transfers, let executors handle it
+
+ 5.2 Executor Job Handling
+ - On receiving job creation request: Create job_execution, return ID to orchestrator
+ - On receiving START signal: Check execution constraints
+   - No inputs needed → Set to READY immediately
+   - Has inputs → Keep as PENDING, wait for checkInputsReady
+ - Job queue processor picks up READY jobs and executes
+
+ 5.3 Post-Execution Output Transfer
+ - When job completes successfully, query output interfaces
+ - For each output interface: Get destination job info (workflow_job_id, job_execution_id, peer_id)
+ - Initiate transfer using proper path construction
+ - Transfer completion triggers destination executor's input readiness check
+
+ ---
+ Key Files to Modify
+
+ 1. database/workflows.go - Add remote_job_execution_id to workflow_jobs schema
+ 2. database/job_executions.go - Verify schema, add queries for ID lookups
+ 3. database/interface_peers.go - Store both workflow_job_id and job_execution_id
+ 4. core/workflow_manager.go - Fix ID exchange, START signal flow
+ 5. core/job_manager.go - Fix path construction, input checking, remote job handling
+ 6. workers/data_worker.go - Fix transfer routing with correct IDs
+ 7. p2p/service_query_handler.go - Fix remote job creation response
+ 8. utils/ - Add path construction utilities
+
+ ---
+ Testing Verification
+
+ Test Scenario: Job #26 (DATA) on Peer A → Job #27 (DOCKER) on Peer B
+
+ Expected IDs:
+ - Orchestrator: workflow_job #26 (remote_job_exec_id=5), workflow_job #27 (remote_job_exec_id=12)
+ - Peer A: job_execution #5 (workflow_job_id=26)
+ - Peer B: job_execution #12 (workflow_job_id=27)
+
+ Expected Paths:
+ - Job #26 output: /workflows/<orch_peer>/<wf_job_26>/jobs/<peer_A>/<job_exec_5>/output/
+ - Job #27 input: /workflows/<orch_peer>/<wf_job_27>/jobs/<peer_B>/<job_exec_12>/input/
+
+ Expected Flow:
+ 1. Orchestrator creates workflow_jobs #26, #27
+ 2. Sends job to Peer A, gets job_execution_id=5, stores it
+ 3. Sends job to Peer B, gets job_execution_id=12, stores it
+ 4. Sends START signal to both peers
+ 5. Peer A executes Job #26 (no inputs), completes, transfers to Peer B
+ 6. Peer B waits (Job #27 has input constraint)
+ 7. Transfer arrives at Peer B, decrypts/decompresses
+ 8. Peer B detects input ready, executes Job #27
+ 9. Job #27 finds "Masdar Journal.pdf" in mount path, processes successfully

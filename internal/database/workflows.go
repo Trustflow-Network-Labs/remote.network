@@ -20,13 +20,14 @@ type Workflow struct {
 
 // WorkflowJob represents an execution instance of a workflow
 type WorkflowJob struct {
-	ID         int64                  `json:"id"`
-	WorkflowID int64                  `json:"workflow_id"`
-	Status     string                 `json:"status"` // "pending", "running", "completed", "failed"
-	Result     map[string]interface{} `json:"result,omitempty"`
-	Error      string                 `json:"error,omitempty"`
-	CreatedAt  time.Time              `json:"created_at"`
-	UpdatedAt  time.Time              `json:"updated_at"`
+	ID                    int64                  `json:"id"`
+	WorkflowID            int64                  `json:"workflow_id"`
+	RemoteJobExecutionID  *int64                 `json:"remote_job_execution_id,omitempty"` // ID from executor peer's job_executions table
+	Status                string                 `json:"status"` // "pending", "running", "completed", "failed"
+	Result                map[string]interface{} `json:"result,omitempty"`
+	Error                 string                 `json:"error,omitempty"`
+	CreatedAt             time.Time              `json:"created_at"`
+	UpdatedAt             time.Time              `json:"updated_at"`
 }
 
 // InitWorkflowsTable creates the workflows table if it doesn't exist
@@ -44,6 +45,7 @@ func (sm *SQLiteManager) InitWorkflowsTable() error {
 	CREATE TABLE IF NOT EXISTS workflow_jobs (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		workflow_id INTEGER NOT NULL,
+		remote_job_execution_id INTEGER,
 		status TEXT NOT NULL,
 		result TEXT,
 		error TEXT,
@@ -576,7 +578,7 @@ func (sm *SQLiteManager) UpdateWorkflowJobStatus(jobID int64, status string, res
 // GetWorkflowJobs retrieves all jobs for a specific workflow
 func (sm *SQLiteManager) GetWorkflowJobs(workflowID int64) ([]*WorkflowJob, error) {
 	rows, err := sm.db.Query(
-		"SELECT id, workflow_id, status, result, error, created_at, updated_at FROM workflow_jobs WHERE workflow_id = ? ORDER BY created_at DESC",
+		"SELECT id, workflow_id, remote_job_execution_id, status, result, error, created_at, updated_at FROM workflow_jobs WHERE workflow_id = ? ORDER BY created_at DESC",
 		workflowID,
 	)
 	if err != nil {
@@ -588,12 +590,14 @@ func (sm *SQLiteManager) GetWorkflowJobs(workflowID int64) ([]*WorkflowJob, erro
 	var jobs []*WorkflowJob
 	for rows.Next() {
 		var job WorkflowJob
+		var remoteJobExecID sql.NullInt64
 		var resultJSON sql.NullString
 		var errorMsg sql.NullString
 
 		err := rows.Scan(
 			&job.ID,
 			&job.WorkflowID,
+			&remoteJobExecID,
 			&job.Status,
 			&resultJSON,
 			&errorMsg,
@@ -603,6 +607,11 @@ func (sm *SQLiteManager) GetWorkflowJobs(workflowID int64) ([]*WorkflowJob, erro
 		if err != nil {
 			sm.logger.Error(fmt.Sprintf("Failed to scan workflow job: %v", err), "database")
 			continue
+		}
+
+		// Set remote job execution ID if valid
+		if remoteJobExecID.Valid {
+			job.RemoteJobExecutionID = &remoteJobExecID.Int64
 		}
 
 		// Parse result JSON
@@ -625,19 +634,25 @@ func (sm *SQLiteManager) GetWorkflowJobs(workflowID int64) ([]*WorkflowJob, erro
 // GetWorkflowJobByID retrieves a workflow job by its ID
 func (sm *SQLiteManager) GetWorkflowJobByID(id int64) (*WorkflowJob, error) {
 	var job WorkflowJob
+	var remoteJobExecID sql.NullInt64
 	var resultStr, errorStr sql.NullString
 
 	err := sm.db.QueryRow(`
-		SELECT id, workflow_id, status, result, error, created_at, updated_at
+		SELECT id, workflow_id, remote_job_execution_id, status, result, error, created_at, updated_at
 		FROM workflow_jobs
 		WHERE id = ?
 	`, id).Scan(
-		&job.ID, &job.WorkflowID, &job.Status,
+		&job.ID, &job.WorkflowID, &remoteJobExecID, &job.Status,
 		&resultStr, &errorStr, &job.CreatedAt, &job.UpdatedAt,
 	)
 
 	if err != nil {
 		return nil, err
+	}
+
+	// Set remote job execution ID if valid
+	if remoteJobExecID.Valid {
+		job.RemoteJobExecutionID = &remoteJobExecID.Int64
 	}
 
 	// Parse JSON result if present
@@ -652,4 +667,21 @@ func (sm *SQLiteManager) GetWorkflowJobByID(id int64) (*WorkflowJob, error) {
 	}
 
 	return &job, nil
+}
+
+// UpdateWorkflowJobRemoteExecutionID updates the remote job execution ID for a workflow job
+// This is called when the orchestrator receives the job_execution_id from the remote executor peer
+func (sm *SQLiteManager) UpdateWorkflowJobRemoteExecutionID(workflowJobID int64, remoteJobExecutionID int64) error {
+	_, err := sm.db.Exec(
+		"UPDATE workflow_jobs SET remote_job_execution_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+		remoteJobExecutionID,
+		workflowJobID,
+	)
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to update workflow job remote execution ID: %v", err), "database")
+		return err
+	}
+
+	sm.logger.Info(fmt.Sprintf("Workflow job remote execution ID updated: workflow_job_id=%d, remote_job_execution_id=%d", workflowJobID, remoteJobExecutionID), "database")
+	return nil
 }
