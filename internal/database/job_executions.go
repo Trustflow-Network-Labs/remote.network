@@ -38,14 +38,15 @@ type JobInterface struct {
 
 // JobInterfacePeer represents a peer connection for a job interface
 type JobInterfacePeer struct {
-	ID                 int64     `json:"id"`
-	JobInterfaceID     int64     `json:"job_interface_id"`
-	PeerNodeID         string    `json:"peer_node_id"`    // Ed25519 peer ID
-	PeerJobID          *int64    `json:"peer_job_id"`     // Connected job ID (nullable)
-	PeerPath           string    `json:"peer_path"`
-	PeerMountFunction  string    `json:"peer_mount_function"` // INPUT, OUTPUT, BOTH
-	DutyAcknowledged   bool      `json:"duty_acknowledged"`
-	CreatedAt          time.Time `json:"created_at"`
+	ID                   int64     `json:"id"`
+	JobInterfaceID       int64     `json:"job_interface_id"`
+	PeerID               string    `json:"peer_id"`                // Peer ID (libp2p peer identifier)
+	PeerWorkflowJobID    *int64    `json:"peer_workflow_job_id"`   // Orchestrator's workflow_job_id
+	PeerJobExecutionID   *int64    `json:"peer_job_execution_id"`  // Executor's job_execution_id (for path construction)
+	PeerPath             string    `json:"peer_path"`
+	PeerMountFunction    string    `json:"peer_mount_function"` // INPUT, OUTPUT, BOTH
+	DutyAcknowledged     bool      `json:"duty_acknowledged"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 // InitJobExecutionsTable creates the job execution tables
@@ -98,8 +99,9 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 	CREATE TABLE IF NOT EXISTS job_interface_peers (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		job_interface_id INTEGER NOT NULL,
-		peer_node_id TEXT NOT NULL,
-		peer_job_id INTEGER,
+		peer_id TEXT NOT NULL,
+		peer_workflow_job_id INTEGER,
+		peer_job_execution_id INTEGER,
 		peer_path TEXT NOT NULL,
 		peer_mount_function TEXT CHECK(peer_mount_function IN ('INPUT', 'OUTPUT', 'BOTH')) NOT NULL,
 		duty_acknowledged BOOLEAN DEFAULT 0,
@@ -108,7 +110,9 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_job_interface_peers_job_interface_id ON job_interface_peers(job_interface_id);
-	CREATE INDEX IF NOT EXISTS idx_job_interface_peers_peer_node_id ON job_interface_peers(peer_node_id);
+	CREATE INDEX IF NOT EXISTS idx_job_interface_peers_peer_id ON job_interface_peers(peer_id);
+	CREATE INDEX IF NOT EXISTS idx_job_interface_peers_peer_workflow_job_id ON job_interface_peers(peer_workflow_job_id);
+	CREATE INDEX IF NOT EXISTS idx_job_interface_peers_peer_job_execution_id ON job_interface_peers(peer_job_execution_id);
 	`
 
 	_, err := sm.db.Exec(createTableSQL)
@@ -428,13 +432,14 @@ func (sm *SQLiteManager) CreateJobInterface(iface *JobInterface) error {
 func (sm *SQLiteManager) CreateJobInterfacePeer(peer *JobInterfacePeer) error {
 	result, err := sm.db.Exec(`
 		INSERT INTO job_interface_peers (
-			job_interface_id, peer_node_id, peer_job_id, peer_path,
-			peer_mount_function, duty_acknowledged
-		) VALUES (?, ?, ?, ?, ?, ?)
+			job_interface_id, peer_id, peer_workflow_job_id, peer_job_execution_id,
+			peer_path, peer_mount_function, duty_acknowledged
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
 	`,
 		peer.JobInterfaceID,
-		peer.PeerNodeID,
-		peer.PeerJobID,
+		peer.PeerID,
+		peer.PeerWorkflowJobID,
+		peer.PeerJobExecutionID,
 		peer.PeerPath,
 		peer.PeerMountFunction,
 		peer.DutyAcknowledged,
@@ -492,8 +497,8 @@ func (sm *SQLiteManager) GetJobInterfaces(jobExecutionID int64) ([]*JobInterface
 // GetJobInterfacePeers retrieves all peer connections for a job interface
 func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInterfacePeer, error) {
 	rows, err := sm.db.Query(`
-		SELECT id, job_interface_id, peer_node_id, peer_job_id, peer_path,
-		       peer_mount_function, duty_acknowledged, created_at
+		SELECT id, job_interface_id, peer_id, peer_workflow_job_id, peer_job_execution_id,
+		       peer_path, peer_mount_function, duty_acknowledged, created_at
 		FROM job_interface_peers
 		WHERE job_interface_id = ?
 	`, jobInterfaceID)
@@ -506,13 +511,15 @@ func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInter
 	var peers []*JobInterfacePeer
 	for rows.Next() {
 		var peer JobInterfacePeer
-		var peerJobID sql.NullInt64
+		var peerWorkflowJobID sql.NullInt64
+		var peerJobExecutionID sql.NullInt64
 
 		err := rows.Scan(
 			&peer.ID,
 			&peer.JobInterfaceID,
-			&peer.PeerNodeID,
-			&peerJobID,
+			&peer.PeerID,
+			&peerWorkflowJobID,
+			&peerJobExecutionID,
 			&peer.PeerPath,
 			&peer.PeerMountFunction,
 			&peer.DutyAcknowledged,
@@ -523,8 +530,11 @@ func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInter
 			continue
 		}
 
-		if peerJobID.Valid {
-			peer.PeerJobID = &peerJobID.Int64
+		if peerWorkflowJobID.Valid {
+			peer.PeerWorkflowJobID = &peerWorkflowJobID.Int64
+		}
+		if peerJobExecutionID.Valid {
+			peer.PeerJobExecutionID = &peerJobExecutionID.Int64
 		}
 
 		peers = append(peers, &peer)

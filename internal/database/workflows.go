@@ -62,7 +62,7 @@ func (sm *SQLiteManager) InitWorkflowsTable() error {
 	CREATE TABLE IF NOT EXISTS workflow_executions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		workflow_id INTEGER NOT NULL,
-		status TEXT CHECK(status IN ('pending', 'running', 'completed', 'failed', 'cancelled')) NOT NULL DEFAULT 'pending',
+		status TEXT CHECK(status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')) NOT NULL DEFAULT 'PENDING',
 		error TEXT,
 		started_at DATETIME,
 		completed_at DATETIME,
@@ -80,7 +80,7 @@ func (sm *SQLiteManager) InitWorkflowsTable() error {
 		service_id INTEGER NOT NULL,
 		executor_peer_id TEXT NOT NULL,
 		remote_job_execution_id INTEGER,
-		status TEXT CHECK(status IN ('pending', 'running', 'completed', 'failed')) NOT NULL DEFAULT 'pending',
+		status TEXT CHECK(status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'ERRORED')) NOT NULL DEFAULT 'PENDING',
 		result TEXT,
 		error TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -292,8 +292,8 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 
 	// Build jobs array
 	type InterfacePeerDef struct {
-		PeerNodeID        string `json:"peer_node_id"`
-		PeerJobID         *int64 `json:"peer_job_id,omitempty"`
+		PeerID        string `json:"peer_node_id"`
+		PeerWorkflowNodeID *int64 `json:"peer_workflow_node_id,omitempty"` // workflow_nodes.id (planning time reference)
 		PeerPath          string `json:"peer_path"`
 		PeerMountFunction string `json:"peer_mount_function"` // INPUT, OUTPUT, or BOTH
 		DutyAcknowledged  bool   `json:"duty_acknowledged,omitempty"`
@@ -430,11 +430,11 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 
 				// Add destination as RECEIVER peer - PeerPath is where data should be SENT TO
 				interfaceMap[interfaceKey].InterfacePeers = append(interfaceMap[interfaceKey].InterfacePeers, InterfacePeerDef{
-					PeerNodeID:        destPeerID,
-					PeerJobID:         destJobID,
-					PeerPath:          destPath, // Actual destination path (e.g., /app for MOUNT)
-					PeerMountFunction: "OUTPUT",
-					DutyAcknowledged:  false,
+					PeerID:         destPeerID,
+					PeerWorkflowNodeID: destJobID,
+					PeerPath:           destPath, // Actual destination path (e.g., /app for MOUNT)
+					PeerMountFunction:  "OUTPUT",
+					DutyAcknowledged:   false,
 				})
 			}
 		}
@@ -496,11 +496,11 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 
 				// Add source as PROVIDER peer - PeerPath is where source outputs FROM
 				interfaceMap[interfaceKey].InterfacePeers = append(interfaceMap[interfaceKey].InterfacePeers, InterfacePeerDef{
-					PeerNodeID:        srcPeerID,
-					PeerJobID:         srcJobID,
-					PeerPath:          srcPath, // Source's output path
-					PeerMountFunction: "INPUT",
-					DutyAcknowledged:  false,
+					PeerID:         srcPeerID,
+					PeerWorkflowNodeID: srcJobID,
+					PeerPath:           srcPath, // Source's output path
+					PeerMountFunction:  "INPUT",
+					DutyAcknowledged:   false,
 				})
 			}
 		}
@@ -563,7 +563,7 @@ func (sm *SQLiteManager) CreateWorkflowExecution(workflowID int64) (*WorkflowExe
 	result, err := sm.db.Exec(
 		"INSERT INTO workflow_executions (workflow_id, status, started_at) VALUES (?, ?, ?)",
 		workflowID,
-		"pending",
+		"PENDING",
 		now,
 	)
 	if err != nil {
@@ -579,7 +579,7 @@ func (sm *SQLiteManager) CreateWorkflowExecution(workflowID int64) (*WorkflowExe
 	execution := &WorkflowExecution{
 		ID:         id,
 		WorkflowID: workflowID,
-		Status:     "pending",
+		Status:     "PENDING",
 		StartedAt:  now,
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -599,7 +599,7 @@ func (sm *SQLiteManager) CreateWorkflowJob(executionID, workflowID, nodeID int64
 		jobName,
 		serviceID,
 		executorPeerID,
-		"pending",
+		"PENDING",
 	)
 	if err != nil {
 		sm.logger.Error(fmt.Sprintf("Failed to create workflow job: %v", err), "database")
@@ -619,7 +619,7 @@ func (sm *SQLiteManager) CreateWorkflowJob(executionID, workflowID, nodeID int64
 		JobName:             jobName,
 		ServiceID:           serviceID,
 		ExecutorPeerID:      executorPeerID,
-		Status:              "pending",
+		Status:              "PENDING",
 		CreatedAt:           time.Now(),
 		UpdatedAt:           time.Now(),
 	}
@@ -767,12 +767,24 @@ func (sm *SQLiteManager) GetWorkflowJobs(workflowID int64) ([]*WorkflowJob, erro
 
 // UpdateWorkflowExecutionStatus updates the status of a workflow execution
 func (sm *SQLiteManager) UpdateWorkflowExecutionStatus(executionID int64, status string, errorMsg string) error {
-	_, err := sm.db.Exec(
-		"UPDATE workflow_executions SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-		status,
-		errorMsg,
-		executionID,
-	)
+	// If status is completed or failed, set completed_at timestamp
+	var err error
+	if status == "COMPLETED" || status == "FAILED" || status == "CANCELLED" {
+		_, err = sm.db.Exec(
+			"UPDATE workflow_executions SET status = ?, error = ?, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+			status,
+			errorMsg,
+			executionID,
+		)
+	} else {
+		_, err = sm.db.Exec(
+			"UPDATE workflow_executions SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+			status,
+			errorMsg,
+			executionID,
+		)
+	}
+
 	if err != nil {
 		sm.logger.Error(fmt.Sprintf("Failed to update workflow execution status: %v", err), "database")
 		return err
@@ -797,4 +809,91 @@ func (sm *SQLiteManager) UpdateWorkflowJobRemoteExecutionID(workflowJobID int64,
 
 	sm.logger.Info(fmt.Sprintf("Workflow job remote execution ID updated: workflow_job_id=%d, remote_job_execution_id=%d", workflowJobID, remoteJobExecutionID), "database")
 	return nil
+}
+
+// GetWorkflowExecutionsByWorkflowID retrieves all execution instances for a specific workflow
+func (sm *SQLiteManager) GetWorkflowExecutionsByWorkflowID(workflowID int64) ([]*WorkflowExecution, error) {
+	rows, err := sm.db.Query(`
+		SELECT id, workflow_id, status, error, started_at, completed_at, created_at, updated_at
+		FROM workflow_executions
+		WHERE workflow_id = ?
+		ORDER BY created_at DESC
+	`, workflowID)
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to get workflow executions for workflow %d: %v", workflowID, err), "database")
+		return nil, err
+	}
+	defer rows.Close()
+
+	var executions []*WorkflowExecution
+	for rows.Next() {
+		var execution WorkflowExecution
+		var errorMsg sql.NullString
+		var completedAt sql.NullTime
+
+		err := rows.Scan(
+			&execution.ID,
+			&execution.WorkflowID,
+			&execution.Status,
+			&errorMsg,
+			&execution.StartedAt,
+			&completedAt,
+			&execution.CreatedAt,
+			&execution.UpdatedAt,
+		)
+		if err != nil {
+			sm.logger.Error(fmt.Sprintf("Failed to scan workflow execution: %v", err), "database")
+			continue
+		}
+
+		if errorMsg.Valid {
+			execution.Error = errorMsg.String
+		}
+		if completedAt.Valid {
+			execution.CompletedAt = completedAt.Time
+		}
+
+		executions = append(executions, &execution)
+	}
+
+	return executions, nil
+}
+
+// GetWorkflowExecutionByID retrieves a specific workflow execution by ID
+func (sm *SQLiteManager) GetWorkflowExecutionByID(executionID int64) (*WorkflowExecution, error) {
+	var execution WorkflowExecution
+	var errorMsg sql.NullString
+	var completedAt sql.NullTime
+
+	err := sm.db.QueryRow(`
+		SELECT id, workflow_id, status, error, started_at, completed_at, created_at, updated_at
+		FROM workflow_executions
+		WHERE id = ?
+	`, executionID).Scan(
+		&execution.ID,
+		&execution.WorkflowID,
+		&execution.Status,
+		&errorMsg,
+		&execution.StartedAt,
+		&completedAt,
+		&execution.CreatedAt,
+		&execution.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("workflow execution not found")
+		}
+		sm.logger.Error(fmt.Sprintf("Failed to get workflow execution %d: %v", executionID, err), "database")
+		return nil, err
+	}
+
+	if errorMsg.Valid {
+		execution.Error = errorMsg.String
+	}
+	if completedAt.Valid {
+		execution.CompletedAt = completedAt.Time
+	}
+
+	return &execution, nil
 }

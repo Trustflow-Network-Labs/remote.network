@@ -35,6 +35,33 @@ export interface WorkflowJob {
   created_at: string
 }
 
+export interface WorkflowExecution {
+  id: number
+  workflow_id: number
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  error: string
+  started_at: string
+  completed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ExecutionJob {
+  id: number
+  workflow_execution_id: number
+  workflow_id: number
+  node_id: number
+  job_name: string
+  service_id: number
+  executor_peer_id: string
+  remote_job_execution_id: number | null
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  result: any
+  error: string
+  created_at: string
+  updated_at: string
+}
+
 export interface Workflow {
   id: number
   name: string
@@ -63,6 +90,9 @@ export interface WorkflowsState {
   error: string | null
   pickedService: any | null
   _wsUnsubscribe: (() => void) | null
+  workflowExecutions: Map<number, WorkflowExecution[]>
+  selectedExecution: WorkflowExecution | null
+  executionJobs: ExecutionJob[]
 }
 
 export const useWorkflowsStore = defineStore('workflows', {
@@ -73,7 +103,10 @@ export const useWorkflowsStore = defineStore('workflows', {
     loading: false,
     error: null,
     pickedService: null,
-    _wsUnsubscribe: null
+    _wsUnsubscribe: null,
+    workflowExecutions: new Map(),
+    selectedExecution: null,
+    executionJobs: []
   }),
 
   getters: {
@@ -273,6 +306,59 @@ export const useWorkflowsStore = defineStore('workflows', {
       }
     },
 
+    async fetchWorkflowExecutions(workflowId: number) {
+      this.loading = true
+      this.error = null
+
+      try {
+        const response = await api.getWorkflowExecutionInstances(workflowId)
+        this.workflowExecutions.set(workflowId, response.executions || [])
+        return response.executions || []
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        throw error
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async fetchExecutionJobs(executionId: number) {
+      this.loading = true
+      this.error = null
+
+      try {
+        const response = await api.getWorkflowExecutionJobs(executionId)
+        this.executionJobs = response.jobs || []
+        return response.jobs || []
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        throw error
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async fetchExecutionStatus(executionId: number) {
+      this.loading = true
+      this.error = null
+
+      try {
+        const response = await api.getWorkflowExecutionStatus(executionId)
+        this.selectedExecution = response.execution
+        this.executionJobs = response.jobs || []
+        return response
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        throw error
+      } finally {
+        this.loading = false
+      }
+    },
+
+    setSelectedExecution(execution: WorkflowExecution | null) {
+      this.selectedExecution = execution
+    },
+
     async addWorkflowConnection(workflowId: number, connection: any) {
       try {
         const response = await api.addWorkflowConnection(workflowId, connection)
@@ -323,15 +409,31 @@ export const useWorkflowsStore = defineStore('workflows', {
         return
       }
 
-      // Subscribe to workflows updates
       const self = this as any
-      const unsubscribe = wsService.subscribe(
+      const unsubscribes: Array<() => void> = []
+
+      // Subscribe to workflows updates
+      unsubscribes.push(wsService.subscribe(
         MessageType.WORKFLOWS_UPDATED,
         (payload: any) => self.handleWorkflowsUpdate(payload)
-      )
+      ))
 
-      // Store unsubscribe function
-      self._wsUnsubscribe = unsubscribe
+      // Subscribe to execution updates
+      unsubscribes.push(wsService.subscribe(
+        MessageType.EXECUTION_UPDATED,
+        (payload: any) => self.handleExecutionUpdate(payload)
+      ))
+
+      // Subscribe to job status updates
+      unsubscribes.push(wsService.subscribe(
+        MessageType.JOB_STATUS_UPDATED,
+        (payload: any) => self.handleJobStatusUpdate(payload)
+      ))
+
+      // Store combined unsubscribe function
+      self._wsUnsubscribe = () => {
+        unsubscribes.forEach(unsub => unsub())
+      }
     },
 
     // Cleanup WebSocket subscription
@@ -357,6 +459,51 @@ export const useWorkflowsStore = defineStore('workflows', {
         }))
         this.loading = false
         this.error = null
+      }
+    },
+
+    // Handle WebSocket execution update
+    handleExecutionUpdate(payload: any) {
+      if (!payload) return
+
+      const executionId = payload.execution_id
+      const workflowId = payload.workflow_id
+
+      // Update in workflowExecutions map if it exists
+      const executions = this.workflowExecutions.get(workflowId)
+      if (executions) {
+        const execution = executions.find((e: WorkflowExecution) => e.id === executionId)
+        if (execution) {
+          execution.status = payload.status
+          execution.error = payload.error || ''
+          execution.started_at = payload.started_at || execution.started_at
+          execution.completed_at = payload.completed_at || execution.completed_at
+        }
+      }
+
+      // Update selectedExecution if it's the one being updated
+      if (this.selectedExecution && this.selectedExecution.id === executionId) {
+        this.selectedExecution.status = payload.status
+        this.selectedExecution.error = payload.error || ''
+        this.selectedExecution.started_at = payload.started_at || this.selectedExecution.started_at
+        this.selectedExecution.completed_at = payload.completed_at || this.selectedExecution.completed_at
+      }
+    },
+
+    // Handle WebSocket job status update
+    handleJobStatusUpdate(payload: any) {
+      if (!payload) return
+
+      const jobExecutionId = payload.job_execution_id
+      const executionId = payload.execution_id
+
+      // Update in executionJobs if it's for the currently selected execution
+      if (this.selectedExecution && this.selectedExecution.id === executionId) {
+        const job = this.executionJobs.find((j: ExecutionJob) => j.id === jobExecutionId)
+        if (job) {
+          job.status = payload.status
+          job.error = payload.error || ''
+        }
       }
     }
   }

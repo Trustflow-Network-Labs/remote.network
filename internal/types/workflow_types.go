@@ -43,11 +43,12 @@ type JobInterface struct {
 
 // InterfacePeer represents a peer connection for a job interface
 type InterfacePeer struct {
-	PeerNodeID        string `json:"peer_node_id"`    // Ed25519 peer ID
-	PeerJobID         *int64 `json:"peer_job_id"`     // Connected job ID (nullable)
-	PeerPath          string `json:"peer_path"`
-	PeerMountFunction string `json:"peer_mount_function"` // INPUT, OUTPUT, BOTH
-	DutyAcknowledged  bool   `json:"duty_acknowledged"`
+	PeerID             string `json:"peer_id"`               // Peer ID (libp2p peer identifier)
+	PeerWorkflowJobID  *int64 `json:"peer_workflow_job_id"`  // workflow_jobs.id from orchestrator (nullable)
+	PeerJobExecutionID *int64 `json:"peer_job_execution_id"` // job_executions.id from executor (nullable)
+	PeerPath           string `json:"peer_path"`
+	PeerMountFunction  string `json:"peer_mount_function"` // INPUT, OUTPUT, BOTH
+	DutyAcknowledged   bool   `json:"duty_acknowledged"`
 }
 
 // WorkflowStatus represents the overall status of a workflow execution

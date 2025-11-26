@@ -10,12 +10,14 @@ type MessageType string
 
 const (
 	// Data update message types
-	MessageTypeNodeStatus      MessageType = "node.status"
-	MessageTypePeersUpdated    MessageType = "peers.updated"
-	MessageTypeRelaySessions   MessageType = "relay.sessions"
-	MessageTypeRelayCandidates MessageType = "relay.candidates"
-	MessageTypeServicesUpdated MessageType = "services.updated"
+	MessageTypeNodeStatus       MessageType = "node.status"
+	MessageTypePeersUpdated     MessageType = "peers.updated"
+	MessageTypeRelaySessions    MessageType = "relay.sessions"
+	MessageTypeRelayCandidates  MessageType = "relay.candidates"
+	MessageTypeServicesUpdated  MessageType = "services.updated"
 	MessageTypeWorkflowsUpdated MessageType = "workflows.updated"
+	MessageTypeExecutionUpdated MessageType = "execution.updated"
+	MessageTypeJobStatusUpdated MessageType = "job.status.updated"
 	MessageTypeBlacklistUpdated MessageType = "blacklist.updated"
 
 	// File upload message types
@@ -326,4 +328,24 @@ type DockerOperationErrorPayload struct {
 	OperationID string `json:"operation_id"`
 	Error       string `json:"error"`
 	Code        string `json:"code,omitempty"`
+}
+
+// ExecutionUpdatedPayload contains workflow execution status update
+type ExecutionUpdatedPayload struct {
+	ExecutionID int64  `json:"execution_id"`
+	WorkflowID  int64  `json:"workflow_id"`
+	Status      string `json:"status"`
+	Error       string `json:"error,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+}
+
+// JobStatusUpdatedPayload contains job status update
+type JobStatusUpdatedPayload struct {
+	JobExecutionID int64  `json:"job_execution_id"`
+	WorkflowJobID  int64  `json:"workflow_job_id"`
+	ExecutionID    int64  `json:"execution_id"`
+	JobName        string `json:"job_name"`
+	Status         string `json:"status"`
+	Error          string `json:"error,omitempty"`
 }

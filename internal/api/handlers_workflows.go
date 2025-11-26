@@ -373,3 +373,121 @@ func (s *APIServer) handleGetJobExecutionInterfaces(w http.ResponseWriter, r *ht
 		"total":      len(interfaces),
 	})
 }
+
+// handleGetWorkflowExecutionInstances returns all execution instances for a workflow
+// GET /api/workflows/:id/execution-instances
+func (s *APIServer) handleGetWorkflowExecutionInstances(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract workflow ID from path
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 4 || parts[3] != "execution-instances" {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	workflowID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid workflow ID", http.StatusBadRequest)
+		return
+	}
+
+	executions, err := s.dbManager.GetWorkflowExecutionsByWorkflowID(workflowID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get workflow executions: %v", err), "api")
+		http.Error(w, "Failed to retrieve workflow executions", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"executions": executions,
+		"total":      len(executions),
+	})
+}
+
+// handleGetWorkflowExecutionJobs returns all jobs for a specific workflow execution
+// GET /api/workflow-executions/:execution_id/jobs
+func (s *APIServer) handleGetWorkflowExecutionJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract execution ID from path
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 4 || parts[3] != "jobs" {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	executionID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid execution ID", http.StatusBadRequest)
+		return
+	}
+
+	jobs, err := s.dbManager.GetWorkflowJobsByExecution(executionID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get workflow jobs: %v", err), "api")
+		http.Error(w, "Failed to retrieve workflow jobs", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"jobs":  jobs,
+		"total": len(jobs),
+	})
+}
+
+// handleGetWorkflowExecutionStatus returns the status of a workflow execution
+// GET /api/workflow-executions/:execution_id/status
+func (s *APIServer) handleGetWorkflowExecutionStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract execution ID from path
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 4 || parts[3] != "status" {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	executionID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid execution ID", http.StatusBadRequest)
+		return
+	}
+
+	// Get workflow execution
+	execution, err := s.dbManager.GetWorkflowExecutionByID(executionID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get workflow execution: %v", err), "api")
+		http.Error(w, "Failed to retrieve workflow execution", http.StatusInternalServerError)
+		return
+	}
+
+	// Get jobs for this execution
+	jobs, err := s.dbManager.GetWorkflowJobsByExecution(executionID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get workflow jobs: %v", err), "api")
+		http.Error(w, "Failed to retrieve workflow jobs", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"execution": execution,
+		"jobs":      jobs,
+		"total":     len(jobs),
+	})
+}

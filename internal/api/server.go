@@ -114,6 +114,16 @@ func NewAPIServer(
 	// Initialize event emitter
 	eventEmitter := events.NewEmitter(wsHub, peerManager, dbManager, wsLogger)
 
+	// Set event emitter on job and workflow managers for real-time updates
+	if jobManager := peerManager.GetJobManager(); jobManager != nil {
+		jobManager.SetEventEmitter(eventEmitter)
+		logger.Info("Event emitter set for JobManager", "api")
+	}
+	if workflowManager := peerManager.GetWorkflowManager(); workflowManager != nil {
+		workflowManager.SetEventEmitter(eventEmitter)
+		logger.Info("Event emitter set for WorkflowManager", "api")
+	}
+
 	// Get app paths for proper storage locations
 	appPaths := utils.GetAppPaths("")
 
@@ -472,7 +482,12 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			s.handleGetWorkflowJobs(w, r)
 			return
 		}
-		// Check if it's an executions request
+		// Check if it's an execution-instances request (new workflow_executions table)
+		if strings.HasSuffix(r.URL.Path, "/execution-instances") {
+			s.handleGetWorkflowExecutionInstances(w, r)
+			return
+		}
+		// Check if it's an executions request (legacy - job_executions)
 		if strings.HasSuffix(r.URL.Path, "/executions") {
 			s.handleGetWorkflowExecutions(w, r)
 			return
@@ -536,6 +551,21 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		// Check if it's an interfaces request
 		if strings.HasSuffix(r.URL.Path, "/interfaces") {
 			s.handleGetJobExecutionInterfaces(w, r)
+			return
+		}
+		http.Error(w, "Not found", http.StatusNotFound)
+	})))
+
+	// Workflow executions routes (protected with JWT authentication)
+	mux.Handle("/api/workflow-executions/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if it's a jobs request
+		if strings.HasSuffix(r.URL.Path, "/jobs") {
+			s.handleGetWorkflowExecutionJobs(w, r)
+			return
+		}
+		// Check if it's a status request
+		if strings.HasSuffix(r.URL.Path, "/status") {
+			s.handleGetWorkflowExecutionStatus(w, r)
 			return
 		}
 		http.Error(w, "Not found", http.StatusNotFound)

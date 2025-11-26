@@ -19,6 +19,17 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
+// formatPeerID safely formats a peer ID for logging, handling empty strings
+func formatPeerID(peerID string) string {
+	if peerID == "" {
+		return "<empty>"
+	}
+	if len(peerID) > 8 {
+		return peerID[:8]
+	}
+	return peerID
+}
+
 // IncomingTransfer tracks an active incoming file transfer
 type IncomingTransfer struct {
 	TransferID      string
@@ -320,15 +331,15 @@ func (dsw *DataServiceWorker) ExecuteDataService(job *database.JobExecution, ser
 	// Transfer data to each peer
 	for _, peer := range peers {
 		if peer.PeerMountFunction == types.MountFunctionOutput || peer.PeerMountFunction == types.MountFunctionBoth {
-			dsw.logger.Info(fmt.Sprintf("Transferring data to peer %s (path: %s)", peer.PeerNodeID[:8], peer.PeerPath), "data_worker")
+			dsw.logger.Info(fmt.Sprintf("Transferring data to peer %s (path: %s)", formatPeerID(peer.PeerID), peer.PeerPath), "data_worker")
 
 			err := dsw.transferDataToPeer(job, filePath, peer, dataDetails)
 			if err != nil {
-				dsw.logger.Error(fmt.Sprintf("Failed to transfer data to peer %s: %v", peer.PeerNodeID[:8], err), "data_worker")
-				return fmt.Errorf("failed to transfer data to peer %s: %v", peer.PeerNodeID[:8], err)
+				dsw.logger.Error(fmt.Sprintf("Failed to transfer data to peer %s: %v", formatPeerID(peer.PeerID), err), "data_worker")
+				return fmt.Errorf("failed to transfer data to peer %s: %v", formatPeerID(peer.PeerID), err)
 			}
 
-			dsw.logger.Info(fmt.Sprintf("Successfully transferred data to peer %s", peer.PeerNodeID[:8]), "data_worker")
+			dsw.logger.Info(fmt.Sprintf("Successfully transferred data to peer %s", formatPeerID(peer.PeerID)), "data_worker")
 		}
 	}
 
@@ -339,9 +350,15 @@ func (dsw *DataServiceWorker) ExecuteDataService(job *database.JobExecution, ser
 // transferDataToPeer transfers data file to a peer
 func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, filePath string, peer *database.JobInterfacePeer, dataDetails *database.DataServiceDetails) error {
 	// Check if destination is the local peer (self-transfer)
-	if peer.PeerNodeID == dsw.peerID {
+	// Note: PeerID is always populated (normalized at workflow parsing time)
+	// Empty PeerID should never occur, but we handle it defensively
+	if peer.PeerID == "" {
+		return fmt.Errorf("invalid interface peer: PeerID is empty (should be normalized at workflow parsing)")
+	}
+
+	if peer.PeerID == dsw.peerID {
 		dsw.logger.Info(fmt.Sprintf("Destination is local peer - handling data locally for job %d", job.ID), "data_worker")
-		return dsw.handleLocalDataTransfer(job.ID, filePath, peer, dataDetails)
+		return dsw.handleLocalDataTransfer(job.ID, filePath, peer, dataDetails, "STDOUT")
 	}
 
 	// Open file for reading
@@ -361,10 +378,10 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 	totalChunks := int((fileSize + int64(dsw.chunkSize) - 1) / int64(dsw.chunkSize))
 
 	dsw.logger.Info(fmt.Sprintf("Transferring file %s (%d bytes) in %d chunks to peer %s",
-		filePath, fileSize, totalChunks, peer.PeerNodeID[:8]), "data_worker")
+		filePath, fileSize, totalChunks, formatPeerID(peer.PeerID)), "data_worker")
 
 	// Generate transfer ID
-	transferID := dsw.GenerateTransferID(job.ID, peer.PeerNodeID)
+	transferID := dsw.GenerateTransferID(job.ID, peer.PeerID)
 
 	// Get encryption key if data is encrypted
 	var keyData string
@@ -384,8 +401,8 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 	if dsw.jobHandler != nil {
 		// Get destination job execution ID from peer record
 		var destJobExecID int64
-		if peer.PeerJobID != nil {
-			destJobExecID = *peer.PeerJobID
+		if peer.PeerJobExecutionID != nil {
+			destJobExecID = *peer.PeerJobExecutionID
 		}
 
 		// Send transfer request using WorkflowJobID (shared identifier both peers understand)
@@ -395,7 +412,7 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 			DestinationJobExecutionID: destJobExecID, // Destination job execution ID (receiver's job)
 			InterfaceType:             types.InterfaceTypeStdout,
 			SourcePeerID:              dsw.peerID,
-			DestinationPeerID:         peer.PeerNodeID,
+			DestinationPeerID:         peer.PeerID,
 			SourcePath:                filePath,
 			DestinationPath:           peer.PeerPath,
 			DataHash:                  dataDetails.Hash,
@@ -404,19 +421,19 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 			Encrypted:                 encrypted,
 		}
 
-		dsw.logger.Info(fmt.Sprintf("Sending transfer request for transfer ID %s to peer %s (encrypted: %v)", transferID, peer.PeerNodeID[:8], encrypted), "data_worker")
+		dsw.logger.Info(fmt.Sprintf("Sending transfer request for transfer ID %s to peer %s (encrypted: %v)", transferID, formatPeerID(peer.PeerID), encrypted), "data_worker")
 
 		// Send transfer request via job handler
-		response, err := dsw.jobHandler.SendJobDataTransferRequest(peer.PeerNodeID, transferRequest)
+		response, err := dsw.jobHandler.SendJobDataTransferRequest(peer.PeerID, transferRequest)
 		if err != nil {
 			return fmt.Errorf("failed to send transfer request: %v", err)
 		}
 
 		if !response.Accepted {
-			return fmt.Errorf("transfer request rejected by peer %s: %s", peer.PeerNodeID[:8], response.Message)
+			return fmt.Errorf("transfer request rejected by peer %s: %s", formatPeerID(peer.PeerID), response.Message)
 		}
 
-		dsw.logger.Info(fmt.Sprintf("Transfer request accepted by peer %s for transfer ID %s", peer.PeerNodeID[:8], transferID), "data_worker")
+		dsw.logger.Info(fmt.Sprintf("Transfer request accepted by peer %s for transfer ID %s", formatPeerID(peer.PeerID), transferID), "data_worker")
 	}
 
 	// Create transfer record in database for state persistence
@@ -424,7 +441,7 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 		TransferID:        transferID,
 		JobExecutionID:    job.ID,
 		SourcePeerID:      dsw.peerID,
-		DestinationPeerID: peer.PeerNodeID,
+		DestinationPeerID: peer.PeerID,
 		FilePath:          filePath,
 		TotalChunks:       totalChunks,
 		ChunkSize:         dsw.chunkSize,
@@ -485,7 +502,7 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 			// Retry logic: try up to 3 times with exponential backoff
 			sent := false
 			for attempt := 0; attempt < 3; attempt++ {
-				err := dsw.jobHandler.SendJobDataChunk(peer.PeerNodeID, chunk)
+				err := dsw.jobHandler.SendJobDataChunk(peer.PeerID, chunk)
 				if err == nil {
 					sent = true
 					break
@@ -559,7 +576,7 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 			transferID, transferComplete.BytesTransferred), "data_worker")
 
 		// Send transfer complete via job handler
-		err := dsw.jobHandler.SendJobDataTransferComplete(peer.PeerNodeID, transferComplete)
+		err := dsw.jobHandler.SendJobDataTransferComplete(peer.PeerID, transferComplete)
 		if err != nil {
 			dsw.logger.Error(fmt.Sprintf("Failed to send transfer complete notification: %v", err), "data_worker")
 			// Don't return error here - transfer was successful even if notification failed
@@ -585,7 +602,7 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 // ResumeTransfer resumes a stalled file transfer using fresh peer metadata
 func (dsw *DataServiceWorker) ResumeTransfer(transfer *database.DataTransfer, peerMetadata *database.PeerMetadata) error {
 	dsw.logger.Info(fmt.Sprintf("Resuming transfer %s to peer %s (metadata refreshed from DHT)",
-		transfer.TransferID, transfer.DestinationPeerID[:8]), "data_worker")
+		transfer.TransferID, formatPeerID(transfer.DestinationPeerID)), "data_worker")
 
 	// Verify file still exists
 	if _, err := os.Stat(transfer.FilePath); os.IsNotExist(err) {
@@ -1085,28 +1102,46 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 		// Handle transfer package with manifest-based extraction
 		dsw.logger.Info(fmt.Sprintf("Transfer %s is a transfer package, using manifest-based extraction", transferID), "data_worker")
 
-		// Get the job's base directory for proper file placement
-		// The base directory is: workflows/{ordering_peer}/{workflow_job_id}/jobs/{job_id}/
-		job, err := dsw.db.GetJobExecution(transfer.JobExecutionID)
-		if err != nil || job == nil {
-			dsw.logger.Error(fmt.Sprintf("Failed to get job execution for transfer package %s: %v", transferID, err), "data_worker")
-			os.Remove(transfer.TargetPath)
-			delete(dsw.incomingTransfers, transferID)
-			if transfer.Passphrase != "" {
-				transfer.Passphrase = ""
-			}
-			return fmt.Errorf("failed to get job execution: %v", err)
-		}
+		// Determine the base directory for extraction
+		// The hierarchical path is already constructed in HandleJobDataTransferRequest
+		// For "Local Peer" delivery (path contains /0/input/), use the extraction directory directly
+		// For job-to-job transfers, look up the job_execution for the base directory
+		var baseDir string
 
-		appPaths := utils.GetAppPaths("remote-network")
-		baseDir := filepath.Join(
-			appPaths.DataDir,
-			"workflows",
-			job.OrderingPeerID,
-			fmt.Sprintf("%d", job.WorkflowJobID),
-			"jobs",
-			fmt.Sprintf("%d", job.ID),
-		)
+		// Check if this is "Local Peer" delivery by looking for /0/input/ or /0/output/ in the path
+		extractionDir := filepath.Dir(transfer.TargetPath)
+		if strings.Contains(extractionDir, string(filepath.Separator)+"0"+string(filepath.Separator)+"input") ||
+			strings.Contains(extractionDir, string(filepath.Separator)+"0"+string(filepath.Separator)+"output") {
+			// "Local Peer" delivery - extract to the directory containing the /0/ marker
+			// The path is: .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/0/input/
+			// We want baseDir to be: .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/0/
+			// So we only remove the /input or /output suffix, keeping /0/
+			baseDir = filepath.Dir(extractionDir)
+			dsw.logger.Info(fmt.Sprintf("Transfer %s is for 'Local Peer' delivery, using baseDir: %s", transferID, baseDir), "data_worker")
+		} else {
+			// Job-to-job transfer - look up the destination job_execution
+			job, err := dsw.db.GetJobExecution(transfer.JobExecutionID)
+			if err != nil || job == nil {
+				dsw.logger.Error(fmt.Sprintf("Failed to get job execution for transfer package %s: %v", transferID, err), "data_worker")
+				os.Remove(transfer.TargetPath)
+				delete(dsw.incomingTransfers, transferID)
+				if transfer.Passphrase != "" {
+					transfer.Passphrase = ""
+				}
+				return fmt.Errorf("failed to get job execution: %v", err)
+			}
+
+			appPaths := utils.GetAppPaths("remote-network")
+			baseDir = filepath.Join(
+				appPaths.DataDir,
+				"workflows",
+				job.OrderingPeerID,
+				fmt.Sprintf("%d", job.WorkflowJobID),
+				"jobs",
+				fmt.Sprintf("%d", job.ID),
+			)
+			dsw.logger.Info(fmt.Sprintf("Transfer %s is for job-to-job delivery, using baseDir: %s", transferID, baseDir), "data_worker")
+		}
 
 		// Use transfer package extractor
 		extractor := utils.NewTransferPackageExtractor(dsw.logger)
@@ -1409,7 +1444,7 @@ func (dsw *DataServiceWorker) CleanupStalledTransfers(timeout time.Duration) {
 }
 
 // handleLocalDataTransfer handles data transfer to the local peer (self)
-func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, filePath string, peer *database.JobInterfacePeer, dataDetails *database.DataServiceDetails) error {
+func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, filePath string, peer *database.JobInterfacePeer, dataDetails *database.DataServiceDetails, interfaceType string) error {
 	dsw.logger.Info(fmt.Sprintf("Processing local data transfer for job %d", jobExecutionID), "data_worker")
 
 	// Get job execution to build hierarchical path
@@ -1422,68 +1457,69 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 	var hierarchicalPath string
 
 	// Check if this is a transfer to the requester (no receiving job) or to another job
-	if peer.PeerJobID == nil || *peer.PeerJobID == 0 {
-		// Transfer to workflow output (for the requester/user)
-		// Path: workflows/{ordering_peer}/{workflow_job_id}/output/
-		hierarchicalPath = filepath.Join(
-			appPaths.DataDir,
-			"workflows",
-			job.OrderingPeerID,
-			fmt.Sprintf("%d", job.WorkflowJobID),
-			"output",
-		)
-		dsw.logger.Info(fmt.Sprintf("Transferring to workflow output (requester) at %s", hierarchicalPath), "data_worker")
-	} else {
-		// Transfer to another job's input
-		destJobID := *peer.PeerJobID
-		dsw.logger.Info(fmt.Sprintf("Transferring to receiver job %d (sender job %d)", destJobID, job.ID), "data_worker")
+	if peer.PeerJobExecutionID == nil || *peer.PeerJobExecutionID == 0 {
+		// Transfer to workflow output (for the requester/user - "Local Peer")
+		// Pattern: /workflows/<orchestrator>/<execution>/jobs/<sender_peer>/<sender_job>/<receiver_peer>/0/input/
+		// Note: receiver_job_id = 0 as a special marker for "Local Peer" final destination
 
-		// Construct hierarchical path: workflows/{ordering_peer_id}/{workflow_job_id}/jobs/{dest_job_id}/{destDir}
-		// This follows the libp2p distributed P2P pattern for clear file organization
-		//
-		// Path conventions for destination directories:
-		// - STDIN interface: peer.PeerPath = "input/" -> jobs/<id>/input/
-		// - MOUNT interface: peer.PeerPath = "/app" or "/" -> jobs/<id>/mounts/<basename>/
-		//
-		// For MOUNT interfaces, we need to add the "mounts/" prefix and use the basename of the mount path
-
-		// Determine the destination directory based on the path type
-		var destDir string
-		peerPath := peer.PeerPath
-
-		if peerPath == "" || strings.HasPrefix(peerPath, "input") {
-			// STDIN interface or empty path: use input/ directory
-			destDir = "input"
-		} else if strings.HasPrefix(peerPath, "output") {
-			// Output directory
-			destDir = peerPath
-		} else {
-			// MOUNT interface: path is a mount path like "/" or "/app" or "/asdasdf/fsddf"
-			// Convert to mounts/<full_path>/ structure (strip leading "/" only)
-			// Examples:
-			//   "/" -> "mounts/"
-			//   "/app" -> "mounts/app/"
-			//   "/asdasdf/fsddf" -> "mounts/asdasdf/fsddf/"
-			mountPath := strings.TrimPrefix(peerPath, "/")
-			if mountPath == "" {
-				// For root mount "/", use "mounts" directly
-				destDir = "mounts"
-			} else {
-				// For named mounts like "/app" or "/asdasdf/fsddf", preserve full path
-				destDir = filepath.Join("mounts", mountPath)
-			}
-			dsw.logger.Info(fmt.Sprintf("MOUNT interface detected: path '%s' -> destDir '%s'", peerPath, destDir), "data_worker")
+		// Get workflow context to get the workflow_execution_id
+		workflowJob, err := dsw.db.GetWorkflowJobByID(job.WorkflowJobID)
+		if err != nil {
+			return fmt.Errorf("failed to get workflow job %d: %v", job.WorkflowJobID, err)
 		}
 
-		hierarchicalPath = filepath.Join(
+		// Build path with sender (this job) and receiver (orchestrator/"Local Peer")
+		pathInfo := utils.JobPathInfo{
+			OrchestratorPeerID:  job.OrderingPeerID,
+			WorkflowExecutionID: workflowJob.WorkflowExecutionID,
+			ExecutorPeerID:      job.ExecutorPeerID,     // Sender peer
+			JobExecutionID:      job.ID,                 // Sender job execution ID
+			ReceiverPeerID:      job.OrderingPeerID,     // Receiver is orchestrator
+			ReceiverJobExecID:   0,                      // 0 for "Local Peer"
+		}
+
+		hierarchicalPath = utils.BuildTransferDestinationPath(
 			appPaths.DataDir,
-			"workflows",
-			job.OrderingPeerID, // Full peer ID to prevent collisions
-			fmt.Sprintf("%d", job.WorkflowJobID),
-			"jobs",
-			fmt.Sprintf("%d", destJobID), // Use destination job ID, not sender's
-			destDir,
+			pathInfo,
+			interfaceType,
+			peer.PeerPath,
 		)
+		dsw.logger.Info(fmt.Sprintf("Transferring to workflow output (requester/'Local Peer') at %s", hierarchicalPath), "data_worker")
+	} else {
+		// Transfer to another job's input
+		destJobExecID := *peer.PeerJobExecutionID
+		dsw.logger.Info(fmt.Sprintf("Transferring to receiver job_execution %d (sender job %d)", destJobExecID, job.ID), "data_worker")
+
+		// Get workflow context to construct proper hierarchical path
+		workflowJob, err := dsw.db.GetWorkflowJobByID(job.WorkflowJobID)
+		if err != nil {
+			return fmt.Errorf("failed to get workflow job %d: %v", job.WorkflowJobID, err)
+		}
+
+		// Get destination job execution to determine executor peer
+		destJob, err := dsw.db.GetJobExecution(destJobExecID)
+		if err != nil {
+			return fmt.Errorf("failed to get destination job execution %d: %v", destJobExecID, err)
+		}
+
+		// Build path info with sender and receiver information
+		pathInfo := utils.JobPathInfo{
+			OrchestratorPeerID:  job.OrderingPeerID,
+			WorkflowExecutionID: workflowJob.WorkflowExecutionID,
+			ExecutorPeerID:      job.ExecutorPeerID,      // Sender peer
+			JobExecutionID:      job.ID,                  // Sender job execution ID
+			ReceiverPeerID:      destJob.ExecutorPeerID,  // Receiver peer
+			ReceiverJobExecID:   destJobExecID,           // Receiver job execution ID
+		}
+
+		// Use BuildTransferDestinationPath which includes sender and receiver info
+		hierarchicalPath = utils.BuildTransferDestinationPath(
+			appPaths.DataDir,
+			pathInfo,
+			interfaceType,
+			peer.PeerPath,
+		)
+		dsw.logger.Info(fmt.Sprintf("Transferring to receiver job at %s", hierarchicalPath), "data_worker")
 	}
 
 	// Add trailing separator to indicate directory

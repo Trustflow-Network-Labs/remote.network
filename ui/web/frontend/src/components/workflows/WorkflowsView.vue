@@ -170,11 +170,11 @@
         </DataTable>
       </div>
 
-      <!-- Job Executions Section -->
+      <!-- Workflow Executions Section -->
       <div v-if="activeWorkflowId" class="executions-section">
         <div class="executions-header">
           <div class="executions-title">
-            <i class="pi pi-history"></i> {{ $t('message.workflows.jobExecutions') }}
+            <i class="pi pi-history"></i> {{ $t('message.workflows.executionHistory') }}
             <span class="workflow-name">{{ activeWorkflowName }}</span>
           </div>
           <button class="close-btn" @click="closeExecutions">
@@ -186,17 +186,18 @@
           <ProgressSpinner style="width:40px;height:40px" strokeWidth="4" />
         </div>
 
-        <div v-else-if="executions.length === 0" class="empty-executions">
+        <div v-else-if="workflowExecutions.length === 0" class="empty-executions">
           <i class="pi pi-inbox"></i>
           <p>{{ $t('message.workflows.noExecutions') }}</p>
         </div>
 
         <div v-else class="executions-list">
           <div
-            v-for="execution in executions"
+            v-for="execution in workflowExecutions"
             :key="execution.id"
             class="execution-card"
             :class="`status-${execution.status.toLowerCase()}`"
+            @click="viewExecutionDetails(execution)"
           >
             <div class="execution-header">
               <div class="execution-id">#{{ execution.id }}</div>
@@ -209,86 +210,32 @@
             </div>
             <div class="execution-details">
               <div class="execution-detail">
-                <span class="label">{{ $t('message.workflows.executor') }}:</span>
-                <div class="value-with-copy">
-                  <span class="value">{{ shorten(execution.executor_peer_id, 6, 6) }}</span>
-                  <i
-                    class="pi pi-copy copy-icon"
-                    @click="copyExecutorPeerId(execution.executor_peer_id)"
-                    :title="$t('message.common.copy')"
-                  ></i>
-                </div>
-              </div>
-              <div class="execution-detail">
-                <span class="label">{{ $t('message.workflows.ordering') }}:</span>
-                <div class="value-with-copy">
-                  <span class="value">{{ shorten(execution.ordering_peer_id, 6, 6) }}</span>
-                  <i
-                    class="pi pi-copy copy-icon"
-                    @click="copyOrderingPeerId(execution.ordering_peer_id)"
-                    :title="$t('message.common.copy')"
-                  ></i>
-                </div>
-              </div>
-              <div class="execution-detail" v-if="execution.started_at">
                 <span class="label">{{ $t('message.workflows.started') }}:</span>
                 <span class="value">{{ formatDateTime(execution.started_at) }}</span>
               </div>
-              <div class="execution-detail" v-if="execution.ended_at">
+              <div class="execution-detail" v-if="execution.completed_at">
+                <span class="label">{{ $t('message.workflows.completed') }}:</span>
+                <span class="value">{{ formatDateTime(execution.completed_at) }}</span>
+              </div>
+              <div class="execution-detail" v-if="execution.completed_at">
                 <span class="label">{{ $t('message.workflows.duration') }}:</span>
-                <span class="value">{{ calculateDuration(execution.started_at, execution.ended_at) }}</span>
+                <span class="value">{{ calculateDuration(execution.started_at, execution.completed_at) }}</span>
               </div>
               <div class="execution-detail" v-else-if="execution.started_at">
                 <span class="label">{{ $t('message.workflows.running') }}:</span>
                 <span class="value">{{ getRunningTime(execution.started_at) }}</span>
               </div>
             </div>
-            <div v-if="execution.error_message && execution.status === 'ERRORED'" class="execution-error">
+            <div v-if="execution.error && execution.status === 'failed'" class="execution-error">
               <i class="pi pi-exclamation-triangle"></i>
-              {{ execution.error_message }}
+              {{ execution.error }}
             </div>
 
-            <!-- Interfaces Toggle Button -->
             <div class="execution-actions">
-              <button
-                class="toggle-interfaces-btn"
-                @click="toggleExecutionInterfaces(execution.id)"
-                :class="{ active: expandedExecutionId === execution.id }"
-              >
-                <i :class="expandedExecutionId === execution.id ? 'pi pi-chevron-up' : 'pi pi-chevron-down'"></i>
-                {{ $t('message.workflows.interfaces') }}
+              <button class="view-details-btn">
+                <i class="pi pi-eye"></i>
+                {{ $t('message.workflows.viewDetails') }}
               </button>
-            </div>
-
-            <!-- Interfaces Section (Expandable) -->
-            <div v-if="expandedExecutionId === execution.id" class="execution-interfaces">
-              <div v-if="loadingInterfaces[execution.id]" class="loading-interfaces">
-                <ProgressSpinner style="width:30px;height:30px" strokeWidth="4" />
-              </div>
-
-              <div v-else-if="executionInterfaces[execution.id] && executionInterfaces[execution.id].length > 0" class="interfaces-list">
-                <div
-                  v-for="iface in executionInterfaces[execution.id]"
-                  :key="iface.id"
-                  class="interface-item"
-                  :class="`interface-${iface.interface_type.toLowerCase()}`"
-                >
-                  <div class="interface-header">
-                    <span class="interface-type-badge" :class="`type-${iface.interface_type.toLowerCase()}`">
-                      {{ iface.interface_type }}
-                    </span>
-                  </div>
-                  <div class="interface-path">
-                    <i class="pi pi-file"></i>
-                    <span>{{ iface.path }}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div v-else class="no-interfaces">
-                <i class="pi pi-inbox"></i>
-                <p>{{ $t('message.workflows.noInterfaces') }}</p>
-              </div>
             </div>
           </div>
         </div>
@@ -298,7 +245,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, computed } from 'vue'
+import { onMounted, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useConfirm } from 'primevue/useconfirm'
@@ -315,16 +262,11 @@ import { FilterMatchMode } from '@primevue/core/api'
 import AppLayout from '../layout/AppLayout.vue'
 import { useWorkflowsStore } from '../../stores/workflows'
 import type { Workflow } from '../../stores/workflows'
-import { getApiUrl } from '../../utils/api'
-import { useClipboard } from '../../composables/useClipboard'
-import { useTextUtils } from '../../composables/useTextUtils'
 
 const router = useRouter()
 const { t } = useI18n()
 const confirm = useConfirm()
 const toast = useToast()
-const { copyToClipboard } = useClipboard()
-const { shorten } = useTextUtils()
 
 const workflowsStore = useWorkflowsStore() as any // TODO: Fix Pinia typing
 
@@ -336,37 +278,11 @@ const workflowFilters = ref({
   description: { value: null, matchMode: FilterMatchMode.CONTAINS }
 })
 
-// Job Executions State
-interface JobExecution {
-  id: number
-  workflow_job_id: number
-  service_id: number
-  executor_peer_id: string
-  ordering_peer_id: string
-  status: string
-  started_at: string
-  ended_at: string
-  error_message: string
-  created_at: string
-  updated_at: string
-}
-
-interface JobInterface {
-  id: number
-  job_execution_id: number
-  interface_type: string
-  path: string
-  created_at: string
-}
-
+// Workflow Executions State
 const activeWorkflowId = ref<number | null>(null)
 const activeWorkflowName = ref<string>('')
-const executions = ref<JobExecution[]>([])
+const workflowExecutions = ref<any[]>([])
 const loadingExecutions = ref(false)
-const expandedExecutionId = ref<number | null>(null)
-const executionInterfaces = ref<Record<number, JobInterface[]>>({})
-const loadingInterfaces = ref<Record<number, boolean>>({})
-let refreshInterval: number | null = null
 
 // Computed
 const draftCount = computed(() =>
@@ -474,24 +390,14 @@ function confirmDeleteSelected() {
   })
 }
 
-// Job Executions Methods
+// Workflow Executions Methods
 async function loadExecutions(workflowId: number) {
   if (!workflowId) return
 
   loadingExecutions.value = true
   try {
-    const response = await fetch(getApiUrl(`/api/workflows/${workflowId}/executions`), {
-      headers: {
-        'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
-      }
-    })
-
-    if (!response.ok) {
-      throw new Error('Failed to fetch executions')
-    }
-
-    const data = await response.json()
-    executions.value = data.executions || []
+    const executions = await workflowsStore.fetchWorkflowExecutions(workflowId)
+    workflowExecutions.value = executions
   } catch (error) {
     console.error('Error loading executions:', error)
     toast.add({
@@ -513,109 +419,36 @@ function toggleExecutions(workflow: Workflow) {
     activeWorkflowName.value = workflow.name
     loadExecutions(workflow.id)
 
-    // Set up auto-refresh every 3 seconds
-    if (refreshInterval) {
-      clearInterval(refreshInterval)
-    }
-    refreshInterval = window.setInterval(() => {
-      if (activeWorkflowId.value) {
-        loadExecutions(activeWorkflowId.value)
-      }
-    }, 3000)
+    // WebSocket updates are handled by the workflows store
+    // No polling needed - updates come in real-time via WebSocket
   }
 }
 
 function closeExecutions() {
   activeWorkflowId.value = null
   activeWorkflowName.value = ''
-  executions.value = []
-  expandedExecutionId.value = null
-  executionInterfaces.value = {}
-
-  if (refreshInterval) {
-    clearInterval(refreshInterval)
-    refreshInterval = null
-  }
+  workflowExecutions.value = []
 }
 
-async function toggleExecutionInterfaces(executionId: number) {
-  if (expandedExecutionId.value === executionId) {
-    // Collapse if already expanded
-    expandedExecutionId.value = null
-  } else {
-    // Expand and load interfaces
-    expandedExecutionId.value = executionId
-
-    // Load interfaces if not already loaded
-    if (!executionInterfaces.value[executionId]) {
-      await loadExecutionInterfaces(executionId)
+function viewExecutionDetails(execution: any) {
+  router.push({
+    name: 'ExecutionDetails',
+    params: {
+      workflowId: activeWorkflowId.value!,
+      executionId: execution.id
     }
-  }
-}
-
-async function loadExecutionInterfaces(executionId: number) {
-  loadingInterfaces.value[executionId] = true
-
-  try {
-    const response = await fetch(getApiUrl(`/api/job-executions/${executionId}/interfaces`), {
-      headers: {
-        'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
-      }
-    })
-
-    if (!response.ok) {
-      throw new Error('Failed to fetch interfaces')
-    }
-
-    const data = await response.json()
-    executionInterfaces.value[executionId] = data.interfaces || []
-  } catch (error) {
-    console.error('Error loading execution interfaces:', error)
-    toast.add({
-      severity: 'error',
-      summary: t('message.common.error'),
-      detail: 'Failed to load execution interfaces',
-      life: 3000
-    })
-  } finally {
-    loadingInterfaces.value[executionId] = false
-  }
+  })
 }
 
 function getStatusIcon(status: string): string {
   const icons: Record<string, string> = {
-    IDLE: 'pi pi-circle',
-    READY: 'pi pi-clock',
-    RUNNING: 'pi pi-spin pi-spinner',
-    COMPLETED: 'pi pi-check-circle',
-    ERRORED: 'pi pi-times-circle',
-    CANCELLED: 'pi pi-ban'
+    pending: 'pi pi-clock',
+    running: 'pi pi-spin pi-spinner',
+    completed: 'pi pi-check-circle',
+    failed: 'pi pi-times-circle',
+    cancelled: 'pi pi-ban'
   }
-  return icons[status] || 'pi pi-circle'
-}
-
-async function copyExecutorPeerId(peerId: string) {
-  const success = await copyToClipboard(peerId || '')
-  if (success) {
-    toast.add({
-      severity: 'success',
-      summary: t('message.common.success'),
-      detail: t('message.common.copiedToClipboard'),
-      life: 2000
-    })
-  }
-}
-
-async function copyOrderingPeerId(peerId: string) {
-  const success = await copyToClipboard(peerId || '')
-  if (success) {
-    toast.add({
-      severity: 'success',
-      summary: t('message.common.success'),
-      detail: t('message.common.copiedToClipboard'),
-      life: 2000
-    })
-  }
+  return icons[status.toLowerCase()] || 'pi pi-circle'
 }
 
 function formatDateTime(dateStr: string): string {
@@ -729,12 +562,6 @@ function getRunningTime(startStr: string): string {
 
 onMounted(async () => {
   await workflowsStore.fetchWorkflows()
-})
-
-onUnmounted(() => {
-  if (refreshInterval) {
-    clearInterval(refreshInterval)
-  }
 })
 </script>
 
@@ -1130,6 +957,7 @@ onUnmounted(() => {
     border-radius: 6px;
     padding: 1rem;
     border-left: 4px solid rgb(64, 96, 195);
+    cursor: pointer;
     transition: transform 0.2s ease, box-shadow 0.2s ease;
 
     &:hover {
@@ -1137,11 +965,7 @@ onUnmounted(() => {
       box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
     }
 
-    &.status-idle {
-      border-left-color: #999;
-    }
-
-    &.status-ready {
+    &.status-pending {
       border-left-color: #f59e0b;
     }
 
@@ -1154,7 +978,7 @@ onUnmounted(() => {
       border-left-color: rgba(86, 164, 82, 1);
     }
 
-    &.status-errored {
+    &.status-failed {
       border-left-color: #d32f2f;
     }
 
@@ -1189,12 +1013,7 @@ onUnmounted(() => {
             font-size: 0.875rem;
           }
 
-          &.status-idle {
-            background-color: #666;
-            color: #fff;
-          }
-
-          &.status-ready {
+          &.status-pending {
             background-color: #f59e0b;
             color: #fff;
           }
@@ -1209,7 +1028,7 @@ onUnmounted(() => {
             color: #fff;
           }
 
-          &.status-errored {
+          &.status-failed {
             background-color: #d32f2f;
             color: #fff;
           }
@@ -1292,9 +1111,9 @@ onUnmounted(() => {
       display: flex;
       justify-content: flex-end;
 
-      .toggle-interfaces-btn {
+      .view-details-btn {
         padding: 0.5rem 1rem;
-        background-color: rgb(49, 64, 92);
+        background-color: rgb(205, 81, 36);
         color: #fff;
         border: none;
         border-radius: 4px;
@@ -1306,136 +1125,11 @@ onUnmounted(() => {
         transition: all 0.2s ease;
 
         &:hover {
-          background-color: rgb(64, 96, 195);
-        }
-
-        &.active {
-          background-color: rgb(64, 96, 195);
+          background-color: rgb(246, 114, 66);
         }
 
         i {
-          font-size: 0.75rem;
-        }
-      }
-    }
-
-    .execution-interfaces {
-      margin-top: 1rem;
-      padding: 1rem;
-      background-color: rgb(27, 38, 54);
-      border-radius: 6px;
-      border: 1px solid rgb(49, 64, 92);
-
-      .loading-interfaces {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        padding: 1rem;
-      }
-
-      .no-interfaces {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        padding: 2rem;
-        color: rgba(255, 255, 255, 0.5);
-
-        i {
-          font-size: 2rem;
-          margin-bottom: 0.5rem;
-        }
-
-        p {
           font-size: 0.875rem;
-          margin: 0;
-        }
-      }
-
-      .interfaces-list {
-        display: flex;
-        flex-direction: column;
-        gap: 0.75rem;
-
-        .interface-item {
-          padding: 0.75rem;
-          background-color: rgb(38, 49, 65);
-          border-radius: 4px;
-          border-left: 3px solid rgb(64, 96, 195);
-
-          &.interface-stdin {
-            border-left-color: rgb(84, 116, 215);
-          }
-
-          &.interface-stdout {
-            border-left-color: rgba(86, 164, 82, 1);
-          }
-
-          &.interface-stderr {
-            border-left-color: #d32f2f;
-          }
-
-          &.interface-logs {
-            border-left-color: #f59e0b;
-          }
-
-          &.interface-mount {
-            border-left-color: #8b5cf6;
-          }
-
-          .interface-header {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 0.5rem;
-
-            .interface-type-badge {
-              padding: 0.25rem 0.75rem;
-              border-radius: 12px;
-              font-size: 0.75rem;
-              font-weight: 600;
-              text-transform: uppercase;
-
-              &.type-stdin {
-                background-color: rgba(84, 116, 215, 0.2);
-                color: rgb(84, 116, 215);
-              }
-
-              &.type-stdout {
-                background-color: rgba(86, 164, 82, 0.2);
-                color: rgba(86, 164, 82, 1);
-              }
-
-              &.type-stderr {
-                background-color: rgba(211, 47, 47, 0.2);
-                color: #ff6b6b;
-              }
-
-              &.type-logs {
-                background-color: rgba(245, 158, 11, 0.2);
-                color: #f59e0b;
-              }
-
-              &.type-mount {
-                background-color: rgba(139, 92, 246, 0.2);
-                color: #8b5cf6;
-              }
-            }
-          }
-
-          .interface-path {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-size: 0.875rem;
-            font-family: 'Courier New', monospace;
-            color: rgba(255, 255, 255, 0.8);
-
-            i {
-              color: rgba(255, 255, 255, 0.5);
-              font-size: 0.875rem;
-            }
-          }
         }
       }
     }

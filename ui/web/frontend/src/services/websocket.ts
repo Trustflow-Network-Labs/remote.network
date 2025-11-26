@@ -18,6 +18,8 @@ export enum MessageType {
   RELAY_CANDIDATES = 'relay.candidates',
   SERVICES_UPDATED = 'services.updated',
   WORKFLOWS_UPDATED = 'workflows.updated',
+  EXECUTION_UPDATED = 'execution.updated',
+  JOB_STATUS_UPDATED = 'job.status.updated',
   BLACKLIST_UPDATED = 'blacklist.updated',
 
   // File upload messages
@@ -231,7 +233,7 @@ export class WebSocketService {
   }
 
   // Handle WebSocket close event
-  private onClose(event: CloseEvent): void {
+  private onClose(): void {
 
     // Clear ping timer
     if (this.pingTimer) {

@@ -17,16 +17,17 @@ import (
 
 // WorkflowManager manages workflow lifecycle and orchestration
 type WorkflowManager struct {
-	ctx            context.Context
-	cancel         context.CancelFunc
-	db             *database.SQLiteManager
-	cm             *utils.ConfigManager
-	logger         *utils.LogsManager
-	jobManager     *JobManager
-	peerManager    *PeerManager
+	ctx             context.Context
+	cancel          context.CancelFunc
+	db              *database.SQLiteManager
+	cm              *utils.ConfigManager
+	logger          *utils.LogsManager
+	jobManager      *JobManager
+	peerManager     *PeerManager
+	eventEmitter    EventEmitter // Interface for broadcasting events via WebSocket
 	activeWorkflows map[int64]*WorkflowExecution // workflow_job_id -> execution
-	mu             sync.RWMutex
-	wg             sync.WaitGroup
+	mu              sync.RWMutex
+	wg              sync.WaitGroup
 }
 
 // WorkflowExecution represents an active workflow execution
@@ -58,6 +59,11 @@ func NewWorkflowManager(ctx context.Context, db *database.SQLiteManager, cm *uti
 		peerManager:     peerManager,
 		activeWorkflows: make(map[int64]*WorkflowExecution),
 	}
+}
+
+// SetEventEmitter sets the event emitter for broadcasting updates
+func (wm *WorkflowManager) SetEventEmitter(emitter EventEmitter) {
+	wm.eventEmitter = emitter
 }
 
 // Start starts the workflow manager
@@ -233,7 +239,7 @@ func (wm *WorkflowManager) ExecuteWorkflow(workflowID int64) (*database.Workflow
 		Definition:          workflowDef,
 		WorkflowJobs:        make(map[int64]*database.WorkflowJob), // workflow_job_id -> WorkflowJob
 		JobExecutions:       make(map[string]*database.JobExecution),
-		Status:              "pending",
+		Status:              "PENDING",
 		StartedAt:           time.Now(),
 	}
 
@@ -243,9 +249,14 @@ func (wm *WorkflowManager) ExecuteWorkflow(workflowID int64) (*database.Workflow
 	wm.mu.Unlock()
 
 	// Update workflow execution status to running
-	err = wm.db.UpdateWorkflowExecutionStatus(workflowExecution.ID, "running", "")
+	err = wm.db.UpdateWorkflowExecutionStatus(workflowExecution.ID, "RUNNING", "")
 	if err != nil {
 		wm.logger.Error(fmt.Sprintf("Failed to update workflow execution status: %v", err), "workflow_manager")
+	}
+
+	// Broadcast execution status update via WebSocket
+	if wm.eventEmitter != nil {
+		wm.eventEmitter.BroadcastExecutionUpdate(workflowExecution.ID)
 	}
 
 	// Broadcast job execution requests (non-blocking)
@@ -258,7 +269,7 @@ func (wm *WorkflowManager) ExecuteWorkflow(workflowID int64) (*database.Workflow
 		ID:                  workflowExecution.ID, // Use execution ID as job ID for now
 		WorkflowExecutionID: workflowExecution.ID,
 		WorkflowID:          workflowID,
-		Status:              "running",
+		Status:              "RUNNING",
 		CreatedAt:           workflowExecution.CreatedAt,
 		UpdatedAt:           workflowExecution.UpdatedAt,
 	}
@@ -274,7 +285,7 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 	wm.logger.Info(fmt.Sprintf("Broadcasting job execution requests for workflow execution %d", execution.WorkflowExecutionID), "workflow_manager")
 
 	execution.mu.Lock()
-	execution.Status = "running"
+	execution.Status = "RUNNING"
 	execution.mu.Unlock()
 
 	localPeerID := wm.peerManager.GetPeerID()
@@ -319,7 +330,14 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 	}
 
 	for _, jobDef := range execution.Definition.Jobs {
-		workflowJob := execution.WorkflowJobs[nodeIDToWorkflowJobIDMap[jobDef.NodeID]]
+		workflowJobID := nodeIDToWorkflowJobIDMap[jobDef.NodeID]
+		workflowJob := execution.WorkflowJobs[workflowJobID]
+
+		if workflowJob == nil {
+			wm.logger.Error(fmt.Sprintf("Workflow job not found for node_id=%d, job='%s' - skipping",
+				jobDef.NodeID, jobDef.JobName), "workflow_manager")
+			continue
+		}
 
 		if jobDef.ExecutorPeerID == localPeerID {
 			// LOCAL JOB: Create job_execution on this peer
@@ -332,14 +350,16 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 				continue
 			}
 
-			// Store job_execution_id in workflow_job
+			// Store job_execution_id in workflow_job (database)
 			err = wm.db.UpdateWorkflowJobRemoteExecutionID(workflowJob.ID, jobExec.ID)
 			if err != nil {
 				wm.logger.Error(fmt.Sprintf("Failed to update workflow_job with job_execution_id: %v", err), "workflow_manager")
 			}
 
-			// Track local job execution
+			// Update in-memory workflow_job with job_execution_id
 			execution.mu.Lock()
+			workflowJob.RemoteJobExecutionID = &jobExec.ID
+			execution.WorkflowJobs[workflowJob.ID] = workflowJob
 			execution.JobExecutions[jobDef.JobName] = jobExec
 			execution.mu.Unlock()
 
@@ -348,15 +368,96 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 			wm.logger.Info(fmt.Sprintf("Sending REMOTE job request for workflow_job %d ('%s') to peer %s",
 				workflowJob.ID, jobDef.JobName, jobDef.ExecutorPeerID[:8]), "workflow_manager")
 
-			err := wm.sendRemoteJobRequest(workflowJob, jobDef)
+			remoteJobExecID, err := wm.sendRemoteJobRequest(workflowJob, jobDef)
 			if err != nil {
 				wm.logger.Error(fmt.Sprintf("Failed to send remote job request: %v", err), "workflow_manager")
 				continue
 			}
+
+			// Update in-memory workflow_job with remote job_execution_id
+			execution.mu.Lock()
+			workflowJob.RemoteJobExecutionID = &remoteJobExecID
+			execution.WorkflowJobs[workflowJob.ID] = workflowJob
+			execution.mu.Unlock()
 		}
 	}
 
-	wm.logger.Info(fmt.Sprintf("All job execution requests sent for workflow execution %d. Jobs will execute based on their constraints.",
+	wm.logger.Info(fmt.Sprintf("All job execution requests sent for workflow execution %d",
+		execution.WorkflowExecutionID), "workflow_manager")
+
+	// ============== PHASE 3: Create interfaces with proper ID mapping ==============
+	wm.logger.Info("Phase 3: Creating job interfaces with proper workflow_job_id -> job_execution_id mapping", "workflow_manager")
+
+	// Build nodeID to job_execution_id mapping
+	// This maps workflow definition node_id to the actual job_execution_id
+	nodeIDToJobExecutionIDMap := make(map[int64]int64)
+
+	// Collect job_execution_ids from workflow_jobs
+	// For local jobs, we already have the job_execution_id
+	// For remote jobs, we need to fetch them from workflow_job.remote_job_execution_id
+	for nodeID, wfJobID := range nodeIDToWorkflowJobIDMap {
+		wfJob := execution.WorkflowJobs[wfJobID]
+
+		// Get the job_execution_id from workflow_job
+		// For local jobs, we stored it in remote_job_execution_id in Phase 2
+		// For remote jobs, we also stored it in remote_job_execution_id in Phase 2
+		if wfJob.RemoteJobExecutionID != nil {
+			nodeIDToJobExecutionIDMap[nodeID] = *wfJob.RemoteJobExecutionID
+			wm.logger.Debug(fmt.Sprintf("Mapped node_id=%d -> job_execution_id=%d (from workflow_job %d)",
+				nodeID, *wfJob.RemoteJobExecutionID, wfJob.ID), "workflow_manager")
+		} else {
+			wm.logger.Warn(fmt.Sprintf("Workflow job %d (node_id=%d) has no job_execution_id - skipping interface creation",
+				wfJob.ID, nodeID), "workflow_manager")
+		}
+	}
+
+	// Now create interfaces for all jobs with proper ID mapping
+	// NOTE: Only create interfaces for LOCAL jobs. Remote jobs will create their own interfaces
+	// on the executor peer when they process the job request.
+	for _, jobDef := range execution.Definition.Jobs {
+		workflowJob := execution.WorkflowJobs[nodeIDToWorkflowJobIDMap[jobDef.NodeID]]
+
+		// Skip if no job_execution_id
+		if workflowJob.RemoteJobExecutionID == nil {
+			wm.logger.Warn(fmt.Sprintf("Skipping interface creation for workflow_job %d - no job_execution_id",
+				workflowJob.ID), "workflow_manager")
+			continue
+		}
+
+		jobExecutionID := *workflowJob.RemoteJobExecutionID
+
+		// Only create interfaces for LOCAL jobs
+		// Remote jobs will create interfaces on their executor peer
+		if jobDef.ExecutorPeerID != localPeerID {
+			wm.logger.Info(fmt.Sprintf("Skipping local interface creation for remote job_execution %d ('%s') - interfaces will be created on executor peer %s",
+				jobExecutionID, jobDef.JobName, jobDef.ExecutorPeerID[:8]), "workflow_manager")
+			continue
+		}
+
+		// Get the job_execution record for LOCAL jobs
+		execution.mu.RLock()
+		jobExec := execution.JobExecutions[jobDef.JobName]
+		execution.mu.RUnlock()
+
+		if jobExec == nil {
+			wm.logger.Error(fmt.Sprintf("Local job execution '%s' not found for interface creation", jobDef.JobName), "workflow_manager")
+			continue
+		}
+
+		// Create interfaces with proper ID mapping
+		wm.logger.Info(fmt.Sprintf("Creating interfaces for LOCAL job_execution %d ('%s') with %d interface definitions",
+			jobExec.ID, jobDef.JobName, len(jobDef.Interfaces)), "workflow_manager")
+
+		err := wm.jobManager.CreateJobInterfaces(jobExec, jobDef.Interfaces, nodeIDToJobExecutionIDMap)
+		if err != nil {
+			wm.logger.Error(fmt.Sprintf("Failed to create interfaces for job %d: %v", jobExec.ID, err), "workflow_manager")
+			continue
+		}
+
+		wm.logger.Info(fmt.Sprintf("Interfaces created successfully for LOCAL job_execution %d", jobExec.ID), "workflow_manager")
+	}
+
+	wm.logger.Info(fmt.Sprintf("Phase 3 completed: All interfaces created for workflow execution %d. Jobs will execute based on their constraints.",
 		execution.WorkflowExecutionID), "workflow_manager")
 
 	// Workflow continues asynchronously
@@ -375,32 +476,33 @@ func (wm *WorkflowManager) createLocalJobExecution(workflowJob *database.Workflo
 		Entrypoint:          jobDef.Entrypoint,
 		Commands:            jobDef.Commands,
 		ExecutionConstraint: jobDef.ExecutionConstraint,
-		Interfaces:          jobDef.Interfaces,
+		Interfaces:          jobDef.Interfaces, // Store for Phase 3
 		OrderingPeerID:      wm.peerManager.GetPeerID(),
 		RequestedAt:         time.Now(),
 	}
 
-	// Create job_execution (local submission - does NOT send to remote peer)
-	jobExec, err := wm.jobManager.SubmitJobWithOptions(request, nil, false)
+	// Create job_execution WITHOUT interfaces (Phase 3 will create them)
+	// Skip interface creation in Phase 2 - interfaces will be created in Phase 3 with proper ID mapping
+	jobExec, err := wm.jobManager.SubmitJobWithOptions(request, nil, true) // skipInterfaces = true
 	if err != nil {
 		return nil, fmt.Errorf("failed to create local job execution: %v", err)
 	}
 
-	wm.logger.Info(fmt.Sprintf("Created local job_execution ID=%d for workflow_job ID=%d",
+	wm.logger.Info(fmt.Sprintf("Created local job_execution ID=%d for workflow_job ID=%d (interfaces will be created in Phase 3)",
 		jobExec.ID, workflowJob.ID), "workflow_manager")
 
 	return jobExec, nil
 }
 
-// sendRemoteJobRequest sends a job execution request to a remote peer
-func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJob, jobDef *types.WorkflowJob) error {
+// sendRemoteJobRequest sends a job execution request to a remote peer and returns the remote job_execution_id
+func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJob, jobDef *types.WorkflowJob) (int64, error) {
 	// Note: Connection is handled by jobHandler.SendJobRequest
 	// No explicit connection check needed here
 
 	// Get job handler
 	jobHandler := wm.peerManager.GetJobHandler()
 	if jobHandler == nil {
-		return fmt.Errorf("job handler not available")
+		return 0, fmt.Errorf("job handler not available")
 	}
 
 	// Create job execution request
@@ -425,11 +527,11 @@ func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJo
 
 	response, err := jobHandler.SendJobRequest(workflowJob.ExecutorPeerID, request)
 	if err != nil {
-		return fmt.Errorf("failed to send job request: %v", err)
+		return 0, fmt.Errorf("failed to send job request: %v", err)
 	}
 
 	if !response.Accepted {
-		return fmt.Errorf("job rejected by remote peer: %s", response.Message)
+		return 0, fmt.Errorf("job rejected by remote peer: %s", response.Message)
 	}
 
 	// Store the remote peer's job_execution_id in workflow_job
@@ -438,10 +540,10 @@ func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJo
 
 	err = wm.db.UpdateWorkflowJobRemoteExecutionID(workflowJob.ID, response.JobExecutionID)
 	if err != nil {
-		return fmt.Errorf("failed to store remote job_execution_id: %v", err)
+		return 0, fmt.Errorf("failed to store remote job_execution_id: %v", err)
 	}
 
-	return nil
+	return response.JobExecutionID, nil
 }
 
 // Note: Dependency resolution and job orchestration moved to peer-side
@@ -467,7 +569,7 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 				Type           string `json:"type"`
 				Path           string `json:"path"`
 				InterfacePeers []struct {
-					PeerNodeID        string  `json:"peer_node_id"`
+					PeerID            string  `json:"peer_id"`
 					PeerJobID         *int64  `json:"peer_job_id,omitempty"`
 					PeerPath          string  `json:"peer_path"`
 					PeerMountFunction string  `json:"peer_mount_function"`
@@ -501,6 +603,9 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 		UpdatedAt:   workflow.UpdatedAt,
 	}
 
+	// Get local peer ID (orchestrator) for normalizing empty PeerID values
+	localPeerID := wm.peerManager.GetPeerID()
+
 	// Parse each job
 	for _, jobDef := range jsonDef.Jobs {
 		job := &types.WorkflowJob{
@@ -513,7 +618,7 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 			Commands:            jobDef.Commands,
 			ExecutionConstraint: jobDef.ExecutionConstraint,
 			Interfaces:          make([]*types.JobInterface, 0, len(jobDef.Interfaces)),
-			Status:              "pending",
+			Status:              "PENDING",
 		}
 
 		// Parse interfaces
@@ -526,9 +631,19 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 
 			// Parse interface peers
 			for _, peerDef := range ifaceDef.InterfacePeers {
+				// Normalize empty PeerID to actual orchestrator peer ID
+				// Empty PeerID from frontend means "Local Peer" (orchestrator/requester)
+				// We normalize it here so all code downstream can use actual peer IDs
+				peerID := peerDef.PeerID
+				if peerID == "" {
+					peerID = localPeerID
+					wm.logger.Debug(fmt.Sprintf("Normalized empty PeerID to orchestrator %s for job '%s' interface %s",
+						localPeerID[:8], jobDef.Name, ifaceDef.Type), "workflow_manager")
+				}
+
 				peer := &types.InterfacePeer{
-					PeerNodeID:        peerDef.PeerNodeID,
-					PeerJobID:         peerDef.PeerJobID,
+					PeerID:            peerID, // Use normalized peer ID
+					PeerWorkflowJobID: peerDef.PeerJobID, // NOTE: At workflow definition time, this is workflow_node_id
 					PeerPath:          peerDef.PeerPath,
 					PeerMountFunction: peerDef.PeerMountFunction,
 					DutyAcknowledged:  peerDef.DutyAcknowledged,
@@ -819,7 +934,8 @@ func (wm *WorkflowManager) validateDataTransferConstraints(jobs []*types.Workflo
 					continue // We only care about outputs (where data goes)
 				}
 
-				destPeerID := peer.PeerNodeID
+				// Note: PeerID is always populated (normalized at workflow parsing time)
+				destPeerID := peer.PeerID
 
 				// Rule 1: Allow transfer to requester (download)
 				if destPeerID == requesterPeerID {
@@ -831,8 +947,13 @@ func (wm *WorkflowManager) validateDataTransferConstraints(jobs []*types.Workflo
 				// Find the destination job that will receive this data
 				destJob := wm.findJobByPeerAndInputPath(jobs, destPeerID, peer.PeerPath)
 				if destJob == nil {
+					// Safely format peer ID (handle short peer IDs)
+					peerIDDisplay := destPeerID
+					if len(destPeerID) > 8 {
+						peerIDDisplay = destPeerID[:8]
+					}
 					return fmt.Errorf("DATA job '%s' cannot transfer to peer %s: destination is not requester and no computation job found using this data as input",
-						job.JobName, destPeerID[:8])
+						job.JobName, peerIDDisplay)
 				}
 
 				// Verify destination job is a computation job (DOCKER or STANDALONE)
@@ -939,7 +1060,7 @@ func (wm *WorkflowManager) GetWorkflowStatus(workflowJobID int64) (*types.Workfl
 		completed := 0
 		var lastError string
 		for _, job := range workflowJobs {
-			if job.Status == "completed" {
+			if job.Status == "COMPLETED" {
 				completed++
 			}
 			if job.Error != "" {
@@ -1084,14 +1205,34 @@ func (wm *WorkflowManager) requestJobStatus(execution *WorkflowExecution, jobNam
 // checkWorkflowCompletion checks if a workflow has completed and updates its status
 func (wm *WorkflowManager) checkWorkflowCompletion(execution *WorkflowExecution) {
 	execution.mu.RLock()
-	defer execution.mu.RUnlock()
-
-	// Count job statuses
-	var completed, errored, total int
-	total = len(execution.JobExecutions)
-
+	jobExecutions := make([]*database.JobExecution, 0, len(execution.JobExecutions))
 	for _, jobExec := range execution.JobExecutions {
-		switch jobExec.Status {
+		jobExecutions = append(jobExecutions, jobExec)
+	}
+	execution.mu.RUnlock()
+
+	// Count job statuses - refresh from database to get latest status
+	var completed, errored, total int
+	total = len(jobExecutions)
+
+	for _, jobExec := range jobExecutions {
+		// Refresh job status from database (important for local jobs)
+		freshJob, err := wm.db.GetJobExecution(jobExec.ID)
+		if err != nil {
+			wm.logger.Warn(fmt.Sprintf("Failed to refresh job %d status from database: %v", jobExec.ID, err), "workflow_manager")
+			// Fall back to cached status
+			freshJob = jobExec
+		}
+
+		// Update in-memory status if it changed
+		if freshJob.Status != jobExec.Status {
+			execution.mu.Lock()
+			jobExec.Status = freshJob.Status
+			jobExec.ErrorMessage = freshJob.ErrorMessage
+			execution.mu.Unlock()
+		}
+
+		switch freshJob.Status {
 		case types.JobStatusCompleted:
 			completed++
 		case types.JobStatusErrored, types.JobStatusCancelled:
@@ -1105,10 +1246,10 @@ func (wm *WorkflowManager) checkWorkflowCompletion(execution *WorkflowExecution)
 		var errorMsg string
 
 		if errored > 0 {
-			finalStatus = "failed"
+			finalStatus = "FAILED"
 			errorMsg = fmt.Sprintf("%d of %d jobs failed", errored, total)
 		} else {
-			finalStatus = "completed"
+			finalStatus = "COMPLETED"
 		}
 
 		wm.logger.Info(fmt.Sprintf("Workflow execution %d completed: %s (completed: %d, errored: %d, total: %d)",
@@ -1118,6 +1259,11 @@ func (wm *WorkflowManager) checkWorkflowCompletion(execution *WorkflowExecution)
 		err := wm.db.UpdateWorkflowExecutionStatus(execution.WorkflowExecutionID, finalStatus, errorMsg)
 		if err != nil {
 			wm.logger.Error(fmt.Sprintf("Failed to update workflow execution status: %v", err), "workflow_manager")
+		}
+
+		// Broadcast execution status update via WebSocket
+		if wm.eventEmitter != nil {
+			wm.eventEmitter.BroadcastExecutionUpdate(execution.WorkflowExecutionID)
 		}
 
 		// Remove from active workflows

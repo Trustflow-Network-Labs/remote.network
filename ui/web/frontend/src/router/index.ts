@@ -65,6 +65,12 @@ const routes: RouteRecordRaw[] = [
     name: 'WorkflowEditor',
     component: () => import('../components/workflows/WorkflowEditor.vue'),
     meta: { requiresAuth: true }
+  },
+  {
+    path: '/workflows/:workflowId/executions/:executionId',
+    name: 'ExecutionDetails',
+    component: () => import('../components/workflows/ExecutionDetailsView.vue'),
+    meta: { requiresAuth: true }
   }
 ]
 
@@ -74,7 +80,7 @@ const router = createRouter({
 })
 
 // Navigation guard for authentication
-router.beforeEach((to, from, next) => {
+router.beforeEach((to, _from, next) => {
   const authStore = useAuthStore()
 
   if (to.meta.requiresAuth && !authStore.isAuthenticated) {

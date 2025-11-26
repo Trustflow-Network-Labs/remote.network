@@ -417,6 +417,30 @@ class APIClient {
     return response.data
   }
 
+  /**
+   * Get workflow execution instances
+   */
+  async getWorkflowExecutionInstances(workflowId: number) {
+    const response = await this.client.get(`/api/workflows/${workflowId}/execution-instances`)
+    return response.data
+  }
+
+  /**
+   * Get jobs for a workflow execution
+   */
+  async getWorkflowExecutionJobs(executionId: number) {
+    const response = await this.client.get(`/api/workflow-executions/${executionId}/jobs`)
+    return response.data
+  }
+
+  /**
+   * Get workflow execution status (execution + jobs)
+   */
+  async getWorkflowExecutionStatus(executionId: number) {
+    const response = await this.client.get(`/api/workflow-executions/${executionId}/status`)
+    return response.data
+  }
+
   // ===== Relay API =====
 
   /**

@@ -518,6 +518,47 @@ func (e *Emitter) BroadcastWorkflowUpdate() {
 	}
 }
 
+// BroadcastExecutionUpdate sends a workflow execution status update
+func (e *Emitter) BroadcastExecutionUpdate(executionID int64) {
+	execution, err := e.dbManager.GetWorkflowExecutionByID(executionID)
+	if err != nil {
+		e.logger.WithError(err).Error("Failed to get execution for broadcast")
+		return
+	}
+
+	payload := ws.ExecutionUpdatedPayload{
+		ExecutionID: execution.ID,
+		WorkflowID:  execution.WorkflowID,
+		Status:      execution.Status,
+		Error:       execution.Error,
+		StartedAt:   execution.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}
+
+	if !execution.CompletedAt.IsZero() {
+		payload.CompletedAt = execution.CompletedAt.Format("2006-01-02T15:04:05Z07:00")
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeExecutionUpdated, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to broadcast execution update")
+	}
+}
+
+// BroadcastJobStatusUpdate sends a job status update
+func (e *Emitter) BroadcastJobStatusUpdate(jobExecutionID, workflowJobID, executionID int64, jobName, status, errorMsg string) {
+	payload := ws.JobStatusUpdatedPayload{
+		JobExecutionID: jobExecutionID,
+		WorkflowJobID:  workflowJobID,
+		ExecutionID:    executionID,
+		JobName:        jobName,
+		Status:         status,
+		Error:          errorMsg,
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeJobStatusUpdated, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to broadcast job status update")
+	}
+}
+
 // BroadcastBlacklistUpdate sends an immediate blacklist update
 func (e *Emitter) BroadcastBlacklistUpdate() {
 	blacklist, err := e.dbManager.GetBlacklist()

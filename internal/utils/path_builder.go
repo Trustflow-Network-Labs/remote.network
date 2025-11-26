@@ -9,8 +9,10 @@ import (
 type JobPathInfo struct {
 	OrchestratorPeerID  string // Peer that created the workflow
 	WorkflowExecutionID int64  // The workflow_executions.id
-	ExecutorPeerID      string // Peer executing the job
-	JobExecutionID      int64  // The executor's job_executions.id
+	ExecutorPeerID      string // Peer executing the job (sender for transfers)
+	JobExecutionID      int64  // The executor's job_executions.id (sender for transfers)
+	ReceiverPeerID      string // Peer receiving the data (for transfers)
+	ReceiverJobExecID   int64  // Receiver's job_executions.id (0 for "Local Peer")
 }
 
 // PathType represents different types of paths for job data
@@ -75,19 +77,34 @@ func BuildTransferSourcePath(baseDir string, info JobPathInfo, interfaceType str
 }
 
 // BuildTransferDestinationPath constructs the destination path for a data transfer
+// Pattern: /workflows/<orchestrator_peer>/<execution_id>/jobs/<sender_peer>/<sender_job_id>/<receiver_peer>/<receiver_job_id>/<path_type>/
 // For STDIN: uses input directory
 // For MOUNT: uses specific mount path
 func BuildTransferDestinationPath(baseDir string, info JobPathInfo, interfaceType string, interfacePath string) string {
+	// Build path with sender and receiver information
+	// Pattern: /workflows/<orchestrator>/<execution>/jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/input/
+	basePath := filepath.Join(
+		baseDir,
+		"workflows",
+		info.OrchestratorPeerID,
+		fmt.Sprintf("%d", info.WorkflowExecutionID),
+		"jobs",
+		info.ExecutorPeerID,          // Sender peer
+		fmt.Sprintf("%d", info.JobExecutionID), // Sender job execution ID
+		info.ReceiverPeerID,           // Receiver peer
+		fmt.Sprintf("%d", info.ReceiverJobExecID), // Receiver job execution ID (0 for "Local Peer")
+	)
+
 	switch interfaceType {
 	case "STDIN":
 		// STDIN data goes to input directory
-		return BuildJobPath(baseDir, info, PathTypeInput)
+		return filepath.Join(basePath, string(PathTypeInput))
 	case "MOUNT":
-		// Mount points use the specific mount path
-		return BuildJobMountPath(baseDir, info, interfacePath)
+		// Mount points use the specific mount path under mounts/
+		return filepath.Join(basePath, string(PathTypeMounts), interfacePath)
 	default:
 		// Default to input
-		return BuildJobPath(baseDir, info, PathTypeInput)
+		return filepath.Join(basePath, string(PathTypeInput))
 	}
 }
 
