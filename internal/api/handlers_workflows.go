@@ -143,13 +143,19 @@ func (s *APIServer) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Fetch the updated workflow to return to client
+	updatedWorkflow, err := s.dbManager.GetWorkflowByID(id)
+	if err != nil {
+		s.logger.Error("Failed to fetch updated workflow", "api")
+		http.Error(w, "Failed to retrieve updated workflow", http.StatusInternalServerError)
+		return
+	}
+
 	// Broadcast workflow update via WebSocket
 	s.eventEmitter.BroadcastWorkflowUpdate()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Workflow updated successfully",
-	})
+	json.NewEncoder(w).Encode(updatedWorkflow)
 }
 
 // handleDeleteWorkflow deletes a workflow

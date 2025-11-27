@@ -204,6 +204,14 @@ export const useWorkflowsStore = defineStore('workflows', {
         const response = await api.updateWorkflow(id, updates)
         // Backend returns workflow directly
         const updatedWorkflow = response.workflow || response
+
+        // Preserve jobs array if it exists in currentWorkflow but not in response
+        if (this.currentWorkflow?.id === id && this.currentWorkflow.jobs) {
+          if (!updatedWorkflow.jobs) {
+            updatedWorkflow.jobs = this.currentWorkflow.jobs
+          }
+        }
+
         const index = this.workflows.findIndex(w => w.id === id)
         if (index !== -1) {
           this.workflows[index] = updatedWorkflow
