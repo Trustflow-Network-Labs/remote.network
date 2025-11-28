@@ -381,6 +381,14 @@ class APIClient {
   }
 
   /**
+   * Update node configuration (entrypoint and cmd)
+   */
+  async updateNodeConfig(workflowId: number, nodeId: number, config: { entrypoint: string[]; cmd: string[] }) {
+    const response = await this.client.put(`/api/workflows/${workflowId}/nodes/${nodeId}/config`, config)
+    return response.data
+  }
+
+  /**
    * Get workflow UI state
    */
   async getWorkflowUIState(workflowId: number) {

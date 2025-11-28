@@ -292,6 +292,22 @@ export const useWorkflowsStore = defineStore('workflows', {
       }
     },
 
+    async updateJobConfig(workflowId: number, jobId: number, entrypoint: string[], cmd: string[]) {
+      try {
+        await api.updateNodeConfig(workflowId, jobId, { entrypoint, cmd })
+        if (this.currentWorkflow?.id === workflowId && this.currentWorkflow.jobs) {
+          const job = this.currentWorkflow.jobs.find(j => j.id === jobId)
+          if (job) {
+            job.entrypoint = entrypoint.length > 0 ? entrypoint : undefined
+            job.cmd = cmd.length > 0 ? cmd : undefined
+          }
+        }
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        throw error
+      }
+    },
+
     async updateUIState(workflowId: number, state: Partial<WorkflowUIState>) {
       try {
         await api.updateWorkflowUIState(workflowId, state)

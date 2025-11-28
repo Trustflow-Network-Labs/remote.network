@@ -496,6 +496,8 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		if strings.Contains(r.URL.Path, "/nodes") {
 			if strings.HasSuffix(r.URL.Path, "/gui-props") {
 				s.handleUpdateWorkflowNodeGUIProps(w, r)
+			} else if strings.HasSuffix(r.URL.Path, "/config") {
+				s.handleUpdateWorkflowNodeConfig(w, r)
 			} else if strings.Contains(r.URL.Path, "/nodes/") {
 				// DELETE /api/workflows/:id/nodes/:nodeId
 				s.handleDeleteWorkflowNode(w, r)

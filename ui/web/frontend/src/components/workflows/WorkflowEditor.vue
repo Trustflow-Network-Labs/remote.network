@@ -573,24 +573,66 @@ function configureServiceCard(cardId: number) {
   jobConfigVisible.value = true
 }
 
-function onJobConfigSave(data: { entrypoint: string[], cmd: string[] }) {
+async function onJobConfigSave(data: { entrypoint: string[], cmd: string[] }) {
   if (!selectedJobForConfig.value) return
 
   // Update the job in serviceCards
   const card = serviceCards.value.find(c => c.job.id === selectedJobForConfig.value?.id)
-  if (card) {
-    card.job.entrypoint = data.entrypoint.length > 0 ? data.entrypoint : undefined
-    card.job.cmd = data.cmd.length > 0 ? data.cmd : undefined
+  if (!card) {
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: 'Job not found',
+      life: 3000
+    })
+    selectedJobForConfig.value = null
+    return
   }
 
-  toast.add({
-    severity: 'success',
-    summary: t('message.common.success'),
-    detail: t('message.workflows.jobConfigSaved'),
-    life: 3000
-  })
+  // Check if workflow exists
+  if (!workflowsStore.currentWorkflow?.id) {
+    toast.add({
+      severity: 'warn',
+      summary: t('message.common.warning'),
+      detail: 'Please save the workflow before configuring jobs',
+      life: 5000
+    })
+    selectedJobForConfig.value = null
+    return
+  }
 
-  selectedJobForConfig.value = null
+  loading.value = true
+
+  try {
+    // Save to database via API
+    await workflowsStore.updateJobConfig(
+      workflowsStore.currentWorkflow.id,
+      card.job.id,
+      data.entrypoint,
+      data.cmd
+    )
+
+    // Update local state
+    card.job.entrypoint = data.entrypoint.length > 0 ? data.entrypoint : undefined
+    card.job.cmd = data.cmd.length > 0 ? data.cmd : undefined
+
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.workflows.jobConfigSaved'),
+      life: 3000
+    })
+  } catch (error: any) {
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: error.message || 'Failed to save job configuration',
+      life: 5000
+    })
+  } finally {
+    loading.value = false
+    selectedJobForConfig.value = null
+  }
 }
 
 function onJobConfigCancel() {

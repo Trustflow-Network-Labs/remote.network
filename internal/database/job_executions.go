@@ -543,6 +543,32 @@ func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInter
 	return peers, nil
 }
 
+// UpdateJobInterfacePeerJobExecutionID updates the peer_job_execution_id for a job interface peer
+// This is called when a data transfer request is received to record the sender's job_execution_id
+// so that hierarchical paths can be constructed correctly for input checking and Docker mounts
+func (sm *SQLiteManager) UpdateJobInterfacePeerJobExecutionID(jobExecutionID int64, peerID string, peerJobExecutionID int64) error {
+	result, err := sm.db.Exec(`
+		UPDATE job_interface_peers
+		SET peer_job_execution_id = ?
+		WHERE job_interface_id IN (
+			SELECT id FROM job_interfaces WHERE job_execution_id = ?
+		)
+		AND peer_id = ?
+		AND peer_mount_function IN ('INPUT', 'BOTH')
+	`, peerJobExecutionID, jobExecutionID, peerID)
+
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to update peer_job_execution_id: %v", err), "database")
+		return err
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	sm.logger.Info(fmt.Sprintf("Updated peer_job_execution_id=%d for job %d from peer %s (%d rows affected)",
+		peerJobExecutionID, jobExecutionID, peerID[:8], rowsAffected), "database")
+
+	return nil
+}
+
 // GetSenderDestinationPath finds the destination path that a sender job used when sending data to a receiver job.
 // This queries the sender's job_interface_peers to find the peer_path they used as the transfer destination.
 func (sm *SQLiteManager) GetSenderDestinationPath(senderJobID int64, receiverJobID int64) (string, error) {
@@ -609,6 +635,65 @@ func (sm *SQLiteManager) MarkInterfacePeerAcknowledged(interfacePeerID int64) er
 	}
 
 	return nil
+}
+
+// GetJobExecutionByWorkflowJobAndOrderingPeer retrieves a specific job execution by workflow_job_id and ordering_peer_id
+// This ensures uniqueness when the same workflow_job_id might have multiple executions from different orchestrators
+func (sm *SQLiteManager) GetJobExecutionByWorkflowJobAndOrderingPeer(workflowJobID int64, orderingPeerID string) (*JobExecution, error) {
+	var job JobExecution
+	var startedAt, endedAt sql.NullTime
+	var errorMsg sql.NullString
+	var remoteJobID sql.NullInt64
+
+	err := sm.db.QueryRow(`
+		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
+		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
+		       started_at, ended_at, error_message, created_at, updated_at
+		FROM job_executions
+		WHERE workflow_job_id = ? AND ordering_peer_id = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, workflowJobID, orderingPeerID).Scan(
+		&job.ID,
+		&job.WorkflowJobID,
+		&job.ServiceID,
+		&job.ExecutorPeerID,
+		&job.OrderingPeerID,
+		&remoteJobID,
+		&job.Status,
+		&job.Entrypoint,
+		&job.Commands,
+		&job.ExecutionConstraint,
+		&job.ConstraintDetail,
+		&startedAt,
+		&endedAt,
+		&errorMsg,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("job execution not found for workflow_job_id=%d, ordering_peer_id=%s", workflowJobID, orderingPeerID)
+	}
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to get job execution: %v", err), "database")
+		return nil, err
+	}
+
+	if remoteJobID.Valid {
+		job.RemoteJobExecutionID = &remoteJobID.Int64
+	}
+	if startedAt.Valid {
+		job.StartedAt = startedAt.Time
+	}
+	if endedAt.Valid {
+		job.EndedAt = endedAt.Time
+	}
+	if errorMsg.Valid {
+		job.ErrorMessage = errorMsg.String
+	}
+
+	return &job, nil
 }
 
 // GetJobExecutionsByWorkflowJob retrieves all job executions for a workflow job

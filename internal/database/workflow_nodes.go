@@ -12,12 +12,12 @@ type WorkflowNode struct {
 	ID              int64                  `json:"id"`
 	WorkflowID      int64                  `json:"workflow_id"`
 	ServiceID       int64                  `json:"service_id"`
-	PeerID          string                 `json:"peer_id"`       // App Peer ID that provides the service
+	PeerID          string                 `json:"peer_id"` // App Peer ID that provides the service
 	ServiceName     string                 `json:"service_name"`
-	ServiceType     string                 `json:"service_type"`  // "DATA", "DOCKER", "STANDALONE"
-	Order           int                    `json:"order"`         // Execution order
-	GUIX            int                    `json:"gui_x"`         // X position in UI
-	GUIY            int                    `json:"gui_y"`         // Y position in UI
+	ServiceType     string                 `json:"service_type"`             // "DATA", "DOCKER", "STANDALONE"
+	Order           int                    `json:"order"`                    // Execution order
+	GUIX            int                    `json:"gui_x"`                    // X position in UI
+	GUIY            int                    `json:"gui_y"`                    // Y position in UI
 	InputMapping    map[string]interface{} `json:"input_mapping,omitempty"`  // Input connections
 	OutputMapping   map[string]interface{} `json:"output_mapping,omitempty"` // Output connections
 	Interfaces      []interface{}          `json:"interfaces,omitempty"`     // Service interfaces from remote service search
@@ -47,13 +47,13 @@ type WorkflowUIState struct {
 
 // WorkflowConnection represents a connection between workflow nodes
 type WorkflowConnection struct {
-	ID               int64     `json:"id"`
-	WorkflowID       int64     `json:"workflow_id"`
-	FromNodeID       *int64    `json:"from_node_id"`       // Source node ID (null if self-peer)
-	FromInterfaceType string   `json:"from_interface_type"` // STDIN, STDOUT, MOUNT
-	ToNodeID         *int64    `json:"to_node_id"`         // Destination node ID (null if self-peer)
-	ToInterfaceType  string    `json:"to_interface_type"`   // STDIN, STDOUT, MOUNT
-	CreatedAt        time.Time `json:"created_at"`
+	ID                int64     `json:"id"`
+	WorkflowID        int64     `json:"workflow_id"`
+	FromNodeID        *int64    `json:"from_node_id"`        // Source node ID (null if self-peer)
+	FromInterfaceType string    `json:"from_interface_type"` // STDIN, STDOUT, MOUNT
+	ToNodeID          *int64    `json:"to_node_id"`          // Destination node ID (null if self-peer)
+	ToInterfaceType   string    `json:"to_interface_type"`   // STDIN, STDOUT, MOUNT
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // InitWorkflowNodesTable creates the workflow_nodes and workflow_ui_state tables
@@ -333,6 +333,40 @@ func (sm *SQLiteManager) UpdateWorkflowNodeGUIProps(nodeID int64, x, y int) erro
 		return fmt.Errorf("failed to update workflow node GUI props: %v", err)
 	}
 
+	return nil
+}
+
+// UpdateWorkflowNodeConfig updates the entrypoint and cmd of a workflow node
+func (sm *SQLiteManager) UpdateWorkflowNodeConfig(nodeID int64, entrypoint, cmd []string) error {
+	// Marshal entrypoint and cmd as JSON arrays
+	var entrypointJSON, cmdJSON []byte
+	var err error
+
+	if len(entrypoint) > 0 {
+		entrypointJSON, err = json.Marshal(entrypoint)
+		if err != nil {
+			return fmt.Errorf("failed to marshal entrypoint: %v", err)
+		}
+	}
+
+	if len(cmd) > 0 {
+		cmdJSON, err = json.Marshal(cmd)
+		if err != nil {
+			return fmt.Errorf("failed to marshal cmd: %v", err)
+		}
+	}
+
+	_, err = sm.db.Exec(`
+		UPDATE workflow_nodes
+		SET entrypoint = ?, cmd = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, entrypointJSON, cmdJSON, nodeID)
+
+	if err != nil {
+		return fmt.Errorf("failed to update workflow node config: %v", err)
+	}
+
+	sm.logger.Info(fmt.Sprintf("Workflow node config updated: node_id=%d", nodeID), "database")
 	return nil
 }
 

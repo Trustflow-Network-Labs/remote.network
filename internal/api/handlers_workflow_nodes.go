@@ -153,6 +153,54 @@ func (s *APIServer) handleUpdateWorkflowNodeGUIProps(w http.ResponseWriter, r *h
 	})
 }
 
+// handleUpdateWorkflowNodeConfig updates node configuration (entrypoint and cmd)
+// PUT /api/workflows/:id/nodes/:nodeId/config
+func (s *APIServer) handleUpdateWorkflowNodeConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract IDs from path
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 6 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	nodeID, err := strconv.ParseInt(parts[4], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid node ID", http.StatusBadRequest)
+		return
+	}
+
+	var config struct {
+		Entrypoint []string `json:"entrypoint"`
+		Cmd        []string `json:"cmd"`
+	}
+	err = json.NewDecoder(r.Body).Decode(&config)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	err = s.dbManager.UpdateWorkflowNodeConfig(nodeID, config.Entrypoint, config.Cmd)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to update node config: %v", err), "api")
+		http.Error(w, "Failed to update node configuration", http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast workflow update via WebSocket
+	s.eventEmitter.BroadcastWorkflowUpdate()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+	})
+}
+
 // handleDeleteWorkflowNode deletes a node from a workflow
 // DELETE /api/workflows/:id/nodes/:nodeId
 func (s *APIServer) handleDeleteWorkflowNode(w http.ResponseWriter, r *http.Request) {

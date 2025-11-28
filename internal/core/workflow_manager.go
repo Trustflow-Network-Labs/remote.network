@@ -448,7 +448,7 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 		wm.logger.Info(fmt.Sprintf("Creating interfaces for LOCAL job_execution %d ('%s') with %d interface definitions",
 			jobExec.ID, jobDef.JobName, len(jobDef.Interfaces)), "workflow_manager")
 
-		err := wm.jobManager.CreateJobInterfaces(jobExec, jobDef.Interfaces, nodeIDToJobExecutionIDMap)
+		err := wm.jobManager.CreateJobInterfaces(jobExec, jobDef.Interfaces, nodeIDToJobExecutionIDMap, nodeIDToWorkflowJobIDMap)
 		if err != nil {
 			wm.logger.Error(fmt.Sprintf("Failed to create interfaces for job %d: %v", jobExec.ID, err), "workflow_manager")
 			continue
@@ -569,11 +569,11 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 				Type           string `json:"type"`
 				Path           string `json:"path"`
 				InterfacePeers []struct {
-					PeerID            string  `json:"peer_id"`
-					PeerJobID         *int64  `json:"peer_job_id,omitempty"`
-					PeerPath          string  `json:"peer_path"`
-					PeerMountFunction string  `json:"peer_mount_function"`
-					DutyAcknowledged  bool    `json:"duty_acknowledged,omitempty"`
+					PeerID             string  `json:"peer_id"`
+					PeerWorkflowNodeID *int64  `json:"peer_workflow_node_id,omitempty"`
+					PeerPath           string  `json:"peer_path"`
+					PeerMountFunction  string  `json:"peer_mount_function"`
+					DutyAcknowledged   bool    `json:"duty_acknowledged,omitempty"`
 				} `json:"interface_peers"`
 			} `json:"interfaces"`
 		} `json:"jobs"`
@@ -643,7 +643,7 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 
 				peer := &types.InterfacePeer{
 					PeerID:            peerID, // Use normalized peer ID
-					PeerWorkflowJobID: peerDef.PeerJobID, // NOTE: At workflow definition time, this is workflow_node_id
+					PeerWorkflowJobID: peerDef.PeerWorkflowNodeID, // NOTE: At workflow definition time, this is workflow_node_id
 					PeerPath:          peerDef.PeerPath,
 					PeerMountFunction: peerDef.PeerMountFunction,
 					DutyAcknowledged:  peerDef.DutyAcknowledged,
