@@ -400,30 +400,25 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 
 	if isExecutorPeer {
 		// We're on an executor peer - workflow_jobs table doesn't exist here
-		// Use WorkflowJobID directly as the workflow_execution_id for path construction
-		jm.logger.Debug(fmt.Sprintf("Running on executor peer - using WorkflowJobID %d as execution ID for path construction", job.WorkflowJobID), "job_manager")
+		// Use WorkflowJobID directly as the workflow_job_id for path construction
+		jm.logger.Debug(fmt.Sprintf("Running on executor peer - using WorkflowJobID %d for path construction", job.WorkflowJobID), "job_manager")
 		pathInfo = utils.JobPathInfo{
-			OrchestratorPeerID:  job.OrderingPeerID,
-			WorkflowExecutionID: job.WorkflowJobID, // This is the orchestrator's workflow_job.id
-			ExecutorPeerID:      job.ExecutorPeerID,
-			JobExecutionID:      job.ID,
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      job.WorkflowJobID, // This is the orchestrator's workflow_job.id
+			ExecutorPeerID:     job.ExecutorPeerID,
+			JobExecutionID:     job.ID,
 		}
 	} else {
-		// We're on the orchestrator - get the proper workflow execution ID
-		workflowJob, err := jm.db.GetWorkflowJobByID(job.WorkflowJobID)
-		if err != nil {
-			jm.logger.Error(fmt.Sprintf("Failed to get workflow job %d: %v", job.WorkflowJobID, err), "job_manager")
-			jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to get workflow job: %v", err))
-			return
-		}
+		// We're on the orchestrator - use the workflow_job_id for consistent path structure
+		jm.logger.Debug(fmt.Sprintf("Running on orchestrator - using WorkflowJobID %d for path construction", job.WorkflowJobID), "job_manager")
 
 		// Create workflow directory structure using new hierarchical pattern
-		// Pattern: /workflows/{orchestrator_peer}/{workflow_execution_id}/jobs/{executor_peer}/{job_execution_id}/
+		// Pattern: /workflows/{orchestrator_peer}/{workflow_job_id}/jobs/{executor_peer}/{job_execution_id}/
 		pathInfo = utils.JobPathInfo{
-			OrchestratorPeerID:  job.OrderingPeerID,
-			WorkflowExecutionID: workflowJob.WorkflowExecutionID,
-			ExecutorPeerID:      job.ExecutorPeerID,
-			JobExecutionID:      job.ID,
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      job.WorkflowJobID, // Use workflow_job.id for consistency with executor
+			ExecutorPeerID:     job.ExecutorPeerID,
+			JobExecutionID:     job.ID,
 		}
 	}
 
@@ -486,8 +481,8 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 	envVars := make(map[string]string)
 
 	// Relative path prefix for outputs using new hierarchical structure
-	// Pattern: workflows/{orchestrator_peer}/{workflow_execution_id}/jobs/{executor_peer}/{job_execution_id}/output
-	relPathPrefix := filepath.Join("workflows", job.OrderingPeerID, fmt.Sprintf("%d", pathInfo.WorkflowExecutionID), "jobs", job.ExecutorPeerID, fmt.Sprintf("%d", job.ID), "output")
+	// Pattern: workflows/{orchestrator_peer}/{workflow_job_id}/jobs/{executor_peer}/{job_execution_id}/output
+	relPathPrefix := filepath.Join("workflows", job.OrderingPeerID, fmt.Sprintf("%d", pathInfo.WorkflowJobID), "jobs", job.ExecutorPeerID, fmt.Sprintf("%d", job.ID), "output")
 
 	// Get job interfaces to check for input peers
 	jobInterfaces, err := jm.db.GetJobInterfaces(job.ID)
@@ -572,12 +567,12 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 					// Note: sender's job_execution record doesn't exist locally (it's on sender's peer)
 					// But we have all the info we need: inputPeer.PeerID and inputPeer.PeerJobExecutionID
 					transferPathInfo := utils.JobPathInfo{
-						OrchestratorPeerID:  job.OrderingPeerID,
-						WorkflowExecutionID: pathInfo.WorkflowExecutionID,
-						ExecutorPeerID:      inputPeer.PeerID,              // Sender peer ID
-						JobExecutionID:      *inputPeer.PeerJobExecutionID, // Sender job execution ID
-						ReceiverPeerID:      job.ExecutorPeerID,            // Receiver peer (this job)
-						ReceiverJobExecID:   job.ID,                        // Receiver job ID (this job)
+						OrchestratorPeerID: job.OrderingPeerID,
+						WorkflowJobID:      pathInfo.WorkflowJobID,
+						ExecutorPeerID:     inputPeer.PeerID,              // Sender peer ID
+						JobExecutionID:     *inputPeer.PeerJobExecutionID, // Sender job execution ID
+						ReceiverPeerID:     job.ExecutorPeerID,            // Receiver peer (this job)
+						ReceiverJobExecID:  job.ID,                        // Receiver job ID (this job)
 					}
 					hostPath = utils.BuildTransferDestinationPath(appPaths.DataDir, transferPathInfo, "MOUNT", iface.Path)
 					jm.logger.Info(fmt.Sprintf("Using hierarchical transfer path for INPUT mount: %s", hostPath), "job_manager")
@@ -651,7 +646,7 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 
 	// Transfer outputs to connected jobs/peers
 	if len(outputs) > 0 {
-		err = jm.transferDockerOutputs(job, pathInfo.WorkflowExecutionID, outputDir)
+		err = jm.transferDockerOutputs(job, pathInfo.WorkflowJobID, outputDir)
 		if err != nil {
 			jm.logger.Error(fmt.Sprintf("Failed to transfer outputs: %v", err), "job_manager")
 			jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to transfer outputs: %v", err))
@@ -679,7 +674,7 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 // transferDockerOutputs transfers Docker job outputs to connected jobs/peers
 // Handles STDOUT, STDERR, LOGS, and MOUNT outputs (where PeerMountFunction is OUTPUT or BOTH)
 // For remote peers, creates a transfer package with all outputs bundled together
-func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflowExecutionID int64, outputDir string) error {
+func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflowJobID int64, outputDir string) error {
 	jm.logger.Info(fmt.Sprintf("Transferring outputs for job %d", job.ID), "job_manager")
 
 	// Get job interfaces to find output connections
@@ -691,10 +686,10 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 	// Build workflow job directory using new hierarchical structure
 	appPaths := utils.GetAppPaths("")
 	pathInfo := utils.JobPathInfo{
-		OrchestratorPeerID:  job.OrderingPeerID,
-		WorkflowExecutionID: workflowExecutionID,
-		ExecutorPeerID:      job.ExecutorPeerID,
-		JobExecutionID:      job.ID,
+		OrchestratorPeerID: job.OrderingPeerID,
+		WorkflowJobID:      workflowJobID,
+		ExecutorPeerID:     job.ExecutorPeerID,
+		JobExecutionID:     job.ID,
 	}
 	workflowJobDir := utils.BuildJobPath(appPaths.DataDir, pathInfo, utils.PathTypeOutput)
 	// Remove "/output" suffix to get base job directory
@@ -771,12 +766,12 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 				if inputPeer != nil && inputPeer.PeerJobExecutionID != nil && *inputPeer.PeerJobExecutionID > 0 && inputPeer.PeerID != "" {
 					// Files were received via hierarchical transfer - use that path
 					transferPathInfo := utils.JobPathInfo{
-						OrchestratorPeerID:  job.OrderingPeerID,
-						WorkflowExecutionID: workflowExecutionID,
-						ExecutorPeerID:      inputPeer.PeerID,              // Sender peer ID
-						JobExecutionID:      *inputPeer.PeerJobExecutionID, // Sender job execution ID
-						ReceiverPeerID:      job.ExecutorPeerID,            // Receiver peer (this job)
-						ReceiverJobExecID:   job.ID,                        // Receiver job ID (this job)
+						OrchestratorPeerID: job.OrderingPeerID,
+						WorkflowJobID:      workflowJobID,
+						ExecutorPeerID:     inputPeer.PeerID,              // Sender peer ID
+						JobExecutionID:     *inputPeer.PeerJobExecutionID, // Sender job execution ID
+						ReceiverPeerID:     job.ExecutorPeerID,            // Receiver peer (this job)
+						ReceiverJobExecID:  job.ID,                        // Receiver job ID (this job)
 					}
 					mountDir = utils.BuildTransferDestinationPath(appPaths.DataDir, transferPathInfo, "MOUNT", iface.Path)
 					jm.logger.Info(fmt.Sprintf("Collecting MOUNT outputs from hierarchical transfer path: %s", mountDir), "job_manager")
@@ -824,7 +819,7 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 							formatPeerID(actualPeerID), formatPeerID(localPeerID), formatPeerID(job.OrderingPeerID)), "job_manager")
 						if actualPeerID == localPeerID {
 							jm.logger.Info(fmt.Sprintf("Transferring MOUNT file %s locally", mountFileName), "job_manager")
-							err = jm.transferOutputLocally(job, workflowExecutionID, peer, mountFilePath, mountFileName)
+							err = jm.transferOutputLocally(job, workflowJobID, peer, mountFilePath, mountFileName)
 							if err != nil {
 								jm.logger.Error(fmt.Sprintf("Failed to transfer MOUNT file locally: %v", err), "job_manager")
 							}
@@ -882,7 +877,7 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 				iface.InterfaceType, formatPeerID(actualPeerID), formatPeerID(localPeerID), formatPeerID(job.OrderingPeerID)), "job_manager")
 			if actualPeerID == localPeerID {
 				jm.logger.Info(fmt.Sprintf("Transferring %s locally", iface.InterfaceType), "job_manager")
-				err = jm.transferOutputLocally(job, workflowExecutionID, peer, outputFilePath, outputFileName)
+				err = jm.transferOutputLocally(job, workflowJobID, peer, outputFilePath, outputFileName)
 				if err != nil {
 					jm.logger.Error(fmt.Sprintf("Failed to transfer %s locally: %v", iface.InterfaceType, err), "job_manager")
 				}
@@ -911,7 +906,7 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 		builder, err := utils.NewTransferPackageBuilder(
 			localPeerID,
 			peerID,
-			workflowExecutionID,
+			workflowJobID,
 			job.ID,
 			jm.logger,
 		)
@@ -969,11 +964,11 @@ func (jm *JobManager) transferDataServiceOutputs(job *database.JobExecution, wor
 
 // transferOutputLocally moves output file to receiving job's input directory
 // If PeerJobID is nil or 0 (Local Peer/requester), files are moved to the hierarchical destination path:
-// /workflows/<orchestrator>/<execution>/jobs/<executor>/<job_id>/<receiver_peer>/0/input/
+// /workflows/<orchestrator>/<workflow_job_id>/jobs/<executor>/<job_id>/<receiver_peer>/0/input/
 // Otherwise, it goes to the receiving job's input/mounts directory with the receiver job ID.
 // IMPORTANT: This should only be called when the destination peer is the same as the local peer.
 // For remote destinations, use transferOutputRemotely or transferOutputPackageRemotely instead.
-func (jm *JobManager) transferOutputLocally(job *database.JobExecution, workflowExecutionID int64, peer *database.JobInterfacePeer, outputFilePath, fileName string) error {
+func (jm *JobManager) transferOutputLocally(job *database.JobExecution, workflowJobID int64, peer *database.JobInterfacePeer, outputFilePath, fileName string) error {
 	appPaths := utils.GetAppPaths("")
 	var destPath string
 
@@ -986,12 +981,12 @@ func (jm *JobManager) transferOutputLocally(job *database.JobExecution, workflow
 
 		// Build path with sender (this job) and receiver (orchestrator/"Local Peer")
 		destPathInfo := utils.JobPathInfo{
-			OrchestratorPeerID:  job.OrderingPeerID,
-			WorkflowExecutionID: workflowExecutionID,
-			ExecutorPeerID:      job.ExecutorPeerID, // Sender peer
-			JobExecutionID:      job.ID,             // Sender job execution ID
-			ReceiverPeerID:      job.OrderingPeerID, // Receiver is orchestrator
-			ReceiverJobExecID:   0,                  // 0 for "Local Peer"
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      workflowJobID,
+			ExecutorPeerID:     job.ExecutorPeerID, // Sender peer
+			JobExecutionID:     job.ID,             // Sender job execution ID
+			ReceiverPeerID:     job.OrderingPeerID, // Receiver is orchestrator
+			ReceiverJobExecID:  0,                  // 0 for "Local Peer"
 		}
 
 		// Determine interface type for path construction
@@ -1023,12 +1018,12 @@ func (jm *JobManager) transferOutputLocally(job *database.JobExecution, workflow
 
 		// Build path with sender and receiver information using new architecture
 		destPathInfo := utils.JobPathInfo{
-			OrchestratorPeerID:  job.OrderingPeerID,
-			WorkflowExecutionID: workflowExecutionID,
-			ExecutorPeerID:      job.ExecutorPeerID,          // Sender peer
-			JobExecutionID:      job.ID,                      // Sender job execution ID
-			ReceiverPeerID:      receivingJob.ExecutorPeerID, // Receiver peer
-			ReceiverJobExecID:   receivingJobExecID,          // Receiver job execution ID
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      workflowJobID,
+			ExecutorPeerID:     job.ExecutorPeerID,          // Sender peer
+			JobExecutionID:     job.ID,                      // Sender job execution ID
+			ReceiverPeerID:     receivingJob.ExecutorPeerID, // Receiver peer
+			ReceiverJobExecID:  receivingJobExecID,          // Receiver job execution ID
 		}
 
 		// Determine interface type for path construction
@@ -1267,9 +1262,22 @@ func (jm *JobManager) transferOutputRemotely(job *database.JobExecution, peer *d
 	keyDataFormatted := fmt.Sprintf("%s|%s", passphrase, hex.EncodeToString(keyData))
 
 	// Get destination job execution ID from peer record
+	// If PeerWorkflowJobID is nil, this is "Local Peer" (final destination) - use 0
 	var destJobExecID int64
-	if peer.PeerJobExecutionID != nil {
+	if peer.PeerWorkflowJobID == nil {
+		// No workflow job ID - this is "Local Peer" final destination
+		destJobExecID = 0
+		jm.logger.Debug(fmt.Sprintf("Destination is Local Peer (PeerWorkflowJobID=nil) - using destJobExecID=0 for peer %s",
+			formatPeerID(peer.PeerID)), "job_manager")
+	} else if peer.PeerJobExecutionID != nil {
+		// Specific job destination - use their job execution ID
 		destJobExecID = *peer.PeerJobExecutionID
+		jm.logger.Debug(fmt.Sprintf("Destination is specific job (PeerWorkflowJobID=%d) - using destJobExecID=%d for peer %s",
+			*peer.PeerWorkflowJobID, destJobExecID, formatPeerID(peer.PeerID)), "job_manager")
+	} else {
+		// destJobExecID remains 0 (job not started yet)
+		jm.logger.Debug(fmt.Sprintf("Destination job not started yet (PeerWorkflowJobID=%d, PeerJobExecutionID=nil) - using destJobExecID=0 for peer %s",
+			*peer.PeerWorkflowJobID, formatPeerID(peer.PeerID)), "job_manager")
 	}
 
 	transferRequest := &types.JobDataTransferRequest{
@@ -1430,9 +1438,22 @@ func (jm *JobManager) transferPackageRemotely(job *database.JobExecution, peer *
 	}
 
 	// Get destination job execution ID from peer record
+	// If PeerWorkflowJobID is nil, this is "Local Peer" (final destination) - use 0
 	var destJobExecID int64
-	if peer.PeerJobExecutionID != nil {
+	if peer.PeerWorkflowJobID == nil {
+		// No workflow job ID - this is "Local Peer" final destination
+		destJobExecID = 0
+		jm.logger.Debug(fmt.Sprintf("Destination is Local Peer (PeerWorkflowJobID=nil) - using destJobExecID=0 for peer %s",
+			formatPeerID(peer.PeerID)), "job_manager")
+	} else if peer.PeerJobExecutionID != nil {
+		// Specific job destination - use their job execution ID
 		destJobExecID = *peer.PeerJobExecutionID
+		jm.logger.Debug(fmt.Sprintf("Destination is specific job (PeerWorkflowJobID=%d) - using destJobExecID=%d for peer %s",
+			*peer.PeerWorkflowJobID, destJobExecID, formatPeerID(peer.PeerID)), "job_manager")
+	} else {
+		// destJobExecID remains 0 (job not started yet)
+		jm.logger.Debug(fmt.Sprintf("Destination job not started yet (PeerWorkflowJobID=%d, PeerJobExecutionID=nil) - using destJobExecID=0 for peer %s",
+			*peer.PeerWorkflowJobID, formatPeerID(peer.PeerID)), "job_manager")
 	}
 
 	// Send transfer request - use PACKAGE interface type to indicate this is a transfer package
@@ -2116,12 +2137,11 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 		}
 
 		orchestratorPeerID = destJobExec.OrderingPeerID
-		// WorkflowJobID in job_execution is actually the workflow_job.id on orchestrator, not workflow_execution_id
-		// We need to get workflow_execution_id. For now, we'll use the workflow_job_id field which should work
-		// since the request comes with enough context
+		// WorkflowJobID in job_execution is the workflow_job.id from orchestrator
+		// Use it directly for consistent path structure across orchestrator and executor
 		workflowExecutionID = destJobExec.WorkflowJobID
 
-		jm.logger.Info(fmt.Sprintf("Executor receiving transfer for job %d from orchestrator %s (using workflow_job_id as execution_id: %d)",
+		jm.logger.Info(fmt.Sprintf("Executor receiving transfer for job %d from orchestrator %s (using workflow_job_id: %d)",
 			request.DestinationJobExecutionID, orchestratorPeerID[:8], workflowExecutionID), "job_manager")
 	} else {
 		// Orchestrator peer - look up workflow_job (for Local Peer delivery)
@@ -2148,9 +2168,9 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 		}
 
 		orchestratorPeerID = jm.peerManager.GetPeerID()
-		workflowExecutionID = workflowJob.WorkflowExecutionID
+		workflowExecutionID = request.WorkflowJobID // Use workflow_job_id for consistent path structure
 
-		jm.logger.Info(fmt.Sprintf("Orchestrator receiving transfer for Local Peer (workflow execution %d)",
+		jm.logger.Info(fmt.Sprintf("Orchestrator receiving transfer for Local Peer (workflow_job_id %d)",
 			workflowExecutionID), "job_manager")
 	}
 
@@ -2174,7 +2194,7 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 	}
 
 	// Build hierarchical path according to design document:
-	// /workflows/<orchestrator>/<workflow_execution_id>/jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/input/
+	// /workflows/<orchestrator>/<workflow_job_id>/jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/input/
 	appPaths := utils.GetAppPaths("remote-network")
 	var hierarchicalPath string
 	var transferJobID int64 // Job ID to associate with transfer (for status tracking)
@@ -2204,10 +2224,10 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 		hierarchicalPath = filepath.Join(
 			appPaths.DataDir,
 			"workflows",
-			orchestratorPeerID, // Orchestrator peer ID
-			fmt.Sprintf("%d", workflowJob.WorkflowExecutionID), // Workflow execution ID
+			orchestratorPeerID,                                   // Orchestrator peer ID
+			fmt.Sprintf("%d", request.WorkflowJobID),             // Workflow job ID (consistent with executor)
 			"jobs",
-			request.SourcePeerID, // Sender peer ID (from request)
+			request.SourcePeerID,                                 // Sender peer ID (from request)
 			fmt.Sprintf("%d", *workflowJob.RemoteJobExecutionID), // Sender job execution ID
 			request.DestinationPeerID,                            // Receiver peer ID (orchestrator)
 			"0",                                                  // Receiver job ID = 0 for "Local Peer"
@@ -2541,26 +2561,23 @@ func (jm *JobManager) checkInputsReady(job *database.JobExecution) (bool, error)
 
 	if isExecutorPeer {
 		// We're on an executor peer - workflow_jobs table doesn't exist here
-		// Use WorkflowJobID directly as the workflow_execution_id for path construction
-		jm.logger.Debug(fmt.Sprintf("Running on executor peer - using WorkflowJobID %d as execution ID for path construction", job.WorkflowJobID), "job_manager")
+		// Use WorkflowJobID directly as the workflow_job_id for path construction
+		jm.logger.Debug(fmt.Sprintf("Running on executor peer - using WorkflowJobID %d for path construction", job.WorkflowJobID), "job_manager")
 		pathInfo = utils.JobPathInfo{
-			OrchestratorPeerID:  job.OrderingPeerID,
-			WorkflowExecutionID: job.WorkflowJobID, // This is the orchestrator's workflow_job.id
-			ExecutorPeerID:      job.ExecutorPeerID,
-			JobExecutionID:      job.ID,
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      job.WorkflowJobID, // This is the orchestrator's workflow_job.id
+			ExecutorPeerID:     job.ExecutorPeerID,
+			JobExecutionID:     job.ID,
 		}
 	} else {
-		// We're on the orchestrator - get the proper workflow execution ID
-		workflowJob, err := jm.db.GetWorkflowJobByID(job.WorkflowJobID)
-		if err != nil {
-			return false, fmt.Errorf("failed to get workflow job %d: %v", job.WorkflowJobID, err)
-		}
+		// We're on the orchestrator - use the workflow_job_id for consistent path structure
+		jm.logger.Debug(fmt.Sprintf("Running on orchestrator - using WorkflowJobID %d for path construction", job.WorkflowJobID), "job_manager")
 
 		pathInfo = utils.JobPathInfo{
-			OrchestratorPeerID:  job.OrderingPeerID,
-			WorkflowExecutionID: workflowJob.WorkflowExecutionID,
-			ExecutorPeerID:      job.ExecutorPeerID,
-			JobExecutionID:      job.ID,
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      job.WorkflowJobID, // Use workflow_job.id for consistency with executor
+			ExecutorPeerID:     job.ExecutorPeerID,
+			JobExecutionID:     job.ID,
 		}
 	}
 
@@ -2602,12 +2619,12 @@ func (jm *JobManager) checkInputsReady(job *database.JobExecution) (bool, error)
 					// Note: sender's job_execution record doesn't exist locally (it's on sender's peer)
 					// But we have all the info we need: peer.PeerID and peer.PeerJobExecutionID
 					transferPathInfo := utils.JobPathInfo{
-						OrchestratorPeerID:  job.OrderingPeerID,
-						WorkflowExecutionID: job.WorkflowJobID,
-						ExecutorPeerID:      peer.PeerID,              // Sender peer ID
-						JobExecutionID:      *peer.PeerJobExecutionID, // Sender job execution ID
-						ReceiverPeerID:      job.ExecutorPeerID,       // Receiver peer (this job)
-						ReceiverJobExecID:   job.ID,                   // Receiver job ID (this job)
+						OrchestratorPeerID: job.OrderingPeerID,
+						WorkflowJobID:      job.WorkflowJobID,
+						ExecutorPeerID:     peer.PeerID,              // Sender peer ID
+						JobExecutionID:     *peer.PeerJobExecutionID, // Sender job execution ID
+						ReceiverPeerID:     job.ExecutorPeerID,       // Receiver peer (this job)
+						ReceiverJobExecID:  job.ID,                   // Receiver job ID (this job)
 					}
 					inputPath = utils.BuildTransferDestinationPath(appPaths.DataDir, transferPathInfo, "STDIN", "")
 					jm.logger.Debug(fmt.Sprintf("Job %d checking hierarchical STDIN path: %s", job.ID, inputPath), "job_manager")
@@ -2630,12 +2647,12 @@ func (jm *JobManager) checkInputsReady(job *database.JobExecution) (bool, error)
 					// Note: sender's job_execution record doesn't exist locally (it's on sender's peer)
 					// But we have all the info we need: peer.PeerID and peer.PeerJobExecutionID
 					transferPathInfo := utils.JobPathInfo{
-						OrchestratorPeerID:  job.OrderingPeerID,
-						WorkflowExecutionID: job.WorkflowJobID,
-						ExecutorPeerID:      peer.PeerID,              // Sender peer ID
-						JobExecutionID:      *peer.PeerJobExecutionID, // Sender job execution ID
-						ReceiverPeerID:      job.ExecutorPeerID,       // Receiver peer (this job)
-						ReceiverJobExecID:   job.ID,                   // Receiver job ID (this job)
+						OrchestratorPeerID: job.OrderingPeerID,
+						WorkflowJobID:      job.WorkflowJobID,
+						ExecutorPeerID:     peer.PeerID,              // Sender peer ID
+						JobExecutionID:     *peer.PeerJobExecutionID, // Sender job execution ID
+						ReceiverPeerID:     job.ExecutorPeerID,       // Receiver peer (this job)
+						ReceiverJobExecID:  job.ID,                   // Receiver job ID (this job)
 					}
 					inputPath = utils.BuildTransferDestinationPath(appPaths.DataDir, transferPathInfo, "MOUNT", mountPath)
 					jm.logger.Debug(fmt.Sprintf("Job %d checking hierarchical MOUNT path: %s", job.ID, inputPath), "job_manager")

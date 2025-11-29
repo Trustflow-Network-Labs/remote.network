@@ -413,10 +413,15 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 	// Check if job handler is available for actual transfer
 	if dsw.jobHandler != nil {
 		// Get destination job execution ID from peer record
+		// If PeerWorkflowJobID is nil, this is "Local Peer" (final destination) - use 0
 		var destJobExecID int64
-		if peer.PeerJobExecutionID != nil {
+		if peer.PeerWorkflowJobID == nil {
+			// No workflow job ID - this is "Local Peer" final destination
+			destJobExecID = 0
+		} else if peer.PeerJobExecutionID != nil {
+			// Specific job destination with known execution ID
 			destJobExecID = *peer.PeerJobExecutionID
-		} else if peer.PeerWorkflowJobID != nil {
+		} else {
 			// Fallback: Look up the job_execution by workflow_job_id and ordering_peer_id
 			// On executor side, we need to look up job_execution.id directly (not workflow_job.remote_job_execution_id)
 			// because the executor IS the remote side, so remote_job_execution_id would be empty
@@ -1465,12 +1470,12 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 
 		// Build path with sender (this job) and receiver (orchestrator/"Local Peer")
 		pathInfo := utils.JobPathInfo{
-			OrchestratorPeerID:  job.OrderingPeerID,
-			WorkflowExecutionID: workflowJob.WorkflowExecutionID,
-			ExecutorPeerID:      job.ExecutorPeerID,     // Sender peer
-			JobExecutionID:      job.ID,                 // Sender job execution ID
-			ReceiverPeerID:      job.OrderingPeerID,     // Receiver is orchestrator
-			ReceiverJobExecID:   0,                      // 0 for "Local Peer"
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      workflowJob.ID,      // Use workflow_job.id for consistent paths
+			ExecutorPeerID:     job.ExecutorPeerID,  // Sender peer
+			JobExecutionID:     job.ID,              // Sender job execution ID
+			ReceiverPeerID:     job.OrderingPeerID,  // Receiver is orchestrator
+			ReceiverJobExecID:  0,                   // 0 for "Local Peer"
 		}
 
 		hierarchicalPath = utils.BuildTransferDestinationPath(
@@ -1499,12 +1504,12 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 
 		// Build path info with sender and receiver information
 		pathInfo := utils.JobPathInfo{
-			OrchestratorPeerID:  job.OrderingPeerID,
-			WorkflowExecutionID: workflowJob.WorkflowExecutionID,
-			ExecutorPeerID:      job.ExecutorPeerID,      // Sender peer
-			JobExecutionID:      job.ID,                  // Sender job execution ID
-			ReceiverPeerID:      destJob.ExecutorPeerID,  // Receiver peer
-			ReceiverJobExecID:   destJobExecID,           // Receiver job execution ID
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      workflowJob.ID,           // Use workflow_job.id for consistent paths
+			ExecutorPeerID:     job.ExecutorPeerID,       // Sender peer
+			JobExecutionID:     job.ID,                   // Sender job execution ID
+			ReceiverPeerID:     destJob.ExecutorPeerID,   // Receiver peer
+			ReceiverJobExecID:  destJobExecID,            // Receiver job execution ID
 		}
 
 		// Use BuildTransferDestinationPath which includes sender and receiver info
