@@ -394,7 +394,7 @@ async function addServiceToWorkflow(service: any, x: number, y: number) {
 
     // Setup connector handlers for the new card
     await nextTick()
-    setupConnectorHandlers()
+    await setupConnectorHandlers()
 
     toast.add({
       severity: 'success',
@@ -811,7 +811,7 @@ async function loadWorkflow() {
     // Still initialize self-peer for new workflows
     await initializeSelfPeerDraggable()
     await nextTick()
-    setupConnectorHandlers()
+    await setupConnectorHandlers()
     return
   }
 
@@ -822,7 +822,7 @@ async function loadWorkflow() {
     // Still initialize self-peer for invalid IDs
     await initializeSelfPeerDraggable()
     await nextTick()
-    setupConnectorHandlers()
+    await setupConnectorHandlers()
     return
   }
 
@@ -864,7 +864,7 @@ async function loadWorkflow() {
     // Set up connector handlers for all cards including self-peer
     await nextTick()
     await nextTick() // Extra tick to ensure connectors are in DOM
-    setupConnectorHandlers()
+    await setupConnectorHandlers()
 
     // Load connections after all cards and connectors are fully initialized
     if (workflow.jobs && workflow.jobs.length > 0) {
@@ -1421,7 +1421,21 @@ function updateConnectionsForCard(cardId: string | number) {
   connections.value.forEach(conn => {
     if (conn.fromCardId == cardId || conn.toCardId == cardId) {
       if (conn.line && conn.line.position) {
-        conn.line.position()
+        try {
+          // Check if both start and end elements are still in the document
+          const startElement = conn.line.start
+          const endElement = conn.line.end
+
+          // Verify elements exist and are connected to the DOM
+          if (startElement && endElement &&
+              document.contains(startElement) &&
+              document.contains(endElement)) {
+            conn.line.position()
+          }
+        } catch (error) {
+          // Silently handle disconnected element errors during drag operations
+          // The line will be repositioned after drag completes
+        }
       }
     }
   })
@@ -1440,7 +1454,7 @@ function clearConnectionsUI() {
   connections.value.length = 0
 }
 
-function setupConnectorHandlers() {
+async function setupConnectorHandlers() {
   // Remove existing handlers by cloning and replacing (cleanest way to remove all listeners)
   document.querySelectorAll('.card-rip-connector.allowed').forEach(connector => {
     const clone = connector.cloneNode(true)
@@ -1456,6 +1470,73 @@ function setupConnectorHandlers() {
       connector.addEventListener('click', (e) => handleConnectorClick(e, cardId, connectorType))
     }
   })
+
+  // Wait for DOM to settle after cloning
+  await nextTick()
+
+  // Recreate all leader-line connections with the new cloned connector elements
+  // This is necessary because cloning replaced the DOM elements that leader-line was pointing to
+  // We can't just update start/end properties because leader-line validates them immediately
+  const connectionsToRecreate = [...connections.value]
+
+  // Clear existing connections UI
+  connections.value.forEach(c => {
+    if (c.line && c.line.remove) {
+      try {
+        c.line.remove()
+      } catch (error) {
+        // Silently handle errors removing old lines
+      }
+    }
+  })
+  connections.value.length = 0
+
+  // Recreate each connection with new DOM elements
+  for (const conn of connectionsToRecreate) {
+    const fromElement = document.querySelector(`[data-card-id="${conn.fromCardId}"][data-connector="output"]`)
+    const toElement = document.querySelector(`[data-card-id="${conn.toCardId}"][data-connector="input"]`)
+
+    if (fromElement && toElement && document.contains(fromElement) && document.contains(toElement)) {
+      try {
+        // Create new leader line with the new connector elements
+        const line = new LeaderLine(
+          fromElement,
+          toElement,
+          {
+            color: 'rgb(205, 81, 36)',
+            size: 3,
+            path: 'fluid',
+            startPlug: 'disc',
+            endPlug: 'arrow2',
+            startPlugColor: 'rgb(205, 81, 36)',
+            endPlugColor: 'rgb(205, 81, 36)'
+          }
+        )
+
+        const connectionId = `${conn.fromCardId}->${conn.toCardId}`
+        ;(line as any)._connectionId = connectionId
+
+        // Add click handler
+        const svgElement = await attachConnectionClickHandler(connectionId, line)
+
+        // Add back to connections array
+        connections.value.push({
+          line,
+          from: conn.from,
+          to: conn.to,
+          fromCardId: conn.fromCardId,
+          toCardId: conn.toCardId,
+          fromCardName: conn.fromCardName,
+          toCardName: conn.toCardName,
+          dbConnections: conn.dbConnections,
+          svgElement: svgElement || undefined,
+          interfaces: conn.interfaces
+        })
+      } catch (error) {
+        // Silently handle any errors during reconnection
+      }
+    }
+  }
 }
 
 async function initializeSelfPeerDraggable() {
