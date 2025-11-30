@@ -31,6 +31,7 @@ type JobMessageHandler struct {
 	ourPeerID     string
 	// Callbacks for job operations
 	onJobRequest              func(*types.JobExecutionRequest, string) (*types.JobExecutionResponse, error)
+	onJobStart                func(*types.JobStartRequest, string) (*types.JobStartResponse, error)
 	onJobStatusUpdate         func(*types.JobStatusUpdate, string) error
 	onJobStatusRequest        func(*types.JobStatusRequest, string) (*types.JobStatusResponse, error)
 	onJobDataTransferRequest  func(*types.JobDataTransferRequest, string) (*types.JobDataTransferResponse, error)
@@ -62,6 +63,7 @@ func (jmh *JobMessageHandler) SetDependencies(dbManager *database.SQLiteManager,
 // SetCallbacks sets the callback functions for job operations
 func (jmh *JobMessageHandler) SetCallbacks(
 	onJobRequest func(*types.JobExecutionRequest, string) (*types.JobExecutionResponse, error),
+	onJobStart func(*types.JobStartRequest, string) (*types.JobStartResponse, error),
 	onJobStatusUpdate func(*types.JobStatusUpdate, string) error,
 	onJobStatusRequest func(*types.JobStatusRequest, string) (*types.JobStatusResponse, error),
 	onJobDataTransferRequest func(*types.JobDataTransferRequest, string) (*types.JobDataTransferResponse, error),
@@ -70,6 +72,7 @@ func (jmh *JobMessageHandler) SetCallbacks(
 	onJobCancel func(*types.JobCancelRequest, string) (*types.JobCancelResponse, error),
 ) {
 	jmh.onJobRequest = onJobRequest
+	jmh.onJobStart = onJobStart
 	jmh.onJobStatusUpdate = onJobStatusUpdate
 	jmh.onJobStatusRequest = onJobStatusRequest
 	jmh.onJobDataTransferRequest = onJobDataTransferRequest
@@ -88,6 +91,12 @@ func (jmh *JobMessageHandler) HandleJobMessage(msg *QUICMessage, stream *quic.St
 
 	case MessageTypeJobResponse:
 		return jmh.handleJobResponse(msg, stream, peerID)
+
+	case MessageTypeJobStart:
+		return jmh.handleJobStart(msg, stream, peerID)
+
+	case MessageTypeJobStartResponse:
+		return jmh.handleJobStartResponse(msg, stream, peerID)
 
 	case MessageTypeJobStatusUpdate:
 		return jmh.handleJobStatusUpdate(msg, stream, peerID)
@@ -134,6 +143,9 @@ func (jmh *JobMessageHandler) HandleRelayedJobMessage(msg *QUICMessage, sourcePe
 	switch msg.Type {
 	case MessageTypeJobRequest:
 		return jmh.handleRelayedJobRequest(msg, sourcePeerID)
+
+	case MessageTypeJobStart:
+		return jmh.handleRelayedJobStart(msg, sourcePeerID)
 
 	case MessageTypeJobStatusRequest:
 		return jmh.handleRelayedJobStatusRequest(msg, sourcePeerID)
@@ -223,6 +235,43 @@ func (jmh *JobMessageHandler) handleRelayedJobRequest(msg *QUICMessage, peerID s
 
 	jmh.logger.Info(fmt.Sprintf("Sending relayed job response for workflow job %d: accepted=%v", request.WorkflowJobID, response.Accepted), "job_handler")
 	return CreateJobResponse(response)
+}
+
+// handleRelayedJobStart handles job start requests from relay (returns response instead of writing to stream)
+func (jmh *JobMessageHandler) handleRelayedJobStart(msg *QUICMessage, peerID string) *QUICMessage {
+	if jmh.onJobStart == nil {
+		jmh.logger.Error("No callback registered for job start requests", "job_handler")
+		return CreateJobStartResponse(&types.JobStartResponse{
+			Started: false,
+			Message: "job start handler not available",
+		})
+	}
+
+	var request types.JobStartRequest
+	if err := msg.GetDataAs(&request); err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse job start request: %v", err), "job_handler")
+		return CreateJobStartResponse(&types.JobStartResponse{
+			Started: false,
+			Message: fmt.Sprintf("invalid request: %v", err),
+		})
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Received relayed job start request from peer %s for job execution %d", peerID[:8], request.JobExecutionID), "job_handler")
+
+	// Call the callback
+	response, err := jmh.onJobStart(&request, peerID)
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Job start callback failed: %v", err), "job_handler")
+		response = &types.JobStartResponse{
+			JobExecutionID: request.JobExecutionID,
+			WorkflowJobID:  request.WorkflowJobID,
+			Started:        false,
+			Message:        fmt.Sprintf("Job start failed: %v", err),
+		}
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Sending relayed job start response for job execution %d: started=%v", request.JobExecutionID, response.Started), "job_handler")
+	return CreateJobStartResponse(response)
 }
 
 // handleRelayedJobStatusRequest handles status requests from relay
@@ -386,6 +435,65 @@ func (jmh *JobMessageHandler) handleJobResponse(msg *QUICMessage, _ *quic.Stream
 
 	jmh.logger.Info(fmt.Sprintf("Received job response for workflow job %d from peer %s: accepted=%v", response.WorkflowJobID, peerID, response.Accepted), "job_handler")
 	// TODO: Handle response (update workflow status, etc.)
+	return nil
+}
+
+// handleJobStart handles incoming job start requests (Phase 2)
+func (jmh *JobMessageHandler) handleJobStart(msg *QUICMessage, stream *quic.Stream, peerID string) error {
+	if jmh.onJobStart == nil {
+		jmh.logger.Error("No callback registered for job start requests", "job_handler")
+		return fmt.Errorf("no callback registered for job start requests")
+	}
+
+	var request types.JobStartRequest
+	if err := msg.GetDataAs(&request); err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse job start request: %v", err), "job_handler")
+		return err
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Received job start request for job execution %d from peer %s", request.JobExecutionID, peerID), "job_handler")
+
+	// Call the callback
+	response, err := jmh.onJobStart(&request, peerID)
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Job start callback failed: %v", err), "job_handler")
+		// Send error response
+		response = &types.JobStartResponse{
+			JobExecutionID: request.JobExecutionID,
+			WorkflowJobID:  request.WorkflowJobID,
+			Started:        false,
+			Message:        fmt.Sprintf("Job start failed: %v", err),
+		}
+	}
+
+	// Send response
+	responseMsg := CreateJobStartResponse(response)
+	responseBytes, err := responseMsg.Marshal()
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to marshal job start response: %v", err), "job_handler")
+		return err
+	}
+
+	_, err = stream.Write(responseBytes)
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to send job start response: %v", err), "job_handler")
+		return err
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Sent job start response for job execution %d: started=%v", request.JobExecutionID, response.Started), "job_handler")
+	return nil
+}
+
+// handleJobStartResponse handles incoming job start responses
+func (jmh *JobMessageHandler) handleJobStartResponse(msg *QUICMessage, _ *quic.Stream, peerID string) error {
+	var response types.JobStartResponse
+	if err := msg.GetDataAs(&response); err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse job start response: %v", err), "job_handler")
+		return err
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Received job start response for job execution %d from peer %s: started=%v", response.JobExecutionID, peerID, response.Started), "job_handler")
+	// TODO: Handle response if needed (track which jobs have started)
 	return nil
 }
 
@@ -765,6 +873,72 @@ func (jmh *JobMessageHandler) SendJobRequest(peerID string, request *types.JobEx
 	}
 
 	jmh.logger.Info(fmt.Sprintf("Received job response from peer %s: accepted=%v", peerID, response.Accepted), "job_handler")
+	return &response, nil
+}
+
+// SendJobStart sends a job start request to a peer (Phase 2)
+func (jmh *JobMessageHandler) SendJobStart(peerID string, request *types.JobStartRequest) (*types.JobStartResponse, error) {
+	jmh.logger.Info(fmt.Sprintf("Sending job start to peer %s for job execution %d", peerID[:8], request.JobExecutionID), "job_handler")
+
+	// Create message
+	msg := CreateJobStart(request)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to marshal job start: %v", err), "job_handler")
+		return nil, err
+	}
+
+	// Try to send via direct connection first
+	responseBytes, err := jmh.quicPeer.SendMessageWithResponse(peerID, msgBytes)
+	if err != nil {
+		jmh.logger.Info(fmt.Sprintf("Direct send failed, will try relay: %v", err), "job_handler")
+		// Fallback to relay if direct connection fails
+		return jmh.sendJobStartViaRelay(peerID, msgBytes)
+	}
+
+	// Parse response
+	responseMsg, err := UnmarshalQUICMessage(responseBytes)
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse job start response: %v", err), "job_handler")
+		return nil, err
+	}
+
+	var response types.JobStartResponse
+	if err := responseMsg.GetDataAs(&response); err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse job start response data: %v", err), "job_handler")
+		return nil, err
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Received job start response from peer %s: started=%v", peerID[:8], response.Started), "job_handler")
+	return &response, nil
+}
+
+// sendJobStartViaRelay sends a job start via relay
+func (jmh *JobMessageHandler) sendJobStartViaRelay(peerID string, jobStartBytes []byte) (*types.JobStartResponse, error) {
+	jmh.logger.Info(fmt.Sprintf("Attempting to send job start via relay to peer %s", peerID[:8]), "job_handler")
+
+	// Use the same relay mechanism as other requests (JobRequest, JobStatusRequest, etc.)
+	// This includes proper relay address lookup and automatic retry logic
+	responseBytes, err := jmh.sendMessageWithResponseViaRelay(peerID, jobStartBytes, "job_start")
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to send job start via relay: %v", err), "job_handler")
+		return nil, err
+	}
+
+	// Parse response
+	responseMsg, err := UnmarshalQUICMessage(responseBytes)
+	if err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse job start response: %v", err), "job_handler")
+		return nil, err
+	}
+
+	var response types.JobStartResponse
+	if err := responseMsg.GetDataAs(&response); err != nil {
+		jmh.logger.Error(fmt.Sprintf("Failed to parse job start response data: %v", err), "job_handler")
+		return nil, err
+	}
+
+	jmh.logger.Info(fmt.Sprintf("Received job start response from peer %s via relay: started=%v", peerID[:8], response.Started), "job_handler")
 	return &response, nil
 }
 

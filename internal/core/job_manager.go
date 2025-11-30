@@ -356,9 +356,6 @@ func (jm *JobManager) executeDataService(job *database.JobExecution, service *da
 		return
 	}
 
-	// NOTE: Data transfer already handled in ExecuteDataService() above
-	// The transferDataServiceOutputs() call is legacy code and no longer needed
-
 	// Update status to COMPLETED
 	err = jm.db.UpdateJobStatus(job.ID, types.JobStatusCompleted, "")
 	if err != nil {
@@ -960,14 +957,6 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 	}
 
 	return nil
-}
-
-// transferDataServiceOutputs transfers DATA service outputs to connected jobs/peers
-// For DATA services, files in the input directory are treated as STDOUT outputs
-// NOTE: This is legacy code and should not be called - data transfers are now handled in data_worker.go
-func (jm *JobManager) transferDataServiceOutputs(job *database.JobExecution, workflowID int64, inputDir string) error {
-	jm.logger.Error("LEGACY CODE CALLED: transferDataServiceOutputs - data transfers should be handled by data_worker", "job_manager")
-	return fmt.Errorf("legacy transferDataServiceOutputs called - data transfers should be handled by data_worker")
 }
 
 // transferOutputLocally moves output file to receiving job's input directory
@@ -2026,7 +2015,7 @@ func (jm *JobManager) GetJobStatus(jobExecutionID int64) (string, error) {
 
 // P2P Message Handlers
 
-// HandleJobRequest handles incoming job execution requests from remote peers
+// HandleJobRequest handles incoming job execution requests from remote peers (Phase 1)
 func (jm *JobManager) HandleJobRequest(request *types.JobExecutionRequest, peerID string) (*types.JobExecutionResponse, error) {
 	jm.logger.Info(fmt.Sprintf("Handling job request from peer %s for workflow job %d", peerID[:8], request.WorkflowJobID), "job_manager")
 
@@ -2054,47 +2043,94 @@ func (jm *JobManager) HandleJobRequest(request *types.JobExecutionRequest, peerI
 	}, nil
 }
 
-// HandleJobStatusUpdate handles incoming job status updates from executor peers
-func (jm *JobManager) HandleJobStatusUpdate(update *types.JobStatusUpdate, peerID string) error {
-	jm.logger.Info(fmt.Sprintf("Handling status update from peer %s for job %d: %s", peerID[:8], update.JobExecutionID, update.Status), "job_manager")
+// HandleJobStart handles incoming job start requests (Phase 2)
+func (jm *JobManager) HandleJobStart(request *types.JobStartRequest, peerID string) (*types.JobStartResponse, error) {
+	jm.logger.Info(fmt.Sprintf("Handling job start request from peer %s for job execution %d", peerID[:8], request.JobExecutionID), "job_manager")
 
-	// Get job execution to find the workflow_job_id
-	job, err := jm.db.GetJobExecution(update.JobExecutionID)
+	// Get the job execution
+	job, err := jm.db.GetJobExecution(request.JobExecutionID)
 	if err != nil {
-		jm.logger.Error(fmt.Sprintf("Failed to get job execution %d: %v", update.JobExecutionID, err), "job_manager")
-		return err
+		jm.logger.Error(fmt.Sprintf("Failed to get job execution %d: %v", request.JobExecutionID, err), "job_manager")
+		return &types.JobStartResponse{
+			JobExecutionID: request.JobExecutionID,
+			WorkflowJobID:  request.WorkflowJobID,
+			Started:        false,
+			Message:        fmt.Sprintf("Failed to get job execution: %v", err),
+		}, err
 	}
 	if job == nil {
-		return fmt.Errorf("job execution %d not found", update.JobExecutionID)
+		return &types.JobStartResponse{
+			JobExecutionID: request.JobExecutionID,
+			WorkflowJobID:  request.WorkflowJobID,
+			Started:        false,
+			Message:        "Job execution not found",
+		}, fmt.Errorf("job execution %d not found", request.JobExecutionID)
 	}
 
-	// Update job_execution status in database
-	err = jm.db.UpdateJobStatus(update.JobExecutionID, update.Status, update.ErrorMessage)
-	if err != nil {
-		jm.logger.Error(fmt.Sprintf("Failed to update job %d status: %v", update.JobExecutionID, err), "job_manager")
-		return err
-	}
+	// Build nodeID to job_execution_id and workflow_job_id maps from interfaces
+	// The interfaces in the request have complete peer routing information
+	nodeIDToJobExecutionIDMap := make(map[int64]int64)
+	nodeIDToWorkflowJobIDMap := make(map[int64]int64)
 
-	// Update workflow_job status to keep it in sync
-	// This is critical for UI to show correct status
-	if job.WorkflowJobID > 0 {
-		err = jm.db.UpdateWorkflowJobStatus(job.WorkflowJobID, update.Status, nil, update.ErrorMessage)
-		if err != nil {
-			jm.logger.Error(fmt.Sprintf("Failed to update workflow_job %d status: %v", job.WorkflowJobID, err), "job_manager")
-			// Don't return error - job_execution status is already updated
-		} else {
-			jm.logger.Info(fmt.Sprintf("Updated workflow_job %d status to %s", job.WorkflowJobID, update.Status), "job_manager")
+	for _, iface := range request.Interfaces {
+		for _, peer := range iface.InterfacePeers {
+			if peer.PeerWorkflowJobID != nil {
+				nodeIDToWorkflowJobIDMap[*peer.PeerWorkflowJobID] = *peer.PeerWorkflowJobID
+			}
+			if peer.PeerJobExecutionID != nil && peer.PeerWorkflowJobID != nil {
+				nodeIDToJobExecutionIDMap[*peer.PeerWorkflowJobID] = *peer.PeerJobExecutionID
+			}
 		}
 	}
 
-	// If job completed or errored, notify workflow manager
-	if update.Status == types.JobStatusCompleted || update.Status == types.JobStatusErrored {
-		jm.mu.Lock()
-		delete(jm.runningJobs, update.JobExecutionID)
-		jm.mu.Unlock()
+	// Create interfaces for this job with proper ID mapping
+	err = jm.CreateJobInterfaces(job, request.Interfaces, nodeIDToJobExecutionIDMap, nodeIDToWorkflowJobIDMap)
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to create interfaces for job %d: %v", request.JobExecutionID, err), "job_manager")
+		return &types.JobStartResponse{
+			JobExecutionID: request.JobExecutionID,
+			WorkflowJobID:  request.WorkflowJobID,
+			Started:        false,
+			Message:        fmt.Sprintf("Failed to create interfaces: %v", err),
+		}, err
 	}
 
-	jm.logger.Info(fmt.Sprintf("Updated job %d status to %s", update.JobExecutionID, update.Status), "job_manager")
+	jm.logger.Info(fmt.Sprintf("Job start successful for job execution %d - interfaces created", request.JobExecutionID), "job_manager")
+
+	return &types.JobStartResponse{
+		JobExecutionID: request.JobExecutionID,
+		WorkflowJobID:  request.WorkflowJobID,
+		Started:        true,
+		Message:        "Job started successfully",
+	}, nil
+}
+
+// HandleJobStatusUpdate handles incoming job status updates from executor peers
+// This is ONLY called for REMOTE jobs (where executor peer != orchestrator peer)
+// Local jobs update their status directly in the execution flow
+func (jm *JobManager) HandleJobStatusUpdate(update *types.JobStatusUpdate, peerID string) error {
+	jm.logger.Info(fmt.Sprintf("Handling status update from peer %s for workflow_job %d (remote job_execution %d): %s",
+		peerID[:8], update.WorkflowJobID, update.JobExecutionID, update.Status), "job_manager")
+
+	// Validate WorkflowJobID is provided
+	// This is the source of truth for remote jobs on the orchestrator
+	if update.WorkflowJobID <= 0 {
+		return fmt.Errorf("invalid workflow_job_id %d in status update", update.WorkflowJobID)
+	}
+
+	// Update workflow_job status using WorkflowJobID from the update message
+	// IMPORTANT: For remote jobs, the orchestrator only has the workflow_job record
+	// The job_execution record (with ID=update.JobExecutionID) exists only on the executor peer
+	// We must NOT look up job_execution by ID as:
+	//   1. It doesn't exist locally (orchestrator doesn't have executor's job_execution)
+	//   2. Could match a different local job_execution with same ID (false positive)
+	err := jm.db.UpdateWorkflowJobStatus(update.WorkflowJobID, update.Status, nil, update.ErrorMessage)
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to update workflow_job %d status: %v", update.WorkflowJobID, err), "job_manager")
+		return err
+	}
+
+	jm.logger.Info(fmt.Sprintf("Updated workflow_job %d status to %s", update.WorkflowJobID, update.Status), "job_manager")
 	return nil
 }
 
@@ -2236,13 +2272,13 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 		hierarchicalPath = filepath.Join(
 			appPaths.DataDir,
 			"workflows",
-			orchestratorPeerID,                               // Orchestrator peer ID
-			fmt.Sprintf("%d", request.WorkflowJobID),         // Destination workflow_job_id (receiver)
+			orchestratorPeerID,                       // Orchestrator peer ID
+			fmt.Sprintf("%d", request.WorkflowJobID), // Destination workflow_job_id (receiver)
 			"jobs",
-			request.SourcePeerID,                             // Sender peer ID (from request)
-			fmt.Sprintf("%d", request.SourceJobExecutionID),  // Sender job execution ID (from request)
-			request.DestinationPeerID,                        // Receiver peer ID (orchestrator)
-			"0",                                              // Receiver job ID = 0 for "Local Peer"
+			request.SourcePeerID, // Sender peer ID (from request)
+			fmt.Sprintf("%d", request.SourceJobExecutionID), // Sender job execution ID (from request)
+			request.DestinationPeerID,                       // Receiver peer ID (orchestrator)
+			"0",                                             // Receiver job ID = 0 for "Local Peer"
 			destDir,
 		)
 

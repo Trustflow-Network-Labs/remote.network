@@ -5,12 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"sync"
 	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
-	"github.com/Trustflow-Network-Labs/remote-network-node/internal/p2p"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -385,8 +383,8 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 	wm.logger.Info(fmt.Sprintf("All job execution requests sent for workflow execution %d",
 		execution.WorkflowExecutionID), "workflow_manager")
 
-	// ============== PHASE 3: Create interfaces with proper ID mapping ==============
-	wm.logger.Info("Phase 3: Creating job interfaces with proper workflow_job_id -> job_execution_id mapping", "workflow_manager")
+	// ============== PHASE 2: Send start commands with complete interface routing ==============
+	wm.logger.Info("Phase 2: Broadcasting start commands with complete interface routing", "workflow_manager")
 
 	// Build nodeID to job_execution_id mapping
 	// This maps workflow definition node_id to the actual job_execution_id
@@ -394,77 +392,33 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 
 	// Collect job_execution_ids from workflow_jobs
 	// For local jobs, we already have the job_execution_id
-	// For remote jobs, we need to fetch them from workflow_job.remote_job_execution_id
+	// For remote jobs, we fetched them from the job response
 	for nodeID, wfJobID := range nodeIDToWorkflowJobIDMap {
 		wfJob := execution.WorkflowJobs[wfJobID]
 
 		// Get the job_execution_id from workflow_job
-		// For local jobs, we stored it in remote_job_execution_id in Phase 2
-		// For remote jobs, we also stored it in remote_job_execution_id in Phase 2
+		// Both local and remote jobs have this stored in remote_job_execution_id
 		if wfJob.RemoteJobExecutionID != nil {
 			nodeIDToJobExecutionIDMap[nodeID] = *wfJob.RemoteJobExecutionID
 			wm.logger.Debug(fmt.Sprintf("Mapped node_id=%d -> job_execution_id=%d (from workflow_job %d)",
 				nodeID, *wfJob.RemoteJobExecutionID, wfJob.ID), "workflow_manager")
 		} else {
-			wm.logger.Warn(fmt.Sprintf("Workflow job %d (node_id=%d) has no job_execution_id - skipping interface creation",
+			wm.logger.Warn(fmt.Sprintf("Workflow job %d (node_id=%d) has no job_execution_id - cannot send start command",
 				wfJob.ID, nodeID), "workflow_manager")
 		}
 	}
 
-	// Now create interfaces for all jobs with proper ID mapping
-	// NOTE: Only create interfaces for LOCAL jobs. Remote jobs will create their own interfaces
-	// on the executor peer when they process the job request.
-	for _, jobDef := range execution.Definition.Jobs {
-		workflowJob := execution.WorkflowJobs[nodeIDToWorkflowJobIDMap[jobDef.NodeID]]
+	// Send start commands to ALL jobs (both local and remote)
+	wm.sendStartCommands(execution, nodeIDToWorkflowJobIDMap, nodeIDToJobExecutionIDMap)
 
-		// Skip if no job_execution_id
-		if workflowJob.RemoteJobExecutionID == nil {
-			wm.logger.Warn(fmt.Sprintf("Skipping interface creation for workflow_job %d - no job_execution_id",
-				workflowJob.ID), "workflow_manager")
-			continue
-		}
-
-		jobExecutionID := *workflowJob.RemoteJobExecutionID
-
-		// Only create interfaces for LOCAL jobs
-		// Remote jobs will create interfaces on their executor peer
-		if jobDef.ExecutorPeerID != localPeerID {
-			wm.logger.Info(fmt.Sprintf("Skipping local interface creation for remote job_execution %d ('%s') - interfaces will be created on executor peer %s",
-				jobExecutionID, jobDef.JobName, jobDef.ExecutorPeerID[:8]), "workflow_manager")
-			continue
-		}
-
-		// Get the job_execution record for LOCAL jobs
-		execution.mu.RLock()
-		jobExec := execution.JobExecutions[jobDef.JobName]
-		execution.mu.RUnlock()
-
-		if jobExec == nil {
-			wm.logger.Error(fmt.Sprintf("Local job execution '%s' not found for interface creation", jobDef.JobName), "workflow_manager")
-			continue
-		}
-
-		// Create interfaces with proper ID mapping
-		wm.logger.Info(fmt.Sprintf("Creating interfaces for LOCAL job_execution %d ('%s') with %d interface definitions",
-			jobExec.ID, jobDef.JobName, len(jobDef.Interfaces)), "workflow_manager")
-
-		err := wm.jobManager.CreateJobInterfaces(jobExec, jobDef.Interfaces, nodeIDToJobExecutionIDMap, nodeIDToWorkflowJobIDMap)
-		if err != nil {
-			wm.logger.Error(fmt.Sprintf("Failed to create interfaces for job %d: %v", jobExec.ID, err), "workflow_manager")
-			continue
-		}
-
-		wm.logger.Info(fmt.Sprintf("Interfaces created successfully for LOCAL job_execution %d", jobExec.ID), "workflow_manager")
-	}
-
-	wm.logger.Info(fmt.Sprintf("Phase 3 completed: All interfaces created for workflow execution %d. Jobs will execute based on their constraints.",
+	wm.logger.Info(fmt.Sprintf("Phase 2 completed: All start commands sent for workflow execution %d. Jobs will execute based on their constraints.",
 		execution.WorkflowExecutionID), "workflow_manager")
 
 	// Workflow continues asynchronously
 	// Status updates will be received via periodic polling or push notifications
 }
 
-// createLocalJobExecution creates a job_execution for a local job
+// createLocalJobExecution creates a job_execution for a local job (Phase 1)
 func (wm *WorkflowManager) createLocalJobExecution(workflowJob *database.WorkflowJob, jobDef *types.WorkflowJob) (*database.JobExecution, error) {
 	request := &types.JobExecutionRequest{
 		WorkflowID:          workflowJob.WorkflowID,
@@ -476,26 +430,26 @@ func (wm *WorkflowManager) createLocalJobExecution(workflowJob *database.Workflo
 		Entrypoint:          jobDef.Entrypoint,
 		Commands:            jobDef.Commands,
 		ExecutionConstraint: jobDef.ExecutionConstraint,
-		Interfaces:          jobDef.Interfaces, // Store for Phase 3
+		Interfaces:          nil, // NO interfaces in Phase 1
 		OrderingPeerID:      wm.peerManager.GetPeerID(),
 		RequestedAt:         time.Now(),
 	}
 
-	// Create job_execution WITHOUT interfaces (Phase 3 will create them)
-	// Skip interface creation in Phase 2 - interfaces will be created in Phase 3 with proper ID mapping
+	// Create job_execution WITHOUT interfaces (Phase 2 will create them)
+	// Skip interface creation in Phase 1 - interfaces will be created in Phase 2 with proper ID mapping
 	jobExec, err := wm.jobManager.SubmitJobWithOptions(request, nil, true) // skipInterfaces = true
 	if err != nil {
 		return nil, fmt.Errorf("failed to create local job execution: %v", err)
 	}
 
-	wm.logger.Info(fmt.Sprintf("Created local job_execution ID=%d for workflow_job ID=%d (interfaces will be created in Phase 3)",
+	wm.logger.Info(fmt.Sprintf("Created local job_execution ID=%d for workflow_job ID=%d (interfaces will be created in Phase 2)",
 		jobExec.ID, workflowJob.ID), "workflow_manager")
 
 	return jobExec, nil
 }
 
-// sendRemoteJobRequest sends a job execution request to a remote peer and returns the remote job_execution_id
-// NOTE: This function must be called with the workflow execution's nodeIDToWorkflowJobIDMap
+// sendRemoteJobRequest sends a job execution request to a remote peer and returns the remote job_execution_id (Phase 1)
+// NOTE: Interfaces are NOT sent in Phase 1 - they will be sent in Phase 2 after all job_execution_ids are collected
 func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJob, jobDef *types.WorkflowJob, nodeIDToWorkflowJobIDMap map[int64]int64) (int64, error) {
 	// Note: Connection is handled by jobHandler.SendJobRequest
 	// No explicit connection check needed here
@@ -506,42 +460,8 @@ func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJo
 		return 0, fmt.Errorf("job handler not available")
 	}
 
-	// Translate node_ids to workflow_job_ids in interface peer definitions
-	// Remote executors don't have workflow_job records, so they can't do this translation themselves
-	// The orchestrator must send already-translated workflow_job_ids
-	translatedInterfaces := make([]*types.JobInterface, len(jobDef.Interfaces))
-	for i, iface := range jobDef.Interfaces {
-		translatedIface := &types.JobInterface{
-			Type:           iface.Type,
-			Path:           iface.Path,
-			InterfacePeers: make([]*types.InterfacePeer, len(iface.InterfacePeers)),
-		}
-
-		for j, peer := range iface.InterfacePeers {
-			translatedPeer := &types.InterfacePeer{
-				PeerID:            peer.PeerID,
-				PeerWorkflowJobID: peer.PeerWorkflowJobID, // Will translate if needed
-				PeerPath:          peer.PeerPath,
-				PeerMountFunction: peer.PeerMountFunction,
-				DutyAcknowledged:  peer.DutyAcknowledged,
-			}
-
-			// Translate node_id to workflow_job_id
-			if peer.PeerWorkflowJobID != nil && nodeIDToWorkflowJobIDMap != nil {
-				if workflowJobID, ok := nodeIDToWorkflowJobIDMap[*peer.PeerWorkflowJobID]; ok {
-					translatedPeer.PeerWorkflowJobID = &workflowJobID
-					wm.logger.Debug(fmt.Sprintf("Translated peer node_id %d -> workflow_job_id %d for remote job request",
-						*peer.PeerWorkflowJobID, workflowJobID), "workflow_manager")
-				}
-			}
-
-			translatedIface.InterfacePeers[j] = translatedPeer
-		}
-
-		translatedInterfaces[i] = translatedIface
-	}
-
-	// Create job execution request
+	// Create job execution request WITHOUT interfaces (Phase 1)
+	// Interfaces will be sent in Phase 2 after all job_execution_ids are collected
 	request := &types.JobExecutionRequest{
 		WorkflowID:          workflowJob.WorkflowID,
 		WorkflowJobID:       workflowJob.ID,  // Send workflow_job_id
@@ -552,7 +472,7 @@ func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJo
 		Entrypoint:          jobDef.Entrypoint,
 		Commands:            jobDef.Commands,
 		ExecutionConstraint: jobDef.ExecutionConstraint,
-		Interfaces:          translatedInterfaces, // Use translated interfaces
+		Interfaces:          nil, // NO interfaces in Phase 1
 		OrderingPeerID:      wm.peerManager.GetPeerID(),
 		RequestedAt:         time.Now(),
 	}
@@ -580,6 +500,121 @@ func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJo
 	}
 
 	return response.JobExecutionID, nil
+}
+
+// sendStartCommands sends job start commands to all jobs with complete interface routing (Phase 2)
+func (wm *WorkflowManager) sendStartCommands(execution *WorkflowExecution, nodeIDToWorkflowJobIDMap, nodeIDToJobExecutionIDMap map[int64]int64) {
+	wm.logger.Info(fmt.Sprintf("Sending start commands to all jobs in workflow execution %d", execution.WorkflowExecutionID), "workflow_manager")
+
+	localPeerID := wm.peerManager.GetPeerID()
+	jobHandler := wm.peerManager.GetJobHandler()
+
+	// Send start command to each job with complete interface routing
+	for _, jobDef := range execution.Definition.Jobs {
+		workflowJob := execution.WorkflowJobs[nodeIDToWorkflowJobIDMap[jobDef.NodeID]]
+
+		if workflowJob == nil || workflowJob.RemoteJobExecutionID == nil {
+			wm.logger.Error(fmt.Sprintf("Cannot send start command for job '%s' - workflow_job or job_execution_id missing",
+				jobDef.JobName), "workflow_manager")
+			continue
+		}
+
+		jobExecutionID := *workflowJob.RemoteJobExecutionID
+
+		// Build complete interfaces with both workflow_job_ids and job_execution_ids
+		completeInterfaces := wm.buildCompleteInterfaces(jobDef.Interfaces, nodeIDToWorkflowJobIDMap, nodeIDToJobExecutionIDMap)
+
+		// Create start request
+		startRequest := &types.JobStartRequest{
+			WorkflowID:     workflowJob.WorkflowID,
+			WorkflowJobID:  workflowJob.ID,
+			JobExecutionID: jobExecutionID,
+			Interfaces:     completeInterfaces,
+		}
+
+		// Send start command (different handling for local vs remote)
+		if jobDef.ExecutorPeerID == localPeerID {
+			// LOCAL JOB: Call job manager directly
+			wm.logger.Info(fmt.Sprintf("Sending start command to LOCAL job_execution %d ('%s')",
+				jobExecutionID, jobDef.JobName), "workflow_manager")
+
+			response, err := wm.jobManager.HandleJobStart(startRequest, localPeerID)
+			if err != nil || !response.Started {
+				wm.logger.Error(fmt.Sprintf("Failed to start local job %d: %v", jobExecutionID, err), "workflow_manager")
+			} else {
+				wm.logger.Info(fmt.Sprintf("Local job %d started successfully", jobExecutionID), "workflow_manager")
+			}
+
+		} else {
+			// REMOTE JOB: Send via network
+			wm.logger.Info(fmt.Sprintf("Sending start command to REMOTE job_execution %d ('%s') on peer %s",
+				jobExecutionID, jobDef.JobName, jobDef.ExecutorPeerID[:8]), "workflow_manager")
+
+			if jobHandler == nil {
+				wm.logger.Error("Job handler not available for remote start command", "workflow_manager")
+				continue
+			}
+
+			response, err := jobHandler.SendJobStart(jobDef.ExecutorPeerID, startRequest)
+			if err != nil {
+				wm.logger.Error(fmt.Sprintf("Failed to send start command to peer %s: %v",
+					jobDef.ExecutorPeerID[:8], err), "workflow_manager")
+			} else if !response.Started {
+				wm.logger.Error(fmt.Sprintf("Remote peer %s rejected start command: %s",
+					jobDef.ExecutorPeerID[:8], response.Message), "workflow_manager")
+			} else {
+				wm.logger.Info(fmt.Sprintf("Remote job %d started successfully on peer %s",
+					jobExecutionID, jobDef.ExecutorPeerID[:8]), "workflow_manager")
+			}
+		}
+	}
+
+	wm.logger.Info(fmt.Sprintf("Completed sending start commands for workflow execution %d", execution.WorkflowExecutionID), "workflow_manager")
+}
+
+// buildCompleteInterfaces builds interfaces with complete routing (workflow_job_ids AND job_execution_ids)
+func (wm *WorkflowManager) buildCompleteInterfaces(interfaces []*types.JobInterface, nodeIDToWorkflowJobIDMap, nodeIDToJobExecutionIDMap map[int64]int64) []*types.JobInterface {
+	completeInterfaces := make([]*types.JobInterface, len(interfaces))
+
+	for i, iface := range interfaces {
+		completeIface := &types.JobInterface{
+			Type:           iface.Type,
+			Path:           iface.Path,
+			InterfacePeers: make([]*types.InterfacePeer, len(iface.InterfacePeers)),
+		}
+
+		for j, peer := range iface.InterfacePeers {
+			completePeer := &types.InterfacePeer{
+				PeerID:            peer.PeerID,
+				PeerWorkflowJobID: peer.PeerWorkflowJobID, // Will be populated below
+				PeerJobExecutionID: peer.PeerJobExecutionID, // Will be populated below
+				PeerPath:          peer.PeerPath,
+				PeerMountFunction: peer.PeerMountFunction,
+				DutyAcknowledged:  peer.DutyAcknowledged,
+			}
+
+			// Translate node_id to workflow_job_id AND job_execution_id
+			if peer.PeerWorkflowJobID != nil {
+				nodeID := *peer.PeerWorkflowJobID
+
+				// Get workflow_job_id
+				if workflowJobID, ok := nodeIDToWorkflowJobIDMap[nodeID]; ok {
+					completePeer.PeerWorkflowJobID = &workflowJobID
+				}
+
+				// Get job_execution_id
+				if jobExecutionID, ok := nodeIDToJobExecutionIDMap[nodeID]; ok {
+					completePeer.PeerJobExecutionID = &jobExecutionID
+				}
+			}
+
+			completeIface.InterfacePeers[j] = completePeer
+		}
+
+		completeInterfaces[i] = completeIface
+	}
+
+	return completeInterfaces
 }
 
 // Note: Dependency resolution and job orchestration moved to peer-side
@@ -679,7 +714,7 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 
 				peer := &types.InterfacePeer{
 					PeerID:            peerID, // Use normalized peer ID
-					PeerWorkflowJobID: peerDef.PeerWorkflowNodeID, // NOTE: At workflow definition time, this is workflow_node_id
+					PeerWorkflowJobID: peerDef.PeerWorkflowNodeID, // NOTE: Contains node_id at parse time; translated to workflow_job_id in Phase 2
 					PeerPath:          peerDef.PeerPath,
 					PeerMountFunction: peerDef.PeerMountFunction,
 					DutyAcknowledged:  peerDef.DutyAcknowledged,
@@ -765,164 +800,6 @@ func (wm *WorkflowManager) validateWorkflow(workflow *types.WorkflowDefinition) 
 
 	wm.logger.Info(fmt.Sprintf("Workflow '%s' validation successful", workflow.Name), "workflow_manager")
 	return nil
-}
-
-// validatePeerConnectivityAndServices actively connects to peers and verifies services are available
-func (wm *WorkflowManager) validatePeerConnectivityAndServices(jobs []*types.WorkflowJob) error {
-	wm.logger.Info("Validating peer connectivity and service availability", "workflow_manager")
-
-	// Track unique peers and their services to validate
-	type peerServiceCheck struct {
-		peerID    string
-		serviceID int64
-		jobName   string
-	}
-	checks := make([]peerServiceCheck, 0)
-
-	// Collect all peer-service pairs that need validation
-	for _, job := range jobs {
-		checks = append(checks, peerServiceCheck{
-			peerID:    job.ExecutorPeerID,
-			serviceID: job.ServiceID,
-			jobName:   job.JobName,
-		})
-	}
-
-	// Validate each peer-service pair
-	for _, check := range checks {
-		wm.logger.Info(fmt.Sprintf("Validating peer %s has service '%s' for job '%s'",
-			check.peerID[:8], check.jobName, check.jobName), "workflow_manager")
-
-		// Use the service name from the workflow definition (check.jobName)
-		// Note: check.serviceID is the executor peer's local service ID, not ours
-		// We should NOT look it up in our local database as service IDs are not global
-
-		// Try to connect to peer and query for this specific service
-		available, err := wm.verifyPeerServiceAvailability(check.peerID, check.serviceID, check.jobName)
-		if err != nil {
-			return fmt.Errorf("failed to verify peer %s for job '%s': %v", check.peerID[:8], check.jobName, err)
-		}
-
-		if !available {
-			return fmt.Errorf("service '%s' is not available on peer %s for job '%s'",
-				check.jobName, check.peerID[:8], check.jobName)
-		}
-
-		wm.logger.Info(fmt.Sprintf("Peer %s has service %d available for job '%s'",
-			check.peerID[:8], check.serviceID, check.jobName), "workflow_manager")
-	}
-
-	wm.logger.Info("All peers reachable and services available", "workflow_manager")
-	return nil
-}
-
-// verifyPeerServiceAvailability connects to peer and verifies service is available
-func (wm *WorkflowManager) verifyPeerServiceAvailability(peerID string, serviceID int64, serviceName string) (bool, error) {
-	wm.logger.Debug(fmt.Sprintf("Verifying service %d on peer %s", serviceID, peerID[:8]), "workflow_manager")
-
-	// Get QUIC peer from peer manager
-	quicPeer := wm.peerManager.GetQUICPeer()
-	if quicPeer == nil {
-		return false, fmt.Errorf("QUIC peer not available")
-	}
-
-	// Try to get existing connection first
-	conn, err := quicPeer.GetConnectionByPeerID(peerID)
-	if err != nil || conn == nil {
-		wm.logger.Debug(fmt.Sprintf("No existing connection to peer %s, attempting to connect", peerID[:8]), "workflow_manager")
-
-		// Try to connect using DHT metadata
-		peer, err := wm.db.KnownPeers.GetKnownPeer(peerID, "remote-network-mesh")
-		if err != nil || peer == nil {
-			return false, fmt.Errorf("peer %s not found in known peers", peerID[:8])
-		}
-
-		// Query DHT for peer metadata to get connection info
-		metadataQuery := wm.peerManager.GetMetadataQueryService()
-		if metadataQuery == nil {
-			return false, fmt.Errorf("metadata query service not available")
-		}
-
-		metadata, err := metadataQuery.QueryMetadata(peerID, peer.PublicKey)
-		if err != nil {
-			wm.logger.Warn(fmt.Sprintf("Failed to query metadata for peer %s: %v", peerID[:8], err), "workflow_manager")
-			// If we can't get metadata, we can't verify connectivity
-			return false, fmt.Errorf("failed to query peer metadata: %v", err)
-		}
-
-		// Check if peer is public or using relay
-		if !metadata.NetworkInfo.UsingRelay && metadata.NetworkInfo.PublicIP != "" {
-			// Try direct connection to public peer
-			peerAddr := fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, metadata.NetworkInfo.PublicPort)
-			conn, err = quicPeer.ConnectToPeer(peerAddr)
-			if err != nil {
-				wm.logger.Warn(fmt.Sprintf("Failed to connect to public peer %s at %s: %v", peerID[:8], peerAddr, err), "workflow_manager")
-				return false, fmt.Errorf("peer %s unreachable at %s: %v", peerID[:8], peerAddr, err)
-			}
-		} else {
-			// Peer is behind NAT or using relay
-			wm.logger.Warn(fmt.Sprintf("Peer %s is behind NAT/using relay, will be accessible via relay during execution", peerID[:8]), "workflow_manager")
-			// For NAT/relay peers, we trust the service exists if it's in the database
-			// The actual connection will be established via relay during execution
-			return true, nil
-		}
-	}
-
-	// Query service from peer
-	ctx := context.WithValue(context.Background(), "timeout", 10*time.Second)
-	stream, err := conn.OpenStreamSync(ctx)
-	if err != nil {
-		// Stream open failure often indicates a stale connection (connection exists locally
-		// but remote side has closed it). Clean it up to force fresh connection on next attempt.
-		peerAddr := conn.RemoteAddr().String()
-		wm.logger.Debug(fmt.Sprintf("Cleaning up potentially stale connection %s after stream open failure", peerAddr), "workflow_manager")
-
-		// Clean up stale connection to force fresh reconnection on retry
-		if cleanupErr := quicPeer.DisconnectFromPeer(peerAddr); cleanupErr != nil {
-			wm.logger.Debug(fmt.Sprintf("Connection cleanup completed for %s (connection may have already been closed)", peerAddr), "workflow_manager")
-		}
-
-		return false, fmt.Errorf("failed to open stream to peer: %v", err)
-	}
-	defer stream.Close()
-
-	// Send service search request for this specific service
-	searchMsg := p2p.CreateServiceSearchRequest(serviceName, "", false)
-	msgBytes, err := searchMsg.Marshal()
-	if err != nil {
-		return false, fmt.Errorf("failed to marshal service search: %v", err)
-	}
-
-	if _, err := stream.Write(msgBytes); err != nil {
-		return false, fmt.Errorf("failed to send service search: %v", err)
-	}
-
-	// Read response
-	stream.SetReadDeadline(time.Now().Add(10 * time.Second))
-	buffer := make([]byte, 1024*1024)
-	n, err := stream.Read(buffer)
-	if err != nil && err != io.EOF {
-		return false, fmt.Errorf("failed to read service search response: %v", err)
-	}
-
-	responseMsg, err := p2p.UnmarshalQUICMessage(buffer[:n])
-	if err != nil {
-		return false, fmt.Errorf("failed to unmarshal response: %v", err)
-	}
-
-	var searchResponse p2p.ServiceSearchResponse
-	if err := responseMsg.GetDataAs(&searchResponse); err != nil {
-		return false, fmt.Errorf("failed to parse search response: %v", err)
-	}
-
-	// Check if our service is in the response
-	for _, svc := range searchResponse.Services {
-		if svc.ID == serviceID {
-			return true, nil
-		}
-	}
-
-	return false, nil
 }
 
 // validateDataTransferConstraints validates data services can only be transferred appropriately

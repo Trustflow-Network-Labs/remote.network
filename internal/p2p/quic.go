@@ -1276,9 +1276,10 @@ func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage, sourcePeerID string) *
 		q.logger.Warn("Received service_request via relay but handler not initialized", "quic")
 		return CreateServiceSearchResponse(nil, "service discovery not available")
 
-	case MessageTypeJobRequest, MessageTypeJobStatusRequest,
+	case MessageTypeJobRequest, MessageTypeJobStart, MessageTypeJobStatusRequest,
 		MessageTypeJobDataTransferRequest, MessageTypeJobCancel,
-		MessageTypeJobStatusUpdate, MessageTypeJobDataChunk, MessageTypeJobDataTransferComplete:
+		MessageTypeJobStatusUpdate, MessageTypeJobDataChunk, MessageTypeJobDataTransferComplete,
+		MessageTypeJobDataChunkAck, MessageTypeJobDataTransferResume, MessageTypeJobDataTransferStall:
 		// Job-related messages forwarded via relay
 		if q.jobHandler != nil {
 			return q.jobHandler.HandleRelayedJobMessage(msg, sourcePeerID)

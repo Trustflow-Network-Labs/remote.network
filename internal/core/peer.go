@@ -831,6 +831,7 @@ func (pm *PeerManager) InitializeJobSystem() error {
 	// Set up callbacks for job operations
 	jobHandler.SetCallbacks(
 		pm.handleJobRequest,
+		pm.handleJobStart,
 		pm.handleJobStatusUpdate,
 		pm.handleJobStatusRequest,
 		pm.handleJobDataTransferRequest,
@@ -926,6 +927,22 @@ func (pm *PeerManager) handleJobRequest(request *types.JobExecutionRequest, peer
 		WorkflowJobID: request.WorkflowJobID,
 		Accepted:      false,
 		Message:       "job manager not initialized",
+	}, fmt.Errorf("job manager not initialized")
+}
+
+func (pm *PeerManager) handleJobStart(request *types.JobStartRequest, peerID string) (*types.JobStartResponse, error) {
+	pm.logger.Info(fmt.Sprintf("Received job start request from peer %s for job execution %d", peerID[:8], request.JobExecutionID), "core")
+
+	// Delegate to JobManager
+	if pm.jobManager != nil {
+		return pm.jobManager.HandleJobStart(request, peerID)
+	}
+
+	return &types.JobStartResponse{
+		JobExecutionID: request.JobExecutionID,
+		WorkflowJobID:  request.WorkflowJobID,
+		Started:        false,
+		Message:        "job manager not initialized",
 	}, fmt.Errorf("job manager not initialized")
 }
 

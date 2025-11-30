@@ -55,6 +55,8 @@ const (
 	// Workflow and job execution
 	MessageTypeJobRequest              MessageType = "job_request"
 	MessageTypeJobResponse             MessageType = "job_response"
+	MessageTypeJobStart                MessageType = "job_start"          // Phase 2: Start execution with complete interfaces
+	MessageTypeJobStartResponse        MessageType = "job_start_response" // Acknowledgment of start command
 	MessageTypeJobStatusUpdate         MessageType = "job_status_update"
 	MessageTypeJobStatusRequest        MessageType = "job_status_request"
 	MessageTypeJobStatusResponse       MessageType = "job_status_response"
@@ -775,6 +777,16 @@ func CreateJobRequest(data interface{}) *QUICMessage {
 // CreateJobResponse creates a job execution response message
 func CreateJobResponse(data interface{}) *QUICMessage {
 	return NewQUICMessage(MessageTypeJobResponse, data)
+}
+
+// CreateJobStart creates a job start message (Phase 2)
+func CreateJobStart(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobStart, data)
+}
+
+// CreateJobStartResponse creates a job start response message
+func CreateJobStartResponse(data interface{}) *QUICMessage {
+	return NewQUICMessage(MessageTypeJobStartResponse, data)
 }
 
 // CreateJobStatusUpdate creates a job status update message

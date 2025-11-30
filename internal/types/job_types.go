@@ -75,6 +75,22 @@ type JobExecutionResponse struct {
 	RespondedAt    time.Time `json:"responded_at"`
 }
 
+// JobStartRequest represents Phase 2 - start execution with complete interface routing
+type JobStartRequest struct {
+	WorkflowID     int64           `json:"workflow_id"`
+	WorkflowJobID  int64           `json:"workflow_job_id"`
+	JobExecutionID int64           `json:"job_execution_id"`
+	Interfaces     []*JobInterface `json:"interfaces"` // Complete interfaces with all peer_job_execution_ids populated
+}
+
+// JobStartResponse represents acknowledgment of job start command
+type JobStartResponse struct {
+	JobExecutionID int64  `json:"job_execution_id"`
+	WorkflowJobID  int64  `json:"workflow_job_id"`
+	Started        bool   `json:"started"`
+	Message        string `json:"message,omitempty"`
+}
+
 // JobStatusUpdate represents an update to a job's status
 type JobStatusUpdate struct {
 	JobExecutionID int64                  `json:"job_execution_id"`

@@ -4,6 +4,8 @@ package types
 const (
 	MessageTypeJobRequest              = "JOB_REQUEST"
 	MessageTypeJobResponse             = "JOB_RESPONSE"
+	MessageTypeJobStart                = "JOB_START"         // Phase 2: Start execution with complete interfaces
+	MessageTypeJobStartResponse        = "JOB_START_RESPONSE" // Acknowledgment of start command
 	MessageTypeJobStatusUpdate         = "JOB_STATUS_UPDATE"
 	MessageTypeJobDataTransferRequest  = "JOB_DATA_TRANSFER_REQUEST"
 	MessageTypeJobDataTransferResponse = "JOB_DATA_TRANSFER_RESPONSE"
