@@ -547,13 +547,21 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 
 			// Check if this mount is used for INPUT or BOTH
 			hasInputFunction := false
+			hasOutputFunction := false
 			var inputPeer *database.JobInterfacePeer
 			for _, peer := range peers {
 				if peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth {
 					hasInputFunction = true
 					inputPeer = peer
-					break
 				}
+				if peer.PeerMountFunction == types.MountFunctionOutput || peer.PeerMountFunction == types.MountFunctionBoth {
+					hasOutputFunction = true
+				}
+			}
+
+			// If this mount has output peers, add to outputs array so transferDockerOutputs gets called
+			if hasOutputFunction && iface.Path != "" {
+				outputs = append(outputs, filepath.Join(relPathPrefix, "mount_"+filepath.Base(iface.Path)))
 			}
 
 			if hasInputFunction && iface.Path != "" {
@@ -1456,10 +1464,20 @@ func (jm *JobManager) transferPackageRemotely(job *database.JobExecution, peer *
 			*peer.PeerWorkflowJobID, formatPeerID(peer.PeerID)), "job_manager")
 	}
 
+	// Determine destination workflow_job_id
+	// peer.PeerWorkflowJobID contains the actual workflow_job.id (already translated from node_id by orchestrator)
+	// For "Local Peer" (peer.PeerWorkflowJobID == nil), use source job's workflow_job_id
+	destWorkflowJobID := job.WorkflowJobID // Default to source
+	if peer.PeerWorkflowJobID != nil {
+		destWorkflowJobID = *peer.PeerWorkflowJobID
+		jm.logger.Debug(fmt.Sprintf("Using destination workflow_job_id=%d from peer interface",
+			destWorkflowJobID), "job_manager")
+	}
+
 	// Send transfer request - use PACKAGE interface type to indicate this is a transfer package
 	transferRequest := &types.JobDataTransferRequest{
 		TransferID:                transferID,
-		WorkflowJobID:             job.WorkflowJobID,
+		WorkflowJobID:             destWorkflowJobID, // Use destination's workflow_job_id for correct path
 		SourceJobExecutionID:      job.ID,
 		DestinationJobExecutionID: destJobExecID,
 		InterfaceType:             "PACKAGE", // Special type indicating transfer package
@@ -2203,38 +2221,32 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 		// Orchestrator receiving for "Local Peer"
 		jm.logger.Info("Transfer to 'Local Peer' (orchestrator) - using receiver_job_id=0", "job_manager")
 
-		// Get workflow_job to access sender job execution ID
-		workflowJob, err := jm.db.GetWorkflowJobByID(request.WorkflowJobID)
-		if err != nil {
+		// Validate that sender job execution ID is provided
+		if request.SourceJobExecutionID == 0 {
 			return &types.JobDataTransferResponse{
 				WorkflowJobID: request.WorkflowJobID,
 				Accepted:      false,
-				Message:       fmt.Sprintf("Workflow job not found: %v", err),
-			}, err
+				Message:       "Missing sender job execution ID in request",
+			}, fmt.Errorf("missing sender job execution ID in request")
 		}
 
-		if workflowJob.RemoteJobExecutionID == nil {
-			return &types.JobDataTransferResponse{
-				WorkflowJobID: request.WorkflowJobID,
-				Accepted:      false,
-				Message:       "Missing sender job execution ID",
-			}, fmt.Errorf("missing sender job execution ID")
-		}
-
+		// Build path using request fields directly
+		// request.WorkflowJobID is the destination's workflow_job_id (receiver)
+		// request.SourceJobExecutionID is the sender's job_execution_id
 		hierarchicalPath = filepath.Join(
 			appPaths.DataDir,
 			"workflows",
-			orchestratorPeerID,                                   // Orchestrator peer ID
-			fmt.Sprintf("%d", request.WorkflowJobID),             // Workflow job ID (consistent with executor)
+			orchestratorPeerID,                               // Orchestrator peer ID
+			fmt.Sprintf("%d", request.WorkflowJobID),         // Destination workflow_job_id (receiver)
 			"jobs",
-			request.SourcePeerID,                                 // Sender peer ID (from request)
-			fmt.Sprintf("%d", *workflowJob.RemoteJobExecutionID), // Sender job execution ID
-			request.DestinationPeerID,                            // Receiver peer ID (orchestrator)
-			"0",                                                  // Receiver job ID = 0 for "Local Peer"
+			request.SourcePeerID,                             // Sender peer ID (from request)
+			fmt.Sprintf("%d", request.SourceJobExecutionID),  // Sender job execution ID (from request)
+			request.DestinationPeerID,                        // Receiver peer ID (orchestrator)
+			"0",                                              // Receiver job ID = 0 for "Local Peer"
 			destDir,
 		)
 
-		transferJobID = *workflowJob.RemoteJobExecutionID
+		transferJobID = request.SourceJobExecutionID
 
 	} else {
 		// Executor peer receiving data - path uses request fields

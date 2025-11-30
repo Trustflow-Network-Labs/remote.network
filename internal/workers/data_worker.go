@@ -1133,12 +1133,15 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 
 		// Determine the base directory for extraction
 		// The hierarchical path is already constructed in HandleJobDataTransferRequest
-		// extractionDir is the directory containing the transfer file, which is the hierarchical path:
-		// .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/input/
-		// The baseDir should be the parent of the input/ directory:
+		// transfer.TargetPath is the .dat file path:
+		// .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/mounts/data/file.dat
+		// extractionDir is the directory containing the transfer file:
+		// .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/mounts/data
+		// The manifest entries have paths like "mounts/app/file.md"
+		// So baseDir should be the job directory (2 levels up from file):
 		// .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/
 		extractionDir := filepath.Dir(transfer.TargetPath)
-		baseDir := filepath.Dir(extractionDir)
+		baseDir := filepath.Dir(filepath.Dir(extractionDir))
 
 		dsw.logger.Info(fmt.Sprintf("Transfer %s extraction: extractionDir=%s, baseDir=%s",
 			transferID, extractionDir, baseDir), "data_worker")

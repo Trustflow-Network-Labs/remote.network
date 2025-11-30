@@ -368,7 +368,7 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 			wm.logger.Info(fmt.Sprintf("Sending REMOTE job request for workflow_job %d ('%s') to peer %s",
 				workflowJob.ID, jobDef.JobName, jobDef.ExecutorPeerID[:8]), "workflow_manager")
 
-			remoteJobExecID, err := wm.sendRemoteJobRequest(workflowJob, jobDef)
+			remoteJobExecID, err := wm.sendRemoteJobRequest(workflowJob, jobDef, nodeIDToWorkflowJobIDMap)
 			if err != nil {
 				wm.logger.Error(fmt.Sprintf("Failed to send remote job request: %v", err), "workflow_manager")
 				continue
@@ -495,7 +495,8 @@ func (wm *WorkflowManager) createLocalJobExecution(workflowJob *database.Workflo
 }
 
 // sendRemoteJobRequest sends a job execution request to a remote peer and returns the remote job_execution_id
-func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJob, jobDef *types.WorkflowJob) (int64, error) {
+// NOTE: This function must be called with the workflow execution's nodeIDToWorkflowJobIDMap
+func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJob, jobDef *types.WorkflowJob, nodeIDToWorkflowJobIDMap map[int64]int64) (int64, error) {
 	// Note: Connection is handled by jobHandler.SendJobRequest
 	// No explicit connection check needed here
 
@@ -503,6 +504,41 @@ func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJo
 	jobHandler := wm.peerManager.GetJobHandler()
 	if jobHandler == nil {
 		return 0, fmt.Errorf("job handler not available")
+	}
+
+	// Translate node_ids to workflow_job_ids in interface peer definitions
+	// Remote executors don't have workflow_job records, so they can't do this translation themselves
+	// The orchestrator must send already-translated workflow_job_ids
+	translatedInterfaces := make([]*types.JobInterface, len(jobDef.Interfaces))
+	for i, iface := range jobDef.Interfaces {
+		translatedIface := &types.JobInterface{
+			Type:           iface.Type,
+			Path:           iface.Path,
+			InterfacePeers: make([]*types.InterfacePeer, len(iface.InterfacePeers)),
+		}
+
+		for j, peer := range iface.InterfacePeers {
+			translatedPeer := &types.InterfacePeer{
+				PeerID:            peer.PeerID,
+				PeerWorkflowJobID: peer.PeerWorkflowJobID, // Will translate if needed
+				PeerPath:          peer.PeerPath,
+				PeerMountFunction: peer.PeerMountFunction,
+				DutyAcknowledged:  peer.DutyAcknowledged,
+			}
+
+			// Translate node_id to workflow_job_id
+			if peer.PeerWorkflowJobID != nil && nodeIDToWorkflowJobIDMap != nil {
+				if workflowJobID, ok := nodeIDToWorkflowJobIDMap[*peer.PeerWorkflowJobID]; ok {
+					translatedPeer.PeerWorkflowJobID = &workflowJobID
+					wm.logger.Debug(fmt.Sprintf("Translated peer node_id %d -> workflow_job_id %d for remote job request",
+						*peer.PeerWorkflowJobID, workflowJobID), "workflow_manager")
+				}
+			}
+
+			translatedIface.InterfacePeers[j] = translatedPeer
+		}
+
+		translatedInterfaces[i] = translatedIface
 	}
 
 	// Create job execution request
@@ -516,7 +552,7 @@ func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJo
 		Entrypoint:          jobDef.Entrypoint,
 		Commands:            jobDef.Commands,
 		ExecutionConstraint: jobDef.ExecutionConstraint,
-		Interfaces:          jobDef.Interfaces,
+		Interfaces:          translatedInterfaces, // Use translated interfaces
 		OrderingPeerID:      wm.peerManager.GetPeerID(),
 		RequestedAt:         time.Now(),
 	}
