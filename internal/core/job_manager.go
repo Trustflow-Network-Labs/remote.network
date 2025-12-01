@@ -495,7 +495,8 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 			peers, err := jm.db.GetJobInterfacePeers(jobIface.ID)
 			if err == nil && len(peers) > 0 {
 				for _, peer := range peers {
-					if peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth {
+					// With fixed workflow definition, OUTPUT peers send data to us
+					if peer.PeerMountFunction == types.MountFunctionOutput {
 						// Read file contents from input directory and stream to STDIN
 						entries, err := os.ReadDir(inputDir)
 						if err != nil {
@@ -542,16 +543,21 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 				continue
 			}
 
-			// Check if this mount is used for INPUT or BOTH
+			// Check if this mount receives input or sends output
+			// With fixed workflow definition:
+			// - OUTPUT peers send data TO us (we receive input from them)
+			// - INPUT peers receive data FROM us (we send output to them)
 			hasInputFunction := false
 			hasOutputFunction := false
 			var inputPeer *database.JobInterfacePeer
 			for _, peer := range peers {
-				if peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth {
+				if peer.PeerMountFunction == types.MountFunctionOutput {
+					// OUTPUT peer sends data to us - this is an input source
 					hasInputFunction = true
 					inputPeer = peer
 				}
-				if peer.PeerMountFunction == types.MountFunctionOutput || peer.PeerMountFunction == types.MountFunctionBoth {
+				if peer.PeerMountFunction == types.MountFunctionInput {
+					// INPUT peer receives data from us - this is an output destination
 					hasOutputFunction = true
 				}
 			}
@@ -744,10 +750,10 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 				continue
 			}
 
-			// Check if any peer is OUTPUT or BOTH
+			// Check if any peer is a destination (INPUT = receives from us)
 			hasOutputPeer := false
 			for _, peer := range mountPeers {
-				if peer.PeerMountFunction == types.MountFunctionOutput || peer.PeerMountFunction == types.MountFunctionBoth {
+				if peer.PeerMountFunction == types.MountFunctionInput {
 					hasOutputPeer = true
 					break
 				}
@@ -755,13 +761,13 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 
 			if hasOutputPeer && iface.Path != "" {
 				// This is a MOUNT used for output - find the actual mount directory
-				// If this mount was used for INPUT (or BOTH), it may be in hierarchical transfer path
+				// If this mount also received input, it may be in hierarchical transfer path
 				var mountDir string
 
-				// Check if any peer is INPUT or BOTH (meaning files were received from peer)
+				// Check if any peer is a source (OUTPUT = sends to us, meaning files were received)
 				var inputPeer *database.JobInterfacePeer
 				for _, peer := range mountPeers {
-					if peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth {
+					if peer.PeerMountFunction == types.MountFunctionOutput {
 						inputPeer = peer
 						break
 					}
@@ -809,8 +815,8 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 					mountFileName := entry.Name()
 
 					for _, peer := range mountPeers {
-						// Only transfer if peer is OUTPUT or BOTH
-						if peer.PeerMountFunction != types.MountFunctionOutput && peer.PeerMountFunction != types.MountFunctionBoth {
+						// Only transfer to destinations (INPUT = receives from us)
+						if peer.PeerMountFunction != types.MountFunctionInput {
 							continue
 						}
 
@@ -867,8 +873,8 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 
 		// Collect for each receiver peer (for STDOUT/STDERR/LOGS)
 		for _, peer := range peers {
-			// For STD output interfaces, only transfer to peers that accept INPUT (INPUT or BOTH)
-			if peer.PeerMountFunction != types.MountFunctionInput && peer.PeerMountFunction != types.MountFunctionBoth {
+			// For STD output interfaces, only transfer to destinations (INPUT = receives from us)
+			if peer.PeerMountFunction != types.MountFunctionInput {
 				continue
 			}
 
@@ -1848,6 +1854,12 @@ func (jm *JobManager) checkOutputDestinationsReady(job *database.JobExecution) (
 
 		// Check each peer
 		for _, peer := range peers {
+			// Only check destination peers (those that receive data from us)
+			// With fixed workflow definition, destinations have peer_mount_function = INPUT
+			if peer.PeerMountFunction != types.MountFunctionInput {
+				continue
+			}
+
 			// Skip if this is a local peer (same as orchestrator) - Local Peer doesn't have job_execution
 			if peer.PeerID == jm.peerManager.GetPeerID() {
 				continue
@@ -2638,6 +2650,13 @@ func (jm *JobManager) checkInputsReady(job *database.JobExecution) (bool, error)
 		return false, fmt.Errorf("failed to get job interfaces: %v", err)
 	}
 
+	// If we're on executor peer with INPUTS_READY constraint but no interfaces yet,
+	// we're waiting for HandleJobStart to set them up
+	if isExecutorPeer && job.ExecutionConstraint == types.ExecutionConstraintInputsReady && len(interfaces) == 0 {
+		jm.logger.Debug(fmt.Sprintf("Job %d on executor peer waiting for HandleJobStart to set up interfaces", job.ID), "job_manager")
+		return false, nil
+	}
+
 	// For each STDIN or MOUNT interface, check if data exists from all provider peers
 	for _, iface := range interfaces {
 		// Skip if not an input-capable interface
@@ -2652,20 +2671,20 @@ func (jm *JobManager) checkInputsReady(job *database.JobExecution) (bool, error)
 		}
 
 		// Check if data exists from all input provider peers
-		// IMPORTANT: Only check peers that should SEND data TO this job (INPUT direction)
-		// For OUTPUT-only peers, skip the check
-		// For BOTH peers, only check if peer_job_execution_id was set by a transfer arrival
+		// IMPORTANT: Only check peers that should SEND data TO this job
+		// With the fixed workflow definition, peer_mount_function semantics are:
+		// - OUTPUT: peer sends data to us (we wait for this data)
+		// - INPUT: peer receives data from us (we don't wait for this)
 		for _, peer := range peers {
-			// Skip OUTPUT-only peers - they receive FROM this job, not send TO it
-			if peer.PeerMountFunction == types.MountFunctionOutput {
+			// Skip INPUT peers - they receive FROM this job, not send TO it
+			if peer.PeerMountFunction == types.MountFunctionInput {
 				continue
 			}
 
-			// For INPUT peers: always check (they should send to us)
-			// For BOTH peers: only check if peer_job_execution_id is set (indicating transfer arrived)
-			// This handles bidirectional mounts where the peer might be OUTPUT in practice
-			if peer.PeerMountFunction == types.MountFunctionBoth && (peer.PeerJobExecutionID == nil || *peer.PeerJobExecutionID == 0) {
-				jm.logger.Debug(fmt.Sprintf("Skipping BOTH peer check for job %d - peer_job_execution_id not set (no transfer received yet)", job.ID), "job_manager")
+			// Only check OUTPUT peers - these are sources that send data to us
+			// Note: BOTH should no longer exist with the fixed BuildWorkflowDefinition
+			if peer.PeerMountFunction != types.MountFunctionOutput {
+				jm.logger.Warn(fmt.Sprintf("Job %d has peer with unexpected mount function: %s", job.ID, peer.PeerMountFunction), "job_manager")
 				continue
 			}
 

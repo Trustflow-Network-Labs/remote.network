@@ -843,8 +843,9 @@ func (wm *WorkflowManager) validateDataTransferConstraints(jobs []*types.Workflo
 			}
 
 			for _, peer := range iface.InterfacePeers {
-				if peer.PeerMountFunction != types.MountFunctionOutput && peer.PeerMountFunction != types.MountFunctionBoth {
-					continue // We only care about outputs (where data goes)
+				// With fixed workflow definition, destinations that receive data have INPUT
+				if peer.PeerMountFunction != types.MountFunctionInput {
+					continue // We only care about destinations (where data goes)
 				}
 
 				// Note: PeerID is always populated (normalized at workflow parsing time)
@@ -902,17 +903,18 @@ func (wm *WorkflowManager) findJobByPeerAndInputPath(jobs []*types.WorkflowJob, 
 			}
 
 			// Check if this interface has the matching path as input
+			// With fixed workflow definition, sources that send data to us have OUTPUT
 			for _, peer := range iface.InterfacePeers {
-				if peer.PeerPath == inputPath && (peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth) {
+				if peer.PeerPath == inputPath && peer.PeerMountFunction == types.MountFunctionOutput {
 					return job
 				}
 			}
 
 			// For MOUNT interfaces, also check if the interface path matches (the receiving side)
 			if iface.Type == types.InterfaceTypeMount && iface.Path == inputPath {
-				// Check if any peer is providing input to this mount
+				// Check if any peer is providing input to this mount (sources have OUTPUT)
 				for _, peer := range iface.InterfacePeers {
-					if peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth {
+					if peer.PeerMountFunction == types.MountFunctionOutput {
 						return job
 					}
 				}

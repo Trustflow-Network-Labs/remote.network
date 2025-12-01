@@ -342,46 +342,6 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 		return ""
 	}
 
-	// Helper function to find mount function from node's interfaces
-	findMountFunction := func(node *WorkflowNode, interfaceType string) string {
-		if node.Interfaces == nil {
-			return ""
-		}
-		for _, iface := range node.Interfaces {
-			if ifaceMap, ok := iface.(map[string]interface{}); ok {
-				if ifType, ok := ifaceMap["interface_type"].(string); ok && ifType == interfaceType {
-					if mountFunc, ok := ifaceMap["mount_function"].(string); ok {
-						return mountFunc
-					}
-				}
-			}
-		}
-		return ""
-	}
-
-	// determineMountFunction determines the mount function for an interface
-	// based on its type and node definition
-	determineMountFunction := func(node *WorkflowNode, interfaceType string) string {
-		if interfaceType == "MOUNT" {
-			// MOUNT: Read from node's interface definition
-			mountFunc := findMountFunction(node, interfaceType)
-			if mountFunc == "" {
-				return "BOTH" // Default for MOUNT
-			}
-			return mountFunc
-		}
-
-		// For all other interfaces, direction is obvious from type
-		switch interfaceType {
-		case "STDIN":
-			return "INPUT"  // Always receives data
-		case "STDOUT", "STDERR", "LOGS":
-			return "OUTPUT" // Always sends data
-		default:
-			return "INPUT"  // Safe default
-		}
-	}
-
 	// Process each node
 	for _, node := range nodes {
 		sm.logger.Debug(fmt.Sprintf("Processing node %d (%s)", node.ID, node.ServiceName), "database")
@@ -462,28 +422,24 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 							destPath = "input" + string(os.PathSeparator)
 						}
 
-						// Use helper to determine mount function
-						destMountFunc = determineMountFunction(destNode, conn.ToInterfaceType)
+						// For outgoing connections, the peer (destination) RECEIVES data
+						// So peer_mount_function should always be INPUT
+						destMountFunc = "INPUT"
 					} else {
 						sm.logger.Warn(fmt.Sprintf("  Destination node %d not found, skipping connection", *conn.ToNodeID), "database")
 						continue
 					}
 				}
 
-				// Determine source for mount function
-				mountFuncSource := "interface type"
-				if conn.ToInterfaceType == "MOUNT" {
-					mountFuncSource = "interface definition"
-				}
-				sm.logger.Debug(fmt.Sprintf("    Dest interface: %s, mount func: %s (source: %s)", conn.ToInterfaceType, destMountFunc, mountFuncSource), "database")
+				sm.logger.Debug(fmt.Sprintf("    Dest interface: %s, mount func: %s (destination receives)", conn.ToInterfaceType, destMountFunc), "database")
 
 				// Add destination as RECEIVER peer - PeerPath is where data should be SENT TO
-				// Use the mount function from the destination's interface definition
+				// peer_mount_function is INPUT because destination receives data
 				interfaceMap[interfaceKey].InterfacePeers = append(interfaceMap[interfaceKey].InterfacePeers, InterfacePeerDef{
 					PeerID:         destPeerID,
 					PeerWorkflowNodeID: destJobID,
 					PeerPath:           destPath, // Actual destination path (e.g., /app for MOUNT)
-					PeerMountFunction:  destMountFunc,  // From destination's interface definition
+					PeerMountFunction:  destMountFunc,  // INPUT - destination receives
 					DutyAcknowledged:   false,
 				})
 			}
@@ -505,9 +461,6 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 				if toPath == "" {
 					toPath = "input" + string(os.PathSeparator)
 				}
-
-				// Determine our mount function based on OUR interface type and definition
-				ourMountFunc := determineMountFunction(node, interfaceType)
 
 				interfaceKey := interfaceType + ":" + toPath
 				if _, exists := interfaceMap[interfaceKey]; !exists {
@@ -545,20 +498,19 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 					}
 				}
 
-				// Determine source for mount function
-				mountFuncSource := "interface type"
-				if interfaceType == "MOUNT" {
-					mountFuncSource = "interface definition"
-				}
-				sm.logger.Debug(fmt.Sprintf("    Our interface: %s, mount func: %s (source: %s)", interfaceType, ourMountFunc, mountFuncSource), "database")
+				// For incoming connections, the peer (source) SENDS data to us
+				// So peer_mount_function should always be OUTPUT
+				srcMountFunc := "OUTPUT"
+
+				sm.logger.Debug(fmt.Sprintf("    Our interface: %s, peer mount func: %s (source sends)", interfaceType, srcMountFunc), "database")
 
 				// Add source as PROVIDER peer
-				// PeerMountFunction describes how WE (destination) receive data via OUR interface
+				// peer_mount_function is OUTPUT because source sends data
 				interfaceMap[interfaceKey].InterfacePeers = append(interfaceMap[interfaceKey].InterfacePeers, InterfacePeerDef{
 					PeerID:         srcPeerID,
 					PeerWorkflowNodeID: srcJobID,
 					PeerPath:           srcPath, // Source's output path
-					PeerMountFunction:  ourMountFunc, // Use our interface's mount function
+					PeerMountFunction:  srcMountFunc, // OUTPUT - source sends
 					DutyAcknowledged:   false,
 				})
 			}

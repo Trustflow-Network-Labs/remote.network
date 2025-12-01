@@ -555,7 +555,7 @@ func (sm *SQLiteManager) UpdateJobInterfacePeerJobExecutionID(jobExecutionID int
 		)
 		AND peer_id = ?
 		AND peer_workflow_job_id = ?
-		AND peer_mount_function IN ('INPUT', 'BOTH')
+		AND peer_mount_function = 'OUTPUT'
 	`, peerJobExecutionID, jobExecutionID, peerID, peerWorkflowJobID)
 
 	if err != nil {
@@ -580,7 +580,7 @@ func (sm *SQLiteManager) GetSenderDestinationPath(senderJobID int64, receiverJob
 		JOIN job_interfaces ji ON jip.job_interface_id = ji.id
 		WHERE ji.job_execution_id = ?
 		  AND jip.peer_job_id = ?
-		  AND jip.peer_mount_function IN ('OUTPUT', 'BOTH')
+		  AND jip.peer_mount_function = 'INPUT'
 		LIMIT 1
 	`, senderJobID, receiverJobID).Scan(&peerPath)
 
@@ -611,8 +611,9 @@ func (sm *SQLiteManager) ValidateJobInputsReady(jobExecutionID int64) (bool, err
 			}
 
 			// Check if all input provider peers have acknowledged
+			// With fixed workflow definition, OUTPUT peers send data to us
 			for _, peer := range peers {
-				if (peer.PeerMountFunction == "INPUT" || peer.PeerMountFunction == "BOTH") && !peer.DutyAcknowledged {
+				if peer.PeerMountFunction == "OUTPUT" && !peer.DutyAcknowledged {
 					return false, nil
 				}
 			}

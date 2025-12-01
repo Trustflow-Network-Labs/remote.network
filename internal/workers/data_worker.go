@@ -331,10 +331,11 @@ func (dsw *DataServiceWorker) ExecuteDataService(job *database.JobExecution, ser
 	// Transfer data to each peer
 	transferCount := 0
 	for _, peer := range peers {
-		dsw.logger.Info(fmt.Sprintf("Checking peer %s: PeerMountFunction='%s' (INPUT='%s', BOTH='%s')",
-			formatPeerID(peer.PeerID), peer.PeerMountFunction, types.MountFunctionInput, types.MountFunctionBoth), "data_worker")
+		dsw.logger.Info(fmt.Sprintf("Checking peer %s: PeerMountFunction='%s'",
+			formatPeerID(peer.PeerID), peer.PeerMountFunction), "data_worker")
 
-		if peer.PeerMountFunction == types.MountFunctionInput || peer.PeerMountFunction == types.MountFunctionBoth {
+		// With fixed workflow definition, only INPUT peers are destinations that receive data
+		if peer.PeerMountFunction == types.MountFunctionInput {
 			dsw.logger.Info(fmt.Sprintf("Transferring data to peer %s (path: %s)", formatPeerID(peer.PeerID), peer.PeerPath), "data_worker")
 
 			err := dsw.transferDataToPeer(job, filePath, peer, dataDetails)
@@ -346,13 +347,13 @@ func (dsw *DataServiceWorker) ExecuteDataService(job *database.JobExecution, ser
 			dsw.logger.Info(fmt.Sprintf("Successfully transferred data to peer %s", formatPeerID(peer.PeerID)), "data_worker")
 			transferCount++
 		} else {
-			dsw.logger.Warn(fmt.Sprintf("Skipping peer %s: mount function '%s' is not INPUT or BOTH",
+			dsw.logger.Debug(fmt.Sprintf("Skipping peer %s: mount function '%s' (OUTPUT peers are sources, not destinations)",
 				formatPeerID(peer.PeerID), peer.PeerMountFunction), "data_worker")
 		}
 	}
 
 	if transferCount == 0 {
-		dsw.logger.Warn(fmt.Sprintf("DATA service job %d: No transfers performed (found %d peers but none matched INPUT/BOTH criteria)",
+		dsw.logger.Warn(fmt.Sprintf("DATA service job %d: No transfers performed (found %d peers but none are INPUT destinations)",
 			job.ID, len(peers)), "data_worker")
 	}
 
