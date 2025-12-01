@@ -2315,19 +2315,22 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 	// Update job_interface_peers with sender's job_execution_id for hierarchical path construction
 	// This is critical: when job interfaces were created, we didn't know the sender's job_execution_id yet
 	// Now that we have it in the transfer request, update the database so checkInputsReady() can use it
+	// IMPORTANT: Only update the interface peer that matches the sender's workflow_job_id to avoid
+	// incorrectly updating multiple peers when a job has the same mount used for both input and output
 	if request.DestinationJobExecutionID > 0 && request.SourceJobExecutionID > 0 {
 		err := jm.db.UpdateJobInterfacePeerJobExecutionID(
 			request.DestinationJobExecutionID, // Receiver job (this job on executor)
 			request.SourcePeerID,              // Sender peer
 			request.SourceJobExecutionID,      // Sender job execution ID
+			request.WorkflowJobID,             // Sender workflow job ID (to match specific interface peer)
 		)
 		if err != nil {
-			jm.logger.Warn(fmt.Sprintf("Failed to update peer_job_execution_id for job %d from peer %s: %v",
-				request.DestinationJobExecutionID, request.SourcePeerID[:8], err), "job_manager")
+			jm.logger.Warn(fmt.Sprintf("Failed to update peer_job_execution_id for job %d from peer %s workflow_job %d: %v",
+				request.DestinationJobExecutionID, request.SourcePeerID[:8], request.WorkflowJobID, err), "job_manager")
 			// Don't fail the transfer - this is optimization for path lookups
 		} else {
-			jm.logger.Info(fmt.Sprintf("Updated peer_job_execution_id=%d for job %d interface from peer %s",
-				request.SourceJobExecutionID, request.DestinationJobExecutionID, request.SourcePeerID[:8]), "job_manager")
+			jm.logger.Info(fmt.Sprintf("Updated peer_job_execution_id=%d for job %d interface from peer %s workflow_job %d",
+				request.SourceJobExecutionID, request.DestinationJobExecutionID, request.SourcePeerID[:8], request.WorkflowJobID), "job_manager")
 		}
 	}
 
@@ -2649,8 +2652,20 @@ func (jm *JobManager) checkInputsReady(job *database.JobExecution) (bool, error)
 		}
 
 		// Check if data exists from all input provider peers
+		// IMPORTANT: Only check peers that should SEND data TO this job (INPUT direction)
+		// For OUTPUT-only peers, skip the check
+		// For BOTH peers, only check if peer_job_execution_id was set by a transfer arrival
 		for _, peer := range peers {
-			if peer.PeerMountFunction != types.MountFunctionInput && peer.PeerMountFunction != types.MountFunctionBoth {
+			// Skip OUTPUT-only peers - they receive FROM this job, not send TO it
+			if peer.PeerMountFunction == types.MountFunctionOutput {
+				continue
+			}
+
+			// For INPUT peers: always check (they should send to us)
+			// For BOTH peers: only check if peer_job_execution_id is set (indicating transfer arrived)
+			// This handles bidirectional mounts where the peer might be OUTPUT in practice
+			if peer.PeerMountFunction == types.MountFunctionBoth && (peer.PeerJobExecutionID == nil || *peer.PeerJobExecutionID == 0) {
+				jm.logger.Debug(fmt.Sprintf("Skipping BOTH peer check for job %d - peer_job_execution_id not set (no transfer received yet)", job.ID), "job_manager")
 				continue
 			}
 

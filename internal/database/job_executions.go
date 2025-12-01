@@ -546,7 +546,7 @@ func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInter
 // UpdateJobInterfacePeerJobExecutionID updates the peer_job_execution_id for a job interface peer
 // This is called when a data transfer request is received to record the sender's job_execution_id
 // so that hierarchical paths can be constructed correctly for input checking and Docker mounts
-func (sm *SQLiteManager) UpdateJobInterfacePeerJobExecutionID(jobExecutionID int64, peerID string, peerJobExecutionID int64) error {
+func (sm *SQLiteManager) UpdateJobInterfacePeerJobExecutionID(jobExecutionID int64, peerID string, peerJobExecutionID int64, peerWorkflowJobID int64) error {
 	result, err := sm.db.Exec(`
 		UPDATE job_interface_peers
 		SET peer_job_execution_id = ?
@@ -554,8 +554,9 @@ func (sm *SQLiteManager) UpdateJobInterfacePeerJobExecutionID(jobExecutionID int
 			SELECT id FROM job_interfaces WHERE job_execution_id = ?
 		)
 		AND peer_id = ?
+		AND peer_workflow_job_id = ?
 		AND peer_mount_function IN ('INPUT', 'BOTH')
-	`, peerJobExecutionID, jobExecutionID, peerID)
+	`, peerJobExecutionID, jobExecutionID, peerID, peerWorkflowJobID)
 
 	if err != nil {
 		sm.logger.Error(fmt.Sprintf("Failed to update peer_job_execution_id: %v", err), "database")
@@ -563,8 +564,8 @@ func (sm *SQLiteManager) UpdateJobInterfacePeerJobExecutionID(jobExecutionID int
 	}
 
 	rowsAffected, _ := result.RowsAffected()
-	sm.logger.Info(fmt.Sprintf("Updated peer_job_execution_id=%d for job %d from peer %s (%d rows affected)",
-		peerJobExecutionID, jobExecutionID, peerID[:8], rowsAffected), "database")
+	sm.logger.Info(fmt.Sprintf("Updated peer_job_execution_id=%d for job %d from peer %s workflow_job %d (%d rows affected)",
+		peerJobExecutionID, jobExecutionID, peerID[:8], peerWorkflowJobID, rowsAffected), "database")
 
 	return nil
 }

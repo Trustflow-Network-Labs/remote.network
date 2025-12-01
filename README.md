@@ -40,6 +40,18 @@ This project is the successor to [trustflow-node](https://github.com/Trustflow-N
 
 ---
 
+## Visual Workflow Designer
+
+The web-based workflow designer provides an intuitive drag-and-drop interface for creating distributed compute workflows:
+
+![Workflow Designer Example 1](./workflow-1-example.png)
+
+![Workflow Designer Example 2](./workflow-2-example.png)
+
+![Workflow Designer Example 3](./workflow-3-example.png)
+
+---
+
 ## Architecture
 
 ```

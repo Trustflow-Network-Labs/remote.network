@@ -690,9 +690,24 @@ func (sm *SQLiteManager) CreateWorkflowJob(executionID, workflowID, nodeID int64
 
 // UpdateWorkflowJobStatus updates the status of a workflow job
 func (sm *SQLiteManager) UpdateWorkflowJobStatus(jobID int64, status string, result map[string]interface{}, errorMsg string) error {
-	var resultJSON []byte
-	var err error
+	// First, get the current status to prevent backward state transitions
+	// This is critical for distributed systems where status updates can arrive out of order
+	var currentStatus string
+	err := sm.db.QueryRow("SELECT status FROM workflow_jobs WHERE id = ?", jobID).Scan(&currentStatus)
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to get current status for workflow job %d: %v", jobID, err), "database")
+		return err
+	}
 
+	// Prevent backward state transitions (terminal states cannot be overwritten)
+	if currentStatus == "COMPLETED" || currentStatus == "ERRORED" {
+		if status != currentStatus {
+			sm.logger.Warn(fmt.Sprintf("Ignoring status update for workflow job %d: attempted to change from terminal state %s to %s (likely out-of-order update)", jobID, currentStatus, status), "database")
+			return nil // Not an error - just ignore the update
+		}
+	}
+
+	var resultJSON []byte
 	if result != nil {
 		resultJSON, err = json.Marshal(result)
 		if err != nil {

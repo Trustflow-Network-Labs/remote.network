@@ -1133,18 +1133,38 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 
 		// Determine the base directory for extraction
 		// The hierarchical path is already constructed in HandleJobDataTransferRequest
-		// transfer.TargetPath is the .dat file path:
-		// .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/mounts/data/file.dat
-		// extractionDir is the directory containing the transfer file:
-		// .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/mounts/data
-		// The manifest entries have paths like "mounts/app/file.md"
-		// So baseDir should be the job directory (2 levels up from file):
-		// .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/
-		extractionDir := filepath.Dir(transfer.TargetPath)
-		baseDir := filepath.Dir(filepath.Dir(extractionDir))
+		// transfer.TargetPath follows this pattern:
+		// .../jobs/<sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>/<destDir>/transfer_id.dat
+		// where <destDir> can be:
+		//   - "input" for STD interfaces
+		//   - "mounts/<mount_path>" for MOUNT interfaces (can be multiple levels deep!)
+		//
+		// The manifest entries have relative paths like "input/logs.txt" or "mounts/app/file.md"
+		// So baseDir must be the receiver job directory: .../jobs/<sender>/<sender_job>/<receiver>/<receiver_job>/
+		//
+		// To extract baseDir, we parse the hierarchical path structure:
+		// Find "/jobs/" and then parse 4 path components forward: sender_peer, sender_job, receiver_peer, receiver_job
 
-		dsw.logger.Info(fmt.Sprintf("Transfer %s extraction: extractionDir=%s, baseDir=%s",
-			transferID, extractionDir, baseDir), "data_worker")
+		targetPath := transfer.TargetPath
+		jobsIndex := strings.Index(targetPath, "/jobs/")
+		if jobsIndex == -1 {
+			return fmt.Errorf("invalid hierarchical path format: missing /jobs/ in path: %s", targetPath)
+		}
+
+		// Get the path after "/jobs/"
+		pathAfterJobs := targetPath[jobsIndex+6:] // Skip "/jobs/"
+
+		// Split into components and take first 4: <sender_peer>/<sender_job>/<receiver_peer>/<receiver_job>
+		components := strings.Split(pathAfterJobs, string(os.PathSeparator))
+		if len(components) < 4 {
+			return fmt.Errorf("invalid hierarchical path format: not enough components after /jobs/: %s", targetPath)
+		}
+
+		// Reconstruct baseDir up to and including receiver_job
+		baseDir := filepath.Join(targetPath[:jobsIndex], "jobs", components[0], components[1], components[2], components[3])
+
+		dsw.logger.Info(fmt.Sprintf("Transfer %s extraction: targetPath=%s, baseDir=%s",
+			transferID, targetPath, baseDir), "data_worker")
 
 		// Use transfer package extractor
 		extractor := utils.NewTransferPackageExtractor(dsw.logger)
