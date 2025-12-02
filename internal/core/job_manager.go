@@ -836,15 +836,15 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 							}
 						} else {
 							// Collect for remote package transfer
-							// Use the interface's actual mount path (iface.Path), not peer.PeerPath
-							// peer.PeerPath may be "output/" for BOTH function peers, but we need the actual mount path
-							mountPathBase := filepath.Base(iface.Path)
-							destPath := filepath.Join("mounts", mountPathBase, mountFileName)
+							// Use peer.PeerPath (receiver's mount path) for destination, not iface.Path (sender's)
+							// The receiver expects files at their mount point, not ours
+							peerMountBase := filepath.Base(peer.PeerPath)
+							destPath := filepath.Join("mounts", peerMountBase, mountFileName)
 							remoteOutputs[peer.PeerID] = append(remoteOutputs[peer.PeerID], outputInfo{
 								interfaceType: iface.InterfaceType,
 								sourcePath:    mountFilePath,
 								destPath:      destPath,
-								mountPath:     iface.Path,
+								mountPath:     peer.PeerPath, // Use receiver's mount path
 								peer:          peer,
 							})
 						}
