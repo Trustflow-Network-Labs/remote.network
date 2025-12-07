@@ -52,11 +52,12 @@ type APIServer struct {
 	wsHub            *ws.Hub
 	wsLogger         *logrus.Logger
 	wsUpgrader       websocket.Upgrader
-	eventEmitter     *events.Emitter
-	fileProcessor    *services.FileProcessor
-	gitService       *services.GitService
-	dockerService    *services.DockerService
-	startTime        time.Time
+	eventEmitter       *events.Emitter
+	fileProcessor      *services.FileProcessor
+	gitService         *services.GitService
+	dockerService      *services.DockerService
+	standaloneService  *services.StandaloneService
+	startTime          time.Time
 }
 
 // NewAPIServer creates a new API server instance
@@ -146,6 +147,14 @@ func NewAPIServer(
 	dockerService.SetEventBroadcaster(eventEmitter)
 	logger.Info("Event broadcaster set for Docker service", "api")
 
+	// Initialize Standalone service
+	standaloneService := services.NewStandaloneService(dbManager, logger, config, appPaths, gitService)
+	logger.Info("Standalone service initialized", "api")
+
+	// Set event broadcaster for real-time Standalone operation updates
+	standaloneService.SetEventBroadcaster(eventEmitter)
+	logger.Info("Event broadcaster set for Standalone service", "api")
+
 	// Initialize file upload handler
 	fileUploadHandler := ws.NewFileUploadHandler(dbManager, logger, config, appPaths)
 
@@ -170,24 +179,25 @@ func NewAPIServer(
 	logger.Info("Service search handler initialized for remote service discovery", "api")
 
 	return &APIServer{
-		ctx:              ctx,
-		cancel:           cancel,
-		logger:           logger,
-		config:           config,
-		peerManager:      peerManager,
-		dbManager:        dbManager,
-		keyPair:          keyPair,
-		jwtManager:       jwtManager,
-		challengeManager: challengeManager,
-		ed25519Provider:  ed25519Provider,
-		wsHub:            wsHub,
-		wsLogger:         wsLogger,
-		wsUpgrader:       wsUpgrader,
-		eventEmitter:     eventEmitter,
-		fileProcessor:    fileProcessor,
-		gitService:       gitService,
-		dockerService:    dockerService,
-		startTime:        time.Now(),
+		ctx:               ctx,
+		cancel:            cancel,
+		logger:            logger,
+		config:            config,
+		peerManager:       peerManager,
+		dbManager:         dbManager,
+		keyPair:           keyPair,
+		jwtManager:        jwtManager,
+		challengeManager:  challengeManager,
+		ed25519Provider:   ed25519Provider,
+		wsHub:             wsHub,
+		wsLogger:          wsLogger,
+		wsUpgrader:        wsUpgrader,
+		eventEmitter:      eventEmitter,
+		fileProcessor:     fileProcessor,
+		gitService:        gitService,
+		dockerService:     dockerService,
+		standaloneService: standaloneService,
+		startTime:         time.Now(),
 	}
 }
 
@@ -420,6 +430,28 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		}
 		if strings.HasSuffix(r.URL.Path, "/config") {
 			s.handleUpdateDockerServiceConfig(w, r)
+			return
+		}
+		http.Error(w, "Not found", http.StatusNotFound)
+	})))
+
+	// Standalone service routes (protected with JWT authentication)
+	mux.Handle("/api/services/standalone/from-local", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleCreateStandaloneFromLocal)))
+	mux.Handle("/api/services/standalone/from-git", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handleCreateStandaloneFromGit)))
+	// Note: from-upload is handled via WebSocket chunked upload (see file_upload_handler.go)
+	mux.Handle("/api/services/standalone/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/details") {
+			s.handleGetStandaloneDetails(w, r)
+			return
+		}
+		// POST /api/services/standalone/:id/finalize (after upload)
+		if strings.HasSuffix(r.URL.Path, "/finalize") && r.Method == http.MethodPost {
+			s.handleFinalizeStandaloneUpload(w, r)
+			return
+		}
+		// DELETE /api/services/standalone/:id
+		if r.Method == http.MethodDelete {
+			s.handleDeleteStandaloneService(w, r)
 			return
 		}
 		http.Error(w, "Not found", http.StatusNotFound)

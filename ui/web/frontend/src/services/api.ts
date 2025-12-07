@@ -256,6 +256,84 @@ class APIClient {
     return response.data
   }
 
+  // ===== Standalone Services API =====
+
+  /**
+   * Create Standalone service from local executable
+   */
+  async createStandaloneFromLocal(data: {
+    service_name: string
+    executable_path: string
+    arguments?: string[]
+    working_directory?: string
+    environment_variables?: Record<string, string>
+    timeout_seconds?: number
+    run_as_user?: string
+    description?: string
+    capabilities?: Record<string, any>
+    custom_interfaces?: any[]
+  }) {
+    const response = await this.client.post('/api/services/standalone/from-local', data)
+    return response.data
+  }
+
+  /**
+   * Create Standalone service from Git repository
+   */
+  async createStandaloneFromGit(data: {
+    service_name: string
+    repo_url: string
+    branch?: string
+    executable_path: string
+    build_command?: string
+    arguments?: string[]
+    working_directory?: string
+    environment_variables?: Record<string, string>
+    timeout_seconds?: number
+    run_as_user?: string
+    username?: string
+    password?: string
+    description?: string
+    capabilities?: Record<string, any>
+    custom_interfaces?: any[]
+  }) {
+    const response = await this.client.post('/api/services/standalone/from-git', data)
+    return response.data
+  }
+
+  /**
+   * Get Standalone service details
+   */
+  async getStandaloneServiceDetails(serviceId: number) {
+    const response = await this.client.get(`/api/services/standalone/${serviceId}/details`)
+    return response.data
+  }
+
+  /**
+   * Finalize uploaded Standalone service with configuration
+   */
+  async finalizeStandaloneUpload(serviceId: number, data: {
+    executable_path: string
+    arguments?: string[]
+    working_directory?: string
+    environment_variables?: Record<string, string>
+    timeout_seconds?: number
+    run_as_user?: string
+    capabilities?: Record<string, any>
+    custom_interfaces?: any[]
+  }) {
+    const response = await this.client.post(`/api/services/standalone/${serviceId}/finalize`, data)
+    return response.data
+  }
+
+  /**
+   * Delete Standalone service
+   */
+  async deleteStandaloneService(serviceId: number) {
+    const response = await this.client.delete(`/api/services/standalone/${serviceId}`)
+    return response.data
+  }
+
   // ===== Blacklist API =====
 
   /**

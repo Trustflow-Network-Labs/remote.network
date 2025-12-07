@@ -263,8 +263,10 @@ export default {
       imageRequired: 'Image name is required',
       repoRequired: 'Repository URL is required',
       pathRequired: 'Local path is required',
+      executablePathRequired: 'Executable path is required',
       serviceCreated: 'Service created successfully',
       dockerCreated: 'Docker service created successfully',
+      standaloneCreated: 'Standalone service created successfully',
       createFailed: 'Failed to create service',
 
       // Upload Progress
@@ -436,12 +438,32 @@ export default {
 
         // STANDALONE service
         standaloneConfig: 'Standalone Configuration',
+        standaloneSource: 'Executable Source',
+        fromUpload: 'Upload Executable',
+        executablePath: 'Executable Path',
+        executablePathPlaceholder: 'e.g., /usr/bin/python3',
+        executablePathHelp: 'Absolute path to the executable on the peer\'s filesystem',
+        uploadExecutable: 'Upload Executable File',
+        chooseExecutable: 'Choose Executable',
+        uploadExecutableHelp: 'Select an executable file to upload (binary, script, etc.)',
+        executablePathInRepo: 'Executable Path in Repository',
+        executablePathGitPlaceholder: 'e.g., target/release/myapp',
+        executablePathGitHelp: 'Relative path to executable within the cloned repository',
+        buildCommand: 'Build Command',
+        buildCommandPlaceholder: 'e.g., cargo build --release',
+        buildCommandHelp: 'Optional command to build the executable after cloning',
+        executionConfig: 'Execution Configuration',
         command: 'Command',
         commandPlaceholder: 'e.g., /usr/bin/python3',
         arguments: 'Arguments',
-        argsPlaceholder: 'e.g., script.py --port 8080',
+        argsPlaceholder: 'e.g., --port 8080 --verbose',
+        argsHelp: 'Space-separated command-line arguments',
         workingDirectory: 'Working Directory',
-        workdirPlaceholder: 'e.g., /opt/app'
+        workdirPlaceholder: 'e.g., /opt/app',
+        envHelp: 'Environment variables in KEY=value format, one per line',
+        timeout: 'Timeout (seconds)',
+        timeoutPlaceholder: '600',
+        timeoutHelp: 'Maximum execution time in seconds (default: 600)'
       }
     },
     peers: {

@@ -372,7 +372,15 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 
 	if peer.PeerID == dsw.peerID {
 		dsw.logger.Info(fmt.Sprintf("Destination is local peer - handling data locally for job %d", job.ID), "data_worker")
-		return dsw.handleLocalDataTransfer(job.ID, filePath, peer, dataDetails, "STDOUT")
+		// Determine interface type for path construction
+		// For STDIN: peer.PeerPath = "input" or "input/"
+		// For MOUNT: peer.PeerPath = mount path (e.g., "/data", "/output")
+		interfaceType := "STDIN"
+		peerPath := strings.TrimSuffix(peer.PeerPath, "/")
+		if peerPath != "" && peerPath != "input" {
+			interfaceType = "MOUNT"
+		}
+		return dsw.handleLocalDataTransfer(job.ID, filePath, peer, dataDetails, interfaceType)
 	}
 
 	// Open file for reading
@@ -434,13 +442,32 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 			}
 		}
 
-		// Send transfer request using WorkflowJobID (shared identifier both peers understand)
+		// Determine destination workflow_job_id
+		// peer.PeerWorkflowJobID contains the actual workflow_job.id (already translated from node_id by orchestrator)
+		// For "Local Peer" (peer.PeerWorkflowJobID == nil), use source job's workflow_job_id
+		destWorkflowJobID := job.WorkflowJobID // Default to source
+		if peer.PeerWorkflowJobID != nil {
+			destWorkflowJobID = *peer.PeerWorkflowJobID
+			dsw.logger.Debug(fmt.Sprintf("Using destination workflow_job_id=%d from peer interface",
+				destWorkflowJobID), "data_worker")
+		}
+
+		// Determine interface type for path construction
+		// For STDIN: peer.PeerPath = "input" or "input/"
+		// For MOUNT: peer.PeerPath = mount path (e.g., "/data", "/output")
+		interfaceType := "STDIN"
+		peerPath := strings.TrimSuffix(peer.PeerPath, "/")
+		if peerPath != "" && peerPath != "input" {
+			interfaceType = "MOUNT"
+		}
+
+		// Send transfer request using destination's WorkflowJobID
 		transferRequest := &types.JobDataTransferRequest{
-			TransferID:                transferID, // Include transfer ID so both peers use the same one
-			WorkflowJobID:             job.WorkflowJobID,
-			SourceJobExecutionID:      job.ID,        // Source job execution ID (this job)
-			DestinationJobExecutionID: destJobExecID, // Destination job execution ID (receiver's job)
-			InterfaceType:             types.InterfaceTypeStdout,
+			TransferID:                transferID,        // Include transfer ID so both peers use the same one
+			WorkflowJobID:             destWorkflowJobID, // Use destination's workflow_job_id for correct path
+			SourceJobExecutionID:      job.ID,            // Source job execution ID (this job)
+			DestinationJobExecutionID: destJobExecID,     // Destination job execution ID (receiver's job)
+			InterfaceType:             interfaceType,     // Use determined interface type, not hardcoded STDOUT
 			SourcePeerID:              dsw.peerID,
 			DestinationPeerID:         peer.PeerID,
 			SourcePath:                filePath,
@@ -1514,22 +1541,19 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 		destJobExecID := *peer.PeerJobExecutionID
 		dsw.logger.Info(fmt.Sprintf("Transferring to receiver job_execution %d (sender job %d)", destJobExecID, job.ID), "data_worker")
 
-		// Get workflow context to construct proper hierarchical path
-		workflowJob, err := dsw.db.GetWorkflowJobByID(job.WorkflowJobID)
-		if err != nil {
-			return fmt.Errorf("failed to get workflow job %d: %v", job.WorkflowJobID, err)
-		}
-
-		// Get destination job execution to determine executor peer
+		// Get destination job execution to determine executor peer and workflow_job_id
 		destJob, err := dsw.db.GetJobExecution(destJobExecID)
 		if err != nil {
 			return fmt.Errorf("failed to get destination job execution %d: %v", destJobExecID, err)
 		}
 
 		// Build path info with sender and receiver information
+		// IMPORTANT: Use receiver's WorkflowJobID for consistent path construction
+		// The receiver (job_manager.checkInputsReady) uses its own WorkflowJobID when checking for input,
+		// so the sender must use the receiver's WorkflowJobID when constructing the destination path
 		pathInfo := utils.JobPathInfo{
 			OrchestratorPeerID: job.OrderingPeerID,
-			WorkflowJobID:      workflowJob.ID,           // Use workflow_job.id for consistent paths
+			WorkflowJobID:      destJob.WorkflowJobID,    // Use RECEIVER's workflow_job.id for consistent paths
 			ExecutorPeerID:     job.ExecutorPeerID,       // Sender peer
 			JobExecutionID:     job.ID,                   // Sender job execution ID
 			ReceiverPeerID:     destJob.ExecutorPeerID,   // Receiver peer

@@ -334,45 +334,192 @@
               <div v-else-if="serviceData.serviceType === 'STANDALONE'" class="config-section">
                 <h4>{{ $t('message.services.wizard.standaloneConfig') }}</h4>
 
+                <!-- Standalone Source Selection -->
                 <div class="field">
-                  <label for="standalone-command">{{ $t('message.services.wizard.command') }} *</label>
-                  <InputText
-                    id="standalone-command"
-                    v-model="serviceData.standaloneCommand"
-                    :placeholder="$t('message.services.wizard.commandPlaceholder')"
-                    class="w-full"
-                  />
+                  <label>{{ $t('message.services.wizard.standaloneSource') }} *</label>
+                  <div class="standalone-source-selection">
+                    <div
+                      v-for="source in standaloneSources"
+                      :key="source.value"
+                      class="standalone-source-card"
+                      :class="{ 'selected': serviceData.standaloneSource === source.value }"
+                      @click="serviceData.standaloneSource = source.value as 'local' | 'upload' | 'git'"
+                    >
+                      <i :class="source.icon" class="source-icon"></i>
+                      <div class="source-label">{{ source.label }}</div>
+                    </div>
+                  </div>
                 </div>
 
-                <div class="field">
-                  <label for="standalone-args">{{ $t('message.services.wizard.arguments') }}</label>
-                  <InputText
-                    id="standalone-args"
-                    v-model="serviceData.standaloneArgs"
-                    :placeholder="$t('message.services.wizard.argsPlaceholder')"
-                    class="w-full"
-                  />
+                <!-- Local Executable Configuration -->
+                <div v-if="serviceData.standaloneSource === 'local'" class="source-config">
+                  <div class="field">
+                    <label for="standalone-exec-path">{{ $t('message.services.wizard.executablePath') }} *</label>
+                    <InputText
+                      id="standalone-exec-path"
+                      v-model="serviceData.standaloneExecutablePath"
+                      :placeholder="$t('message.services.wizard.executablePathPlaceholder')"
+                      class="w-full"
+                      :class="{ 'p-invalid': errors.standaloneExecutablePath }"
+                    />
+                    <small class="field-help">{{ $t('message.services.wizard.executablePathHelp') }}</small>
+                    <small v-if="errors.standaloneExecutablePath" class="p-error">{{ errors.standaloneExecutablePath }}</small>
+                  </div>
                 </div>
 
-                <div class="field">
-                  <label for="standalone-workdir">{{ $t('message.services.wizard.workingDirectory') }}</label>
-                  <InputText
-                    id="standalone-workdir"
-                    v-model="serviceData.standaloneWorkdir"
-                    :placeholder="$t('message.services.wizard.workdirPlaceholder')"
-                    class="w-full"
-                  />
+                <!-- Upload Executable Configuration -->
+                <div v-else-if="serviceData.standaloneSource === 'upload'" class="source-config">
+                  <div class="field">
+                    <label>{{ $t('message.services.wizard.uploadExecutable') }} *</label>
+                    <div class="file-selection">
+                      <Button
+                        :label="standaloneExecutableFile
+                          ? standaloneExecutableFile.name
+                          : $t('message.services.wizard.chooseExecutable')"
+                        icon="pi pi-file"
+                        @click="openExecutableFileDialog"
+                        class="file-button"
+                      />
+                      <Button
+                        v-if="standaloneExecutableFile"
+                        label="Clear"
+                        icon="pi pi-times"
+                        text
+                        severity="danger"
+                        @click="clearExecutableFile"
+                        class="clear-button"
+                      />
+                    </div>
+                    <input
+                      ref="executableFileInput"
+                      type="file"
+                      @change="handleExecutableFileSelect"
+                      style="display: none"
+                    />
+                    <small class="field-help">{{ $t('message.services.wizard.uploadExecutableHelp') }}</small>
+                    <small v-if="errors.standaloneExecutableFile" class="p-error">{{ errors.standaloneExecutableFile }}</small>
+                  </div>
                 </div>
 
-                <div class="field">
-                  <label for="standalone-env">{{ $t('message.services.wizard.environment') }}</label>
-                  <Textarea
-                    id="standalone-env"
-                    v-model="serviceData.standaloneEnv"
-                    :placeholder="$t('message.services.wizard.envPlaceholder')"
-                    class="w-full"
-                    rows="3"
-                  />
+                <!-- Git Repository Configuration -->
+                <div v-else-if="serviceData.standaloneSource === 'git'" class="source-config">
+                  <div class="field">
+                    <label for="standalone-git-repo">{{ $t('message.services.wizard.gitRepoUrl') }} *</label>
+                    <InputText
+                      id="standalone-git-repo"
+                      v-model="serviceData.standaloneGitRepo"
+                      :placeholder="$t('message.services.wizard.gitRepoPlaceholder')"
+                      class="w-full"
+                      :class="{ 'p-invalid': errors.standaloneGitRepo }"
+                    />
+                    <small v-if="errors.standaloneGitRepo" class="p-error">{{ errors.standaloneGitRepo }}</small>
+                  </div>
+
+                  <div class="field">
+                    <label for="standalone-git-branch">{{ $t('message.services.wizard.gitBranch') }}</label>
+                    <InputText
+                      id="standalone-git-branch"
+                      v-model="serviceData.standaloneGitBranch"
+                      :placeholder="$t('message.services.wizard.gitBranchPlaceholder')"
+                      class="w-full"
+                    />
+                  </div>
+
+                  <div class="field">
+                    <label for="standalone-exec-path-git">{{ $t('message.services.wizard.executablePathInRepo') }} *</label>
+                    <InputText
+                      id="standalone-exec-path-git"
+                      v-model="serviceData.standaloneExecutablePathGit"
+                      :placeholder="$t('message.services.wizard.executablePathGitPlaceholder')"
+                      class="w-full"
+                      :class="{ 'p-invalid': errors.standaloneExecutablePathGit }"
+                    />
+                    <small class="field-help">{{ $t('message.services.wizard.executablePathGitHelp') }}</small>
+                    <small v-if="errors.standaloneExecutablePathGit" class="p-error">{{ errors.standaloneExecutablePathGit }}</small>
+                  </div>
+
+                  <div class="field">
+                    <label for="standalone-build-cmd">{{ $t('message.services.wizard.buildCommand') }}</label>
+                    <InputText
+                      id="standalone-build-cmd"
+                      v-model="serviceData.standaloneBuildCommand"
+                      :placeholder="$t('message.services.wizard.buildCommandPlaceholder')"
+                      class="w-full"
+                    />
+                    <small class="field-help">{{ $t('message.services.wizard.buildCommandHelp') }}</small>
+                  </div>
+
+                  <div class="field">
+                    <label for="standalone-git-username">{{ $t('message.services.wizard.gitUsername') }}</label>
+                    <InputText
+                      id="standalone-git-username"
+                      v-model="serviceData.standaloneGitUsername"
+                      :placeholder="$t('message.services.wizard.usernameOptional')"
+                      class="w-full"
+                    />
+                  </div>
+
+                  <div class="field">
+                    <label for="standalone-git-password">{{ $t('message.services.wizard.gitPassword') }}</label>
+                    <InputText
+                      id="standalone-git-password"
+                      v-model="serviceData.standaloneGitPassword"
+                      type="password"
+                      :placeholder="$t('message.services.wizard.passwordTokenOptional')"
+                      class="w-full"
+                    />
+                  </div>
+                </div>
+
+                <!-- Common Configuration for All Sources -->
+                <div class="common-config">
+                  <h5>{{ $t('message.services.wizard.executionConfig') }}</h5>
+
+                  <div class="field">
+                    <label for="standalone-args">{{ $t('message.services.wizard.arguments') }}</label>
+                    <InputText
+                      id="standalone-args"
+                      v-model="serviceData.standaloneArgs"
+                      :placeholder="$t('message.services.wizard.argsPlaceholder')"
+                      class="w-full"
+                    />
+                    <small class="field-help">{{ $t('message.services.wizard.argsHelp') }}</small>
+                  </div>
+
+                  <div class="field">
+                    <label for="standalone-workdir">{{ $t('message.services.wizard.workingDirectory') }}</label>
+                    <InputText
+                      id="standalone-workdir"
+                      v-model="serviceData.standaloneWorkdir"
+                      :placeholder="$t('message.services.wizard.workdirPlaceholder')"
+                      class="w-full"
+                    />
+                  </div>
+
+                  <div class="field">
+                    <label for="standalone-env">{{ $t('message.services.wizard.environment') }}</label>
+                    <Textarea
+                      id="standalone-env"
+                      v-model="serviceData.standaloneEnv"
+                      :placeholder="$t('message.services.wizard.envPlaceholder')"
+                      class="w-full"
+                      rows="3"
+                    />
+                    <small class="field-help">{{ $t('message.services.wizard.envHelp') }}</small>
+                  </div>
+
+                  <div class="field">
+                    <label for="standalone-timeout">{{ $t('message.services.wizard.timeout') }}</label>
+                    <InputNumber
+                      id="standalone-timeout"
+                      v-model="serviceData.standaloneTimeout"
+                      :min="1"
+                      :max="3600"
+                      :placeholder="$t('message.services.wizard.timeoutPlaceholder')"
+                      class="w-full"
+                    />
+                    <small class="field-help">{{ $t('message.services.wizard.timeoutHelp') }}</small>
+                  </div>
                 </div>
               </div>
             </div>
@@ -481,10 +628,19 @@ const serviceData = ref({
   dockerGitPassword: '',
   dockerLocalPath: '',
   // STANDALONE specific
+  standaloneSource: 'local' as 'local' | 'upload' | 'git',
+  standaloneExecutablePath: '',
+  standaloneExecutablePathGit: '',
+  standaloneGitRepo: '',
+  standaloneGitBranch: 'main',
+  standaloneBuildCommand: '',
+  standaloneGitUsername: '',
+  standaloneGitPassword: '',
   standaloneCommand: '',
   standaloneArgs: '',
   standaloneWorkdir: '',
-  standaloneEnv: ''
+  standaloneEnv: '',
+  standaloneTimeout: 600
 })
 
 const errors = ref({
@@ -493,12 +649,18 @@ const errors = ref({
   files: '',
   dockerImageName: '',
   dockerGitRepo: '',
-  dockerLocalPath: ''
+  dockerLocalPath: '',
+  standaloneExecutablePath: '',
+  standaloneExecutableFile: '',
+  standaloneExecutablePathGit: '',
+  standaloneGitRepo: ''
 })
 
 const selectedFiles = ref<File[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 const folderInput = ref<HTMLInputElement | null>(null)
+const standaloneExecutableFile = ref<File | null>(null)
+const executableFileInput = ref<HTMLInputElement | null>(null)
 
 // Pricing options
 const pricingTypes = computed(() => [
@@ -557,6 +719,25 @@ const dockerSources = computed(() => [
   }
 ])
 
+// Standalone sources
+const standaloneSources = computed(() => [
+  {
+    value: 'local',
+    label: t('message.services.wizard.fromLocal'),
+    icon: 'pi pi-folder-open'
+  },
+  {
+    value: 'upload',
+    label: t('message.services.wizard.fromUpload'),
+    icon: 'pi pi-cloud-upload'
+  },
+  {
+    value: 'git',
+    label: t('message.services.wizard.fromGit'),
+    icon: 'pi pi-github'
+  }
+])
+
 // File picker menu items for SplitButton dropdown
 const filePickerMenuItems = computed(() => [
   {
@@ -602,8 +783,40 @@ function clearFiles() {
   if (folderInput.value) folderInput.value.value = ''
 }
 
+// Standalone executable file handling
+function openExecutableFileDialog() {
+  if (executableFileInput.value) {
+    executableFileInput.value.click()
+  }
+}
+
+function handleExecutableFileSelect(event: Event) {
+  const target = event.target as HTMLInputElement
+  if (target.files && target.files.length > 0) {
+    standaloneExecutableFile.value = target.files[0]
+    errors.value.standaloneExecutableFile = ''
+    target.value = ''
+  }
+}
+
+function clearExecutableFile() {
+  standaloneExecutableFile.value = null
+  if (executableFileInput.value) executableFileInput.value.value = ''
+}
+
 function validateStep(step: number): boolean {
-  errors.value = { name: '', serviceType: '', files: '', dockerImageName: '', dockerGitRepo: '', dockerLocalPath: '' }
+  errors.value = {
+    name: '',
+    serviceType: '',
+    files: '',
+    dockerImageName: '',
+    dockerGitRepo: '',
+    dockerLocalPath: '',
+    standaloneExecutablePath: '',
+    standaloneExecutableFile: '',
+    standaloneExecutablePathGit: '',
+    standaloneGitRepo: ''
+  }
 
   if (step === 1) {
     if (!serviceData.value.name.trim()) {
@@ -876,15 +1089,181 @@ async function finishWizard() {
         isCreating.value = false
         throw error
       }
-    } else {
-      // STANDALONE service types
-      toast.add({
-        severity: 'info',
-        summary: t('message.common.info'),
-        detail: `${serviceData.value.serviceType} service creation coming soon`,
-        life: 3000
-      })
-      router.push('/services')
+    } else if (serviceData.value.serviceType === 'STANDALONE') {
+      // STANDALONE service creation
+      // Parse arguments and environment variables
+      const args = serviceData.value.standaloneArgs
+        ? serviceData.value.standaloneArgs.split(' ').filter(arg => arg.trim() !== '')
+        : []
+
+      const envVars: Record<string, string> = {}
+      if (serviceData.value.standaloneEnv.trim()) {
+        const envLines = serviceData.value.standaloneEnv.split('\n')
+        for (const line of envLines) {
+          const trimmed = line.trim()
+          if (trimmed && trimmed.includes('=')) {
+            const [key, ...valueParts] = trimmed.split('=')
+            envVars[key.trim()] = valueParts.join('=').trim()
+          }
+        }
+      }
+
+      try {
+        if (serviceData.value.standaloneSource === 'local') {
+          // Create standalone service from local executable
+          if (!serviceData.value.standaloneExecutablePath.trim()) {
+            errors.value.standaloneExecutablePath = t('message.services.executablePathRequired')
+            return
+          }
+
+          await api.createStandaloneFromLocal({
+            service_name: serviceData.value.name,
+            executable_path: serviceData.value.standaloneExecutablePath,
+            arguments: args,
+            working_directory: serviceData.value.standaloneWorkdir || undefined,
+            environment_variables: Object.keys(envVars).length > 0 ? envVars : undefined,
+            timeout_seconds: serviceData.value.standaloneTimeout || 600,
+            description: serviceData.value.description
+          })
+
+          toast.add({
+            severity: 'success',
+            summary: t('message.common.success'),
+            detail: t('message.services.standaloneCreated'),
+            life: 3000
+          })
+
+          router.push('/services')
+        } else if (serviceData.value.standaloneSource === 'upload') {
+          // Create standalone service from uploaded file
+          if (!standaloneExecutableFile.value) {
+            errors.value.standaloneExecutableFile = t('message.services.fileRequired')
+            return
+          }
+
+          // Create service record first
+          const newService = await servicesStore.addService({
+            service_type: 'STANDALONE',
+            type: 'standalone',
+            name: serviceData.value.name,
+            description: serviceData.value.description,
+            endpoint: '',
+            capabilities: {},
+            status: 'INACTIVE',
+            pricing_amount: serviceData.value.pricingAmount,
+            pricing_type: serviceData.value.pricingType,
+            pricing_interval: serviceData.value.pricingInterval,
+            pricing_unit: serviceData.value.pricingUnit
+          })
+
+          toast.add({
+            severity: 'success',
+            summary: t('message.common.success'),
+            detail: t('message.services.serviceCreated'),
+            life: 3000
+          })
+
+          // Upload executable file via WebSocket
+          await uploadMultipleFiles({
+            files: [standaloneExecutableFile.value],
+            serviceId: newService.id!,
+            chunkSize: 1024 * 1024, // 1MB chunks
+            onComplete: async () => {
+              toast.add({
+                severity: 'success',
+                summary: t('message.common.success'),
+                detail: t('message.services.uploadCompleteMessage'),
+                life: 3000
+              })
+
+              // Finalize service with configuration
+              try {
+                if (!standaloneExecutableFile.value) {
+                  throw new Error('Executable file is missing')
+                }
+
+                const executablePath = `${newService.id}/${standaloneExecutableFile.value.name}`
+
+                await api.finalizeStandaloneUpload(newService.id!, {
+                  executable_path: executablePath,
+                  arguments: args,
+                  working_directory: serviceData.value.standaloneWorkdir || undefined,
+                  environment_variables: Object.keys(envVars).length > 0 ? envVars : undefined,
+                  timeout_seconds: serviceData.value.standaloneTimeout || 600
+                })
+
+                toast.add({
+                  severity: 'success',
+                  summary: t('message.common.success'),
+                  detail: t('message.services.standaloneCreated'),
+                  life: 3000
+                })
+
+                setTimeout(() => {
+                  router.push('/services')
+                }, 1000)
+              } catch (error: any) {
+                toast.add({
+                  severity: 'error',
+                  summary: t('message.common.error'),
+                  detail: `Finalization failed: ${error.message}`,
+                  life: 5000
+                })
+              }
+            },
+            onError: (error) => {
+              toast.add({
+                severity: 'error',
+                summary: t('message.common.error'),
+                detail: `Upload failed: ${error.message}`,
+                life: 5000
+              })
+            }
+          })
+        } else if (serviceData.value.standaloneSource === 'git') {
+          // Create standalone service from Git repository
+          if (!serviceData.value.standaloneGitRepo.trim()) {
+            errors.value.standaloneGitRepo = t('message.services.repoRequired')
+            return
+          }
+          if (!serviceData.value.standaloneExecutablePathGit.trim()) {
+            errors.value.standaloneExecutablePathGit = t('message.services.executablePathRequired')
+            return
+          }
+
+          await api.createStandaloneFromGit({
+            service_name: serviceData.value.name,
+            repo_url: serviceData.value.standaloneGitRepo,
+            branch: serviceData.value.standaloneGitBranch || 'main',
+            executable_path: serviceData.value.standaloneExecutablePathGit,
+            build_command: serviceData.value.standaloneBuildCommand || undefined,
+            arguments: args,
+            working_directory: serviceData.value.standaloneWorkdir || undefined,
+            environment_variables: Object.keys(envVars).length > 0 ? envVars : undefined,
+            timeout_seconds: serviceData.value.standaloneTimeout || 600,
+            username: serviceData.value.standaloneGitUsername || undefined,
+            password: serviceData.value.standaloneGitPassword || undefined,
+            description: serviceData.value.description
+          })
+
+          toast.add({
+            severity: 'success',
+            summary: t('message.common.success'),
+            detail: t('message.services.standaloneCreated'),
+            life: 3000
+          })
+
+          router.push('/services')
+        }
+      } catch (error: any) {
+        toast.add({
+          severity: 'error',
+          summary: t('message.common.error'),
+          detail: error.message || t('message.services.createFailed'),
+          life: 5000
+        })
+        isCreating.value = false
+      }
     }
   } catch (error: any) {
     toast.add({
@@ -1401,5 +1780,62 @@ function goBack() {
   background-color: rgba(vars.$color-primary, 0.05);
   border-radius: 8px;
   border-left: 3px solid vars.$color-primary;
+}
+
+.standalone-source-selection {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.standalone-source-card {
+  padding: 1.5rem 1rem;
+  border: 2px solid rgb(49, 64, 92);
+  border-radius: 8px;
+  background-color: rgb(38, 49, 65);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+
+  &:hover {
+    background-color: rgb(49, 64, 92);
+    border-color: rgba(vars.$color-primary, 0.5);
+    transform: translateY(-2px);
+  }
+
+  &.selected {
+    border-color: vars.$color-primary;
+    background-color: rgb(49, 64, 92);
+    box-shadow: 0 0 0 1px vars.$color-primary;
+  }
+
+  .source-icon {
+    font-size: 2rem;
+    color: vars.$color-primary;
+  }
+
+  .source-label {
+    font-size: 1rem;
+    font-weight: 600;
+    color: vars.$color-text;
+  }
+}
+
+.common-config {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 2px solid rgba(vars.$color-primary, 0.2);
+
+  h5 {
+    color: vars.$color-primary;
+    margin-bottom: 1rem;
+    font-size: 1.1rem;
+  }
 }
 </style>

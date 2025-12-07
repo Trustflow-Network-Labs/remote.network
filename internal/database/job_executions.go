@@ -857,3 +857,28 @@ func UnmarshalStringSlice(data string) ([]string, error) {
 	}
 	return slice, nil
 }
+
+// Helper function to marshal string maps to JSON
+func MarshalStringMap(m map[string]string) (string, error) {
+	if m == nil || len(m) == 0 {
+		return "{}", nil
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// Helper function to unmarshal JSON to string maps
+func UnmarshalStringMap(data string) (map[string]string, error) {
+	if data == "" || data == "{}" {
+		return map[string]string{}, nil
+	}
+	var m map[string]string
+	err := json.Unmarshal([]byte(data), &m)
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}

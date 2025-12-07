@@ -12,6 +12,7 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/p2p"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/system"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -1253,6 +1254,22 @@ func (pm *PeerManager) publishInitialMetadata() error {
 	}
 	pm.logger.Info(fmt.Sprintf("Counted local services for metadata: files=%d, apps=%d", serviceCounts.FilesCount, serviceCounts.AppsCount), "core")
 
+	// Gather system capabilities for standalone service compatibility
+	paths := utils.GetAppPaths("")
+	systemCaps, err := system.GatherSystemCapabilities(paths.DataDir)
+	if err != nil {
+		pm.logger.Warn(fmt.Sprintf("Failed to gather system capabilities: %v", err), "core")
+	} else {
+		pm.logger.Info(fmt.Sprintf("Gathered system capabilities: platform=%s, arch=%s, cpu_cores=%d, memory=%dMB, gpus=%d",
+			systemCaps.Platform, systemCaps.Architecture, systemCaps.CPUCores, systemCaps.TotalMemoryMB, len(systemCaps.GPUs)), "core")
+	}
+
+	// Build extensions map with system capabilities
+	extensions := make(map[string]interface{})
+	if systemCaps != nil {
+		extensions["system_capabilities"] = systemCaps
+	}
+
 	metadata := &database.PeerMetadata{
 		PeerID:       pm.keyPair.PeerID(), // Persistent Ed25519-based peer ID
 		NodeID:       pm.dht.NodeID(),     // DHT routing node ID
@@ -1262,7 +1279,7 @@ func (pm *PeerManager) publishInitialMetadata() error {
 		Capabilities: []string{"metadata_exchange"},
 		FilesCount:   serviceCounts.FilesCount, // Count of ACTIVE DATA services
 		AppsCount:    serviceCounts.AppsCount,  // Count of ACTIVE DOCKER + STANDALONE services
-		Extensions:   make(map[string]interface{}),
+		Extensions:   extensions,
 		Timestamp:    time.Now(),
 		LastSeen:     time.Now(),
 		Source:       "self_publish",

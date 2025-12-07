@@ -694,25 +694,3 @@ func parseShellCommand(input string) (string, error) {
 	return string(jsonBytes), nil
 }
 
-// shlexJoin converts a JSON array back to shell command format for display
-func shlexJoin(jsonArray string) string {
-	if jsonArray == "" {
-		return ""
-	}
-
-	var args []string
-	if err := json.Unmarshal([]byte(jsonArray), &args); err != nil {
-		return jsonArray // Return as-is if not valid JSON
-	}
-
-	// Quote args that need quoting
-	quoted := make([]string, len(args))
-	for i, arg := range args {
-		if strings.ContainsAny(arg, " \t\n\"'") {
-			quoted[i] = strconv.Quote(arg)
-		} else {
-			quoted[i] = arg
-		}
-	}
-	return strings.Join(quoted, " ")
-}

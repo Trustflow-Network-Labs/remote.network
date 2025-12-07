@@ -37,6 +37,12 @@ const (
 	MessageTypeDockerOperationComplete MessageType = "docker.operation.complete"
 	MessageTypeDockerOperationError MessageType = "docker.operation.error"
 
+	// Standalone service operation message types
+	MessageTypeStandaloneOperationStart    MessageType = "standalone.operation.start"
+	MessageTypeStandaloneOperationProgress MessageType = "standalone.operation.progress"
+	MessageTypeStandaloneOperationComplete MessageType = "standalone.operation.complete"
+	MessageTypeStandaloneOperationError    MessageType = "standalone.operation.error"
+
 	// Service discovery message types
 	MessageTypeServiceSearchRequest  MessageType = "service.search.request"
 	MessageTypeServiceSearchResponse MessageType = "service.search.response"
@@ -325,6 +331,41 @@ type DockerOperationCompletePayload struct {
 
 // DockerOperationErrorPayload reports a Docker operation error
 type DockerOperationErrorPayload struct {
+	OperationID string `json:"operation_id"`
+	Error       string `json:"error"`
+	Code        string `json:"code,omitempty"`
+}
+
+// StandaloneOperationStartPayload reports the start of a standalone operation
+type StandaloneOperationStartPayload struct {
+	OperationID   string `json:"operation_id"`
+	OperationType string `json:"operation_type"` // "git-clone", "git-build", "upload"
+	ServiceName   string `json:"service_name"`
+	RepoURL       string `json:"repo_url,omitempty"`
+	Message       string `json:"message"`
+}
+
+// StandaloneOperationProgressPayload reports standalone operation progress
+type StandaloneOperationProgressPayload struct {
+	OperationID string  `json:"operation_id"`
+	Message     string  `json:"message"`
+	Percentage  float64 `json:"percentage,omitempty"`
+	Step        string  `json:"step,omitempty"` // "cloning", "building", "validating"
+}
+
+// StandaloneOperationCompletePayload reports successful standalone operation completion
+type StandaloneOperationCompletePayload struct {
+	OperationID         string                   `json:"operation_id"`
+	ServiceID           int64                    `json:"service_id"`
+	ServiceName         string                   `json:"service_name"`
+	ExecutablePath      string                   `json:"executable_path"`
+	CommitHash          string                   `json:"commit_hash,omitempty"`
+	SuggestedInterfaces []map[string]interface{} `json:"suggested_interfaces,omitempty"`
+	Service             map[string]interface{}   `json:"service,omitempty"`
+}
+
+// StandaloneOperationErrorPayload reports a standalone operation error
+type StandaloneOperationErrorPayload struct {
 	OperationID string `json:"operation_id"`
 	Error       string `json:"error"`
 	Code        string `json:"code,omitempty"`

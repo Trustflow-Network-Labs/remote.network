@@ -165,10 +165,21 @@ func (sm *SQLiteManager) InitServicesTable() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		service_id INTEGER NOT NULL,
 		executable_path TEXT NOT NULL,
-		runtime TEXT,
+		arguments TEXT,                       -- JSON array of arguments
+		working_directory TEXT,               -- Working directory for execution
+		environment_variables TEXT,           -- JSON map of env vars
+		timeout_seconds INTEGER DEFAULT 600,  -- Default 10 minutes
+		run_as_user TEXT,                     -- Optional "user:group"
+		source TEXT CHECK(source IN ('local', 'upload', 'git')) DEFAULT 'local',
+		git_repo_url TEXT,                    -- If source='git'
+		git_commit_hash TEXT,                 -- If source='git'
+		upload_hash TEXT,                     -- SHA256 hash if source='upload'
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE
 	);
+
+	CREATE INDEX IF NOT EXISTS idx_standalone_service_details_service_id ON standalone_service_details(service_id);
+	CREATE INDEX IF NOT EXISTS idx_standalone_service_details_source ON standalone_service_details(source);
 	`
 
 	_, err := sm.db.Exec(createTableSQL)

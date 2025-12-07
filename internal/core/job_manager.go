@@ -27,23 +27,24 @@ import (
 
 // JobManager manages job lifecycle and execution
 type JobManager struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	db               *database.SQLiteManager
-	cm               *utils.ConfigManager
-	logger           *utils.LogsManager
-	workerPool       *workers.WorkerPool
-	dataWorker       *workers.DataServiceWorker
-	dockerService    *services.DockerService
-	statusUpdateChan chan *types.JobStatusUpdate
-	peerManager      *PeerManager // Reference to peer manager for P2P communication
-	eventEmitter     EventEmitter // Interface for broadcasting events via WebSocket
-	tickerInterval   time.Duration
-	ticker           *time.Ticker
-	tickerStopChan   chan bool
-	wg               sync.WaitGroup
-	mu               sync.RWMutex
-	runningJobs      map[int64]bool // Track running job IDs
+	ctx                context.Context
+	cancel             context.CancelFunc
+	db                 *database.SQLiteManager
+	cm                 *utils.ConfigManager
+	logger             *utils.LogsManager
+	workerPool         *workers.WorkerPool
+	dataWorker         *workers.DataServiceWorker
+	dockerService      *services.DockerService
+	standaloneService  *services.StandaloneService
+	statusUpdateChan   chan *types.JobStatusUpdate
+	peerManager        *PeerManager // Reference to peer manager for P2P communication
+	eventEmitter       EventEmitter // Interface for broadcasting events via WebSocket
+	tickerInterval     time.Duration
+	ticker             *time.Ticker
+	tickerStopChan     chan bool
+	wg                 sync.WaitGroup
+	mu                 sync.RWMutex
+	runningJobs        map[int64]bool // Track running job IDs
 }
 
 // EventEmitter interface for broadcasting events (avoids circular dependency)
@@ -87,17 +88,21 @@ func NewJobManager(ctx context.Context, db *database.SQLiteManager, cm *utils.Co
 	depManager := dependencies.NewDependencyManager(cm, logger)
 	dockerService := services.NewDockerService(db, logger, cm, appPaths, depManager, gitService)
 
+	// Initialize Standalone service for job execution
+	standaloneService := services.NewStandaloneService(db, logger, cm, appPaths, gitService)
+
 	jm := &JobManager{
-		ctx:              jobCtx,
-		cancel:           cancel,
-		db:               db,
-		cm:               cm,
-		logger:           logger,
-		workerPool:       workerPool,
-		dataWorker:       dataWorker,
-		dockerService:    dockerService,
-		statusUpdateChan: make(chan *types.JobStatusUpdate, 100),
-		peerManager:      peerManager,
+		ctx:               jobCtx,
+		cancel:            cancel,
+		db:                db,
+		cm:                cm,
+		logger:            logger,
+		workerPool:        workerPool,
+		dataWorker:        dataWorker,
+		dockerService:     dockerService,
+		standaloneService: standaloneService,
+		statusUpdateChan:  make(chan *types.JobStatusUpdate, 100),
+		peerManager:       peerManager,
 		tickerInterval:   tickerInterval,
 		tickerStopChan:   make(chan bool),
 		runningJobs:      make(map[int64]bool),
@@ -335,8 +340,7 @@ func (jm *JobManager) executeJob(job *database.JobExecution) {
 		jm.executeDockerService(job, service)
 
 	case types.ServiceTypeStandalone:
-		jm.logger.Error(fmt.Sprintf("STANDALONE service type not yet implemented for job %d", job.ID), "job_manager")
-		jm.handleJobError(job.ID, job.WorkflowJobID, "STANDALONE service type not yet implemented")
+		jm.executeStandaloneService(job, service)
 
 	default:
 		jm.logger.Error(fmt.Sprintf("Unknown service type %s for job %d", service.ServiceType, job.ID), "job_manager")
@@ -1013,16 +1017,19 @@ func (jm *JobManager) transferOutputLocally(job *database.JobExecution, workflow
 		// Transfer to another job's input
 		receivingJobExecID := *peer.PeerJobExecutionID
 
-		// Get receiving job to determine its executor peer
+		// Get receiving job to determine its executor peer and workflow_job_id
 		receivingJob, err := jm.db.GetJobExecution(receivingJobExecID)
 		if err != nil {
 			return fmt.Errorf("failed to get receiving job execution %d: %w", receivingJobExecID, err)
 		}
 
 		// Build path with sender and receiver information using new architecture
+		// IMPORTANT: Use receiver's WorkflowJobID for consistent path construction
+		// The receiver (job_manager.checkInputsReady) uses its own WorkflowJobID when checking for input,
+		// so the sender must use the receiver's WorkflowJobID when constructing the destination path
 		destPathInfo := utils.JobPathInfo{
 			OrchestratorPeerID: job.OrderingPeerID,
-			WorkflowJobID:      workflowJobID,
+			WorkflowJobID:      receivingJob.WorkflowJobID, // Use RECEIVER's workflow_job.id
 			ExecutorPeerID:     job.ExecutorPeerID,          // Sender peer
 			JobExecutionID:     job.ID,                      // Sender job execution ID
 			ReceiverPeerID:     receivingJob.ExecutorPeerID, // Receiver peer
@@ -1188,184 +1195,6 @@ func (jm *JobManager) encryptFileStreaming(inputPath, outputPath string, keyData
 
 		counter++
 	}
-
-	return nil
-}
-
-// transferOutputRemotely transfers output file to a remote peer via P2P with compression and encryption
-func (jm *JobManager) transferOutputRemotely(job *database.JobExecution, peer *database.JobInterfacePeer, outputFilePath, interfaceType string) error {
-	jm.logger.Info(fmt.Sprintf("Preparing secure transfer of %s to peer %s", outputFilePath, formatPeerID(peer.PeerID)), "job_manager")
-
-	// Step 1: Create temporary directory for processing
-	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("docker-output-%d-%d", job.ID, time.Now().Unix()))
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir) // Clean up temp directory
-
-	// Step 2: Compress output file to tar.gz
-	compressedPath := filepath.Join(tempDir, "output.tar.gz")
-	jm.logger.Info(fmt.Sprintf("Compressing %s to tar.gz", outputFilePath), "job_manager")
-
-	if err := utils.Compress(outputFilePath, compressedPath); err != nil {
-		return fmt.Errorf("failed to compress output: %w", err)
-	}
-
-	// Step 3: Generate one-time passphrase for encryption
-	passphrase, keyData, err := jm.generateTransferPassphrase()
-	if err != nil {
-		return fmt.Errorf("failed to generate passphrase: %w", err)
-	}
-	jm.logger.Info("Generated one-time encryption passphrase for transfer", "job_manager")
-
-	// Step 4: Encrypt the compressed archive
-	encryptedPath := filepath.Join(tempDir, "output.tar.gz.encrypted")
-	jm.logger.Info("Encrypting compressed archive", "job_manager")
-
-	if err := jm.encryptFileStreaming(compressedPath, encryptedPath, keyData); err != nil {
-		return fmt.Errorf("failed to encrypt output: %w", err)
-	}
-
-	// Step 5: Get encrypted file info
-	fileInfo, err := os.Stat(encryptedPath)
-	if err != nil {
-		return fmt.Errorf("failed to get encrypted file info: %w", err)
-	}
-	encryptedSize := fileInfo.Size()
-
-	// Step 6: Calculate hash of encrypted file
-	hash, err := utils.HashFileToCID(encryptedPath)
-	if err != nil {
-		return fmt.Errorf("failed to calculate file hash: %w", err)
-	}
-
-	jm.logger.Info(fmt.Sprintf("Encrypted output ready: %d bytes", encryptedSize), "job_manager")
-
-	// Step 7: Open encrypted file for streaming
-	file, err := os.Open(encryptedPath)
-	if err != nil {
-		return fmt.Errorf("failed to open encrypted file: %w", err)
-	}
-	defer file.Close()
-
-	chunkSize := 1024 * 1024 // 1MB chunks
-	totalChunks := int((encryptedSize + int64(chunkSize) - 1) / int64(chunkSize))
-
-	// Step 8: Generate transfer ID
-	transferID := jm.dataWorker.GenerateTransferID(job.ID, peer.PeerID)
-
-	// Step 9: Get job handler
-	jobHandler := jm.peerManager.GetJobHandler()
-	if jobHandler == nil {
-		return fmt.Errorf("job handler not available")
-	}
-
-	// Step 10: Send transfer request with passphrase in expected format
-	// Format: "passphrase|hexkeydata" (same format as DATA services)
-	keyDataFormatted := fmt.Sprintf("%s|%s", passphrase, hex.EncodeToString(keyData))
-
-	// Get destination job execution ID from peer record
-	// If PeerWorkflowJobID is nil, this is "Local Peer" (final destination) - use 0
-	var destJobExecID int64
-	if peer.PeerWorkflowJobID == nil {
-		// No workflow job ID - this is "Local Peer" final destination
-		destJobExecID = 0
-		jm.logger.Debug(fmt.Sprintf("Destination is Local Peer (PeerWorkflowJobID=nil) - using destJobExecID=0 for peer %s",
-			formatPeerID(peer.PeerID)), "job_manager")
-	} else if peer.PeerJobExecutionID != nil {
-		// Specific job destination - use their job execution ID
-		destJobExecID = *peer.PeerJobExecutionID
-		jm.logger.Debug(fmt.Sprintf("Destination is specific job (PeerWorkflowJobID=%d) - using destJobExecID=%d for peer %s",
-			*peer.PeerWorkflowJobID, destJobExecID, formatPeerID(peer.PeerID)), "job_manager")
-	} else {
-		// destJobExecID remains 0 (job not started yet)
-		jm.logger.Debug(fmt.Sprintf("Destination job not started yet (PeerWorkflowJobID=%d, PeerJobExecutionID=nil) - using destJobExecID=0 for peer %s",
-			*peer.PeerWorkflowJobID, formatPeerID(peer.PeerID)), "job_manager")
-	}
-
-	transferRequest := &types.JobDataTransferRequest{
-		TransferID:                transferID,
-		WorkflowJobID:             job.WorkflowJobID,
-		SourceJobExecutionID:      job.ID,
-		DestinationJobExecutionID: destJobExecID,
-		InterfaceType:             interfaceType,
-		SourcePeerID:              jm.peerManager.GetPeerID(),
-		DestinationPeerID:         peer.PeerID,
-		SourcePath:                outputFilePath,
-		DestinationPath:           peer.PeerPath,
-		DataHash:                  hash,
-		SizeBytes:                 encryptedSize,
-		Passphrase:                keyDataFormatted, // Format: passphrase|hexkeydata
-		Encrypted:                 true,             // Data is encrypted
-	}
-
-	jm.logger.Info(fmt.Sprintf("Sending encrypted transfer request for transfer ID %s to peer %s",
-		transferID, formatPeerID(peer.PeerID)), "job_manager")
-
-	response, err := jobHandler.SendJobDataTransferRequest(peer.PeerID, transferRequest)
-	if err != nil {
-		return fmt.Errorf("failed to send transfer request: %w", err)
-	}
-
-	if !response.Accepted {
-		return fmt.Errorf("transfer rejected: %s", response.Message)
-	}
-
-	jm.logger.Info(fmt.Sprintf("Transfer request accepted by peer %s for transfer ID %s", formatPeerID(peer.PeerID), transferID), "job_manager")
-
-	// Step 11: Send encrypted file in chunks
-	buffer := make([]byte, chunkSize)
-	chunkIndex := 0
-
-	for {
-		n, err := file.Read(buffer)
-		if err != nil && err != io.EOF {
-			return fmt.Errorf("failed to read file chunk: %w", err)
-		}
-
-		if n == 0 {
-			break
-		}
-
-		isLast := chunkIndex == totalChunks-1
-
-		// Send data chunk
-		chunk := &types.JobDataChunk{
-			TransferID:  transferID,
-			ChunkIndex:  chunkIndex,
-			TotalChunks: totalChunks,
-			Data:        buffer[:n],
-			IsLast:      isLast,
-		}
-
-		jm.logger.Info(fmt.Sprintf("Sending chunk %d/%d (%d bytes) for transfer %s",
-			chunkIndex+1, totalChunks, n, transferID), "job_manager")
-
-		// Retry logic: try up to 3 times with exponential backoff
-		sent := false
-		for attempt := 0; attempt < 3; attempt++ {
-			err := jobHandler.SendJobDataChunk(peer.PeerID, chunk)
-			if err == nil {
-				sent = true
-				break
-			}
-
-			jm.logger.Warn(fmt.Sprintf("Failed to send chunk %d (attempt %d/3): %v", chunkIndex, attempt+1, err), "job_manager")
-
-			// Exponential backoff: 100ms, 200ms, 400ms
-			if attempt < 2 {
-				time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
-			}
-		}
-
-		if !sent {
-			return fmt.Errorf("failed to send chunk %d after 3 attempts", chunkIndex)
-		}
-
-		chunkIndex++
-	}
-
-	jm.logger.Info(fmt.Sprintf("Successfully sent all %d chunks for transfer %s (encrypted)", totalChunks, transferID), "job_manager")
 
 	return nil
 }
@@ -1555,6 +1384,293 @@ func (jm *JobManager) transferPackageRemotely(job *database.JobExecution, peer *
 	jm.logger.Info(fmt.Sprintf("Successfully sent all %d chunks for package transfer %s", totalChunks, transferID), "job_manager")
 
 	return nil
+}
+
+// executeStandaloneService executes a STANDALONE executable service job
+func (jm *JobManager) executeStandaloneService(job *database.JobExecution, service *database.OfferedService) {
+	jm.logger.Info(fmt.Sprintf("Executing STANDALONE service for job %d", job.ID), "job_manager")
+
+	// Get standalone service details
+	standaloneDetails, err := jm.db.GetStandaloneServiceDetails(service.ID)
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to get standalone service details for service %d: %v", service.ID, err), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to get standalone service details: %v", err))
+		return
+	}
+
+	// Build execution paths (similar to Docker)
+	localPeerID := jm.peerManager.GetPeerID()
+	isExecutorPeer := job.ExecutorPeerID == localPeerID
+
+	appPaths := utils.GetAppPaths("")
+	var pathInfo utils.JobPathInfo
+
+	if isExecutorPeer {
+		pathInfo = utils.JobPathInfo{
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      job.WorkflowJobID,
+			ExecutorPeerID:     job.ExecutorPeerID,
+			JobExecutionID:     job.ID,
+		}
+	} else {
+		pathInfo = utils.JobPathInfo{
+			OrchestratorPeerID: job.OrderingPeerID,
+			WorkflowJobID:      job.WorkflowJobID,
+			ExecutorPeerID:     job.ExecutorPeerID,
+			JobExecutionID:     job.ID,
+		}
+	}
+
+	outputDir := utils.BuildJobPath(appPaths.DataDir, pathInfo, utils.PathTypeOutput)
+	inputDir := utils.BuildJobPath(appPaths.DataDir, pathInfo, utils.PathTypeInput)
+
+	// Create directories
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to create output directory: %v", err), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to create output directory: %v", err))
+		return
+	}
+	if err := os.MkdirAll(inputDir, 0755); err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to create input directory: %v", err), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Failed to create input directory: %v", err))
+		return
+	}
+
+	// Parse arguments and environment variables
+	args, err := database.UnmarshalStringSlice(standaloneDetails.Arguments)
+	if err != nil {
+		jm.logger.Warn(fmt.Sprintf("Failed to parse arguments: %v", err), "job_manager")
+		args = []string{}
+	}
+
+	envVars, err := database.UnmarshalStringMap(standaloneDetails.EnvironmentVariables)
+	if err != nil {
+		jm.logger.Warn(fmt.Sprintf("Failed to parse environment variables: %v", err), "job_manager")
+		envVars = make(map[string]string)
+	}
+
+	// Process interfaces for I/O
+	inputs := []string{}
+	outputs := []string{}
+	mounts := make(map[string]string)
+	var hierarchicalMountsBasePath string // For working directory - set when INPUT mount uses hierarchical transfer path
+
+	// Get job interfaces
+	jobInterfaces, err := jm.db.GetJobInterfaces(job.ID)
+	if err != nil {
+		jm.logger.Warn(fmt.Sprintf("Failed to get job interfaces: %v", err), "job_manager")
+	} else {
+		// Process STDIN interfaces - read file contents to stream to STDIN
+		for _, jobIface := range jobInterfaces {
+			if jobIface.InterfaceType == "STDIN" {
+				peers, err := jm.db.GetJobInterfacePeers(jobIface.ID)
+				if err == nil && len(peers) > 0 {
+					for _, peer := range peers {
+						if peer.PeerMountFunction == types.MountFunctionOutput {
+							// Determine input path - check for hierarchical transfer path first
+							var stdinInputPath string
+							if peer.PeerJobExecutionID != nil && *peer.PeerJobExecutionID > 0 && peer.PeerID != "" {
+								// Build hierarchical transfer destination path for STDIN
+								transferPathInfo := utils.JobPathInfo{
+									OrchestratorPeerID: job.OrderingPeerID,
+									WorkflowJobID:      pathInfo.WorkflowJobID,
+									ExecutorPeerID:     peer.PeerID,              // Sender peer ID
+									JobExecutionID:     *peer.PeerJobExecutionID, // Sender job execution ID
+									ReceiverPeerID:     job.ExecutorPeerID,       // Receiver peer (this job)
+									ReceiverJobExecID:  job.ID,                   // Receiver job ID (this job)
+								}
+								stdinInputPath = utils.BuildTransferDestinationPath(appPaths.DataDir, transferPathInfo, "STDIN", "")
+								jm.logger.Info(fmt.Sprintf("Using hierarchical transfer path for STDIN: %s", stdinInputPath), "job_manager")
+							} else {
+								// Fallback to basic input directory
+								stdinInputPath = inputDir
+								jm.logger.Info(fmt.Sprintf("Using basic input directory for STDIN: %s", stdinInputPath), "job_manager")
+							}
+
+							// Read files from input path and stream to STDIN
+							entries, err := os.ReadDir(stdinInputPath)
+							if err == nil {
+								for _, entry := range entries {
+									if !entry.IsDir() {
+										filePath := filepath.Join(stdinInputPath, entry.Name())
+										content, err := os.ReadFile(filePath)
+										if err == nil {
+											inputs = append(inputs, string(content))
+											jm.logger.Info(fmt.Sprintf("Adding file content to STDIN: %s (%d bytes)", entry.Name(), len(content)), "job_manager")
+										}
+									}
+								}
+							}
+							break
+						}
+					}
+				}
+			}
+
+			// Process MOUNT interfaces
+			if jobIface.InterfaceType == "MOUNT" && jobIface.Path != "" {
+				peers, err := jm.db.GetJobInterfacePeers(jobIface.ID)
+				if err == nil && len(peers) > 0 {
+					for _, peer := range peers {
+						if peer.PeerMountFunction == types.MountFunctionOutput {
+							// Input mount - check for hierarchical transfer path
+							var hostPath string
+
+							// Check if this is a remote transfer with sender job information
+							if peer.PeerJobExecutionID != nil && *peer.PeerJobExecutionID > 0 && peer.PeerID != "" {
+								// Build hierarchical transfer destination path (same as Docker)
+								transferPathInfo := utils.JobPathInfo{
+									OrchestratorPeerID: job.OrderingPeerID,
+									WorkflowJobID:      pathInfo.WorkflowJobID,
+									ExecutorPeerID:     peer.PeerID,              // Sender peer ID
+									JobExecutionID:     *peer.PeerJobExecutionID, // Sender job execution ID
+									ReceiverPeerID:     job.ExecutorPeerID,       // Receiver peer (this job)
+									ReceiverJobExecID:  job.ID,                   // Receiver job ID (this job)
+								}
+								hostPath = utils.BuildTransferDestinationPath(appPaths.DataDir, transferPathInfo, "MOUNT", jobIface.Path)
+								jm.logger.Info(fmt.Sprintf("Using hierarchical transfer path for INPUT mount: %s", hostPath), "job_manager")
+
+								// Extract mounts base directory for working directory
+								// hostPath is like: .../mounts/test, so parent is .../mounts
+								if hierarchicalMountsBasePath == "" {
+									hierarchicalMountsBasePath = filepath.Dir(hostPath)
+								}
+							} else {
+								// Local transfer or no sender info - use basic mount path
+								hostPath = utils.BuildJobMountPath(appPaths.DataDir, pathInfo, jobIface.Path)
+								jm.logger.Info(fmt.Sprintf("Using basic mount path for INPUT mount: %s", hostPath), "job_manager")
+							}
+
+							// Ensure the directory exists
+							if err := os.MkdirAll(hostPath, 0755); err != nil {
+								jm.logger.Error(fmt.Sprintf("Failed to create INPUT mount directory %s: %v", hostPath, err), "job_manager")
+							}
+
+							mounts[hostPath] = jobIface.Path
+							jm.logger.Info(fmt.Sprintf("Mount INPUT: host=%s -> process=%s", hostPath, jobIface.Path), "job_manager")
+						}
+						if peer.PeerMountFunction == types.MountFunctionInput {
+							// Output mount - use proper mount directory (same as Docker)
+							// Output always uses the job's own mount path (not hierarchical)
+							hostPath := utils.BuildJobMountPath(appPaths.DataDir, pathInfo, jobIface.Path)
+
+							// Ensure the directory exists
+							if err := os.MkdirAll(hostPath, 0755); err != nil {
+								jm.logger.Error(fmt.Sprintf("Failed to create OUTPUT mount directory %s: %v", hostPath, err), "job_manager")
+							}
+
+							mounts[hostPath] = jobIface.Path
+							jm.logger.Info(fmt.Sprintf("Mount OUTPUT: host=%s -> process=%s", hostPath, jobIface.Path), "job_manager")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Determine working directory for STANDALONE services
+	// Unlike Docker which can mount directories at arbitrary paths, native processes
+	// need the working directory set correctly so mount paths resolve to actual filesystem paths.
+	// If no explicit working directory configured, use hierarchical mounts base path (if available)
+	// so mount paths like /test resolve correctly.
+	workingDir := standaloneDetails.WorkingDirectory
+	if workingDir == "" && hierarchicalMountsBasePath != "" {
+		workingDir = hierarchicalMountsBasePath
+		jm.logger.Info(fmt.Sprintf("Using hierarchical mounts directory as working directory: %s", workingDir), "job_manager")
+	} else if workingDir == "" {
+		// Fallback: use job's own mounts directory
+		workingDir = utils.BuildJobPath(appPaths.DataDir, pathInfo, utils.PathTypeMounts)
+		jm.logger.Info(fmt.Sprintf("Using job mounts directory as working directory: %s", workingDir), "job_manager")
+	}
+
+	// Build execution config
+	timeout := time.Duration(standaloneDetails.TimeoutSeconds) * time.Second
+	config := &services.StandaloneExecutionConfig{
+		ServiceID:      service.ID,
+		JobExecutionID: job.ID,
+		Executable:     standaloneDetails.ExecutablePath,
+		Arguments:      args,
+		WorkingDir:     workingDir,
+		Inputs:         inputs,
+		Outputs:        outputs,
+		Mounts:         mounts,
+		EnvVars:        envVars,
+		Timeout:        timeout,
+		RunAsUser:      standaloneDetails.RunAsUser,
+	}
+
+	// Execute service
+	result := jm.standaloneService.ExecuteService(config)
+
+	// Write outputs to files FIRST (before checking errors/exit code)
+	// This ensures we always have diagnostic output for debugging, even when jobs fail
+	if result.Stdout != "" {
+		stdoutPath := filepath.Join(outputDir, "stdout.txt")
+		if err := jm.standaloneService.WriteOutputToFile(stdoutPath, result.Stdout); err != nil {
+			jm.logger.Warn(fmt.Sprintf("Failed to write stdout: %v", err), "job_manager")
+		}
+	}
+
+	if result.Stderr != "" {
+		stderrPath := filepath.Join(outputDir, "stderr.txt")
+		if err := jm.standaloneService.WriteOutputToFile(stderrPath, result.Stderr); err != nil {
+			jm.logger.Warn(fmt.Sprintf("Failed to write stderr: %v", err), "job_manager")
+		}
+	}
+
+	if result.Logs != "" {
+		logsPath := filepath.Join(outputDir, "logs.txt")
+		if err := jm.standaloneService.WriteOutputToFile(logsPath, result.Logs); err != nil {
+			jm.logger.Warn(fmt.Sprintf("Failed to write logs: %v", err), "job_manager")
+		}
+	}
+
+	// Check for errors
+	if result.Error != nil {
+		jm.logger.Error(fmt.Sprintf("Standalone service execution failed for job %d: %v", job.ID, result.Error), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Execution failed: %v", result.Error))
+		return
+	}
+
+	// Check exit code
+	if result.ExitCode != 0 {
+		jm.logger.Warn(fmt.Sprintf("Process exited with non-zero code %d for job %d", result.ExitCode, job.ID), "job_manager")
+		jm.handleJobError(job.ID, job.WorkflowJobID, fmt.Sprintf("Process exited with code %d", result.ExitCode))
+		return
+	}
+
+	// Update status to COMPLETED
+	err = jm.db.UpdateJobStatus(job.ID, types.JobStatusCompleted, "")
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to update job %d status to COMPLETED: %v", job.ID, err), "job_manager")
+		return
+	}
+
+	// Update workflow_job status as well
+	err = jm.db.UpdateWorkflowJobStatus(job.WorkflowJobID, types.JobStatusCompleted, nil, "")
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to update workflow_job %d status to COMPLETED: %v", job.WorkflowJobID, err), "job_manager")
+	}
+
+	// Send status update
+	jm.sendStatusUpdate(job.ID, job.WorkflowJobID, types.JobStatusCompleted, "")
+	jm.logger.Info(fmt.Sprintf("STANDALONE service job %d completed successfully", job.ID), "job_manager")
+
+	// Transfer outputs to connected jobs (similar to Docker)
+	jm.transferStandaloneOutputs(job, service, outputDir)
+}
+
+// transferStandaloneOutputs transfers outputs from a completed standalone job to connected jobs
+// This function mirrors transferDockerOutputs to ensure consistent behavior
+func (jm *JobManager) transferStandaloneOutputs(job *database.JobExecution, service *database.OfferedService, outputDir string) {
+	jm.logger.Info(fmt.Sprintf("Transferring standalone service outputs for job %d", job.ID), "job_manager")
+
+	// Use transferDockerOutputs as it handles all the output transfer logic correctly
+	// Both Docker and Standalone services follow the same output transfer pattern
+	err := jm.transferDockerOutputs(job, job.WorkflowJobID, outputDir)
+	if err != nil {
+		jm.logger.Error(fmt.Sprintf("Failed to transfer standalone outputs: %v", err), "job_manager")
+	}
 }
 
 // handleJobError handles job execution errors
