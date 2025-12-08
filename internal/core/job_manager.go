@@ -909,6 +909,59 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 		}
 	}
 
+	// Transfer any additional files in outputDir that were created by the process
+	// This handles commands that write output to files (e.g., pandoc -o output.html)
+	// We transfer these along with STDOUT interface if one exists
+	additionalFiles := jm.findAdditionalOutputFiles(outputDir)
+	if len(additionalFiles) > 0 {
+		jm.logger.Info(fmt.Sprintf("Found %d additional output files in outputDir", len(additionalFiles)), "job_manager")
+
+		// Find STDOUT interface to get its peers (additional files will be sent along with stdout)
+		for _, iface := range jobInterfaces {
+			if iface.InterfaceType != "STDOUT" {
+				continue
+			}
+
+			peers, err := jm.db.GetJobInterfacePeers(iface.ID)
+			if err != nil {
+				jm.logger.Error(fmt.Sprintf("Failed to get STDOUT interface peers for additional files: %v", err), "job_manager")
+				break
+			}
+
+			for _, peer := range peers {
+				if peer.PeerMountFunction != types.MountFunctionInput {
+					continue
+				}
+
+				actualPeerID := peer.PeerID
+				if actualPeerID == "" {
+					actualPeerID = localPeerID
+				}
+
+				for _, fileName := range additionalFiles {
+					filePath := filepath.Join(outputDir, fileName)
+					jm.logger.Info(fmt.Sprintf("Transferring additional output file: %s", fileName), "job_manager")
+
+					if actualPeerID == localPeerID {
+						err = jm.transferOutputLocally(job, workflowJobID, peer, filePath, fileName)
+						if err != nil {
+							jm.logger.Error(fmt.Sprintf("Failed to transfer additional file %s locally: %v", fileName, err), "job_manager")
+						}
+					} else {
+						destPath := filepath.Join("input", fileName)
+						remoteOutputs[peer.PeerID] = append(remoteOutputs[peer.PeerID], outputInfo{
+							interfaceType: "FILE", // Custom type for additional files
+							sourcePath:    filePath,
+							destPath:      destPath,
+							peer:          peer,
+						})
+					}
+				}
+			}
+			break // Only process STDOUT interface once
+		}
+	}
+
 	// Now create and send transfer packages for remote peers
 	for peerID, outputs := range remoteOutputs {
 		if len(outputs) == 0 {
@@ -937,6 +990,9 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 				err = builder.AddStdOutput(output.interfaceType, output.sourcePath, output.destPath)
 			case types.InterfaceTypeMount:
 				err = builder.AddMountOutput(output.mountPath, output.sourcePath, output.destPath)
+			case "FILE":
+				// Additional output files (e.g., created via -o flag) - treat like stdout
+				err = builder.AddStdOutput(types.InterfaceTypeStdout, output.sourcePath, output.destPath)
 			}
 
 			if err != nil {
@@ -967,6 +1023,37 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 	}
 
 	return nil
+}
+
+// findAdditionalOutputFiles scans outputDir for files other than standard output files
+// (stdout.txt, stderr.txt, logs.txt). These are files created by the process itself
+// (e.g., via -o flag like pandoc -o output.html).
+func (jm *JobManager) findAdditionalOutputFiles(outputDir string) []string {
+	// Standard output files that are already handled by interface-specific transfer
+	standardFiles := map[string]bool{
+		"stdout.txt": true,
+		"stderr.txt": true,
+		"logs.txt":   true,
+	}
+
+	var additionalFiles []string
+
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		jm.logger.Warn(fmt.Sprintf("Failed to read output directory for additional files: %v", err), "job_manager")
+		return additionalFiles
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue // Skip directories
+		}
+		if !standardFiles[entry.Name()] {
+			additionalFiles = append(additionalFiles, entry.Name())
+		}
+	}
+
+	return additionalFiles
 }
 
 // transferOutputLocally moves output file to receiving job's input directory
@@ -1570,17 +1657,21 @@ func (jm *JobManager) executeStandaloneService(job *database.JobExecution, servi
 
 	// Determine working directory for STANDALONE services
 	// Unlike Docker which can mount directories at arbitrary paths, native processes
-	// need the working directory set correctly so mount paths resolve to actual filesystem paths.
-	// If no explicit working directory configured, use hierarchical mounts base path (if available)
-	// so mount paths like /test resolve correctly.
+	// need the working directory set correctly so paths resolve to actual filesystem paths.
+	//
+	// Priority:
+	// 1. Explicit working directory from service config
+	// 2. Hierarchical mounts base path (if MOUNT interfaces exist with transfers)
+	// 3. Output directory (so -o flags write files where transfer code can find them)
 	workingDir := standaloneDetails.WorkingDirectory
 	if workingDir == "" && hierarchicalMountsBasePath != "" {
 		workingDir = hierarchicalMountsBasePath
 		jm.logger.Info(fmt.Sprintf("Using hierarchical mounts directory as working directory: %s", workingDir), "job_manager")
 	} else if workingDir == "" {
-		// Fallback: use job's own mounts directory
-		workingDir = utils.BuildJobPath(appPaths.DataDir, pathInfo, utils.PathTypeMounts)
-		jm.logger.Info(fmt.Sprintf("Using job mounts directory as working directory: %s", workingDir), "job_manager")
+		// No MOUNT interfaces - use output directory so file-based output (e.g., -o output.html)
+		// ends up in a location the transfer code can access
+		workingDir = outputDir
+		jm.logger.Info(fmt.Sprintf("Using output directory as working directory: %s", workingDir), "job_manager")
 	}
 
 	// Build execution config
