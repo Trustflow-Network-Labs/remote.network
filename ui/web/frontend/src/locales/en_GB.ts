@@ -223,7 +223,11 @@ export default {
       dockerDefaultsNote: 'Leave empty to use service defaults. Values set here override the service\'s default configuration.',
       noConfigForType: 'No configuration options available for this service type.',
       jobConfigSaved: 'Job configuration saved',
-      jobConfigError: 'Failed to save job configuration'
+      jobConfigError: 'Failed to save job configuration',
+      renameAs: 'Rename as',
+      optionalNewName: 'Optional: new name at destination',
+      connectionUpdated: 'Connection updated successfully',
+      connectionUpdateFailed: 'Failed to update connection'
     },
     services: {
       title: 'Services',

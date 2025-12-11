@@ -47,13 +47,14 @@ type WorkflowUIState struct {
 
 // WorkflowConnection represents a connection between workflow nodes
 type WorkflowConnection struct {
-	ID                int64     `json:"id"`
-	WorkflowID        int64     `json:"workflow_id"`
-	FromNodeID        *int64    `json:"from_node_id"`        // Source node ID (null if self-peer)
-	FromInterfaceType string    `json:"from_interface_type"` // STDIN, STDOUT, MOUNT
-	ToNodeID          *int64    `json:"to_node_id"`          // Destination node ID (null if self-peer)
-	ToInterfaceType   string    `json:"to_interface_type"`   // STDIN, STDOUT, MOUNT
-	CreatedAt         time.Time `json:"created_at"`
+	ID                  int64     `json:"id"`
+	WorkflowID          int64     `json:"workflow_id"`
+	FromNodeID          *int64    `json:"from_node_id"`                    // Source node ID (null if self-peer)
+	FromInterfaceType   string    `json:"from_interface_type"`             // STDIN, STDOUT, MOUNT
+	ToNodeID            *int64    `json:"to_node_id"`                      // Destination node ID (null if self-peer)
+	ToInterfaceType     string    `json:"to_interface_type"`               // STDIN, STDOUT, MOUNT
+	DestinationFileName *string   `json:"destination_file_name,omitempty"` // Optional: rename file/folder at destination
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 // InitWorkflowNodesTable creates the workflow_nodes and workflow_ui_state tables
@@ -104,6 +105,7 @@ func (sm *SQLiteManager) InitWorkflowNodesTable() error {
 		from_interface_type TEXT CHECK(from_interface_type IN ('STDIN', 'STDOUT', 'STDERR', 'LOGS', 'MOUNT')) NOT NULL,
 		to_node_id INTEGER,
 		to_interface_type TEXT CHECK(to_interface_type IN ('STDIN', 'STDOUT', 'STDERR', 'LOGS', 'MOUNT')) NOT NULL,
+		destination_file_name TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
 		FOREIGN KEY (from_node_id) REFERENCES workflow_nodes(id) ON DELETE CASCADE,
@@ -124,10 +126,11 @@ func (sm *SQLiteManager) InitWorkflowNodesTable() error {
 		return err
 	}
 
-	// Migration: Add entrypoint and cmd columns to existing workflow_nodes tables
+	// Migration: Add new columns to existing tables
 	migrations := []string{
 		`ALTER TABLE workflow_nodes ADD COLUMN entrypoint TEXT`,
 		`ALTER TABLE workflow_nodes ADD COLUMN cmd TEXT`,
+		`ALTER TABLE workflow_connections ADD COLUMN destination_file_name TEXT`,
 	}
 
 	for _, migration := range migrations {
@@ -459,9 +462,9 @@ func (sm *SQLiteManager) UpdateWorkflowUIState(workflowID int64, state *Workflow
 func (sm *SQLiteManager) AddWorkflowConnection(conn *WorkflowConnection) error {
 	result, err := sm.db.Exec(`
 		INSERT INTO workflow_connections (
-			workflow_id, from_node_id, from_interface_type, to_node_id, to_interface_type
-		) VALUES (?, ?, ?, ?, ?)
-	`, conn.WorkflowID, conn.FromNodeID, conn.FromInterfaceType, conn.ToNodeID, conn.ToInterfaceType)
+			workflow_id, from_node_id, from_interface_type, to_node_id, to_interface_type, destination_file_name
+		) VALUES (?, ?, ?, ?, ?, ?)
+	`, conn.WorkflowID, conn.FromNodeID, conn.FromInterfaceType, conn.ToNodeID, conn.ToInterfaceType, conn.DestinationFileName)
 
 	if err != nil {
 		return fmt.Errorf("failed to add workflow connection: %v", err)
@@ -479,7 +482,7 @@ func (sm *SQLiteManager) AddWorkflowConnection(conn *WorkflowConnection) error {
 // GetWorkflowConnections retrieves all connections for a workflow
 func (sm *SQLiteManager) GetWorkflowConnections(workflowID int64) ([]*WorkflowConnection, error) {
 	rows, err := sm.db.Query(`
-		SELECT id, workflow_id, from_node_id, from_interface_type, to_node_id, to_interface_type, created_at
+		SELECT id, workflow_id, from_node_id, from_interface_type, to_node_id, to_interface_type, destination_file_name, created_at
 		FROM workflow_connections
 		WHERE workflow_id = ?
 	`, workflowID)
@@ -492,6 +495,7 @@ func (sm *SQLiteManager) GetWorkflowConnections(workflowID int64) ([]*WorkflowCo
 	var connections []*WorkflowConnection
 	for rows.Next() {
 		var conn WorkflowConnection
+		var destinationFileName sql.NullString
 		err := rows.Scan(
 			&conn.ID,
 			&conn.WorkflowID,
@@ -499,10 +503,14 @@ func (sm *SQLiteManager) GetWorkflowConnections(workflowID int64) ([]*WorkflowCo
 			&conn.FromInterfaceType,
 			&conn.ToNodeID,
 			&conn.ToInterfaceType,
+			&destinationFileName,
 			&conn.CreatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan workflow connection: %v", err)
+		}
+		if destinationFileName.Valid {
+			conn.DestinationFileName = &destinationFileName.String
 		}
 		connections = append(connections, &conn)
 	}
@@ -515,6 +523,19 @@ func (sm *SQLiteManager) DeleteWorkflowConnection(id int64) error {
 	_, err := sm.db.Exec(`DELETE FROM workflow_connections WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete workflow connection: %v", err)
+	}
+	return nil
+}
+
+// UpdateWorkflowConnection updates a connection's destination_file_name
+func (sm *SQLiteManager) UpdateWorkflowConnection(id int64, destinationFileName *string) error {
+	_, err := sm.db.Exec(`
+		UPDATE workflow_connections
+		SET destination_file_name = ?
+		WHERE id = ?
+	`, destinationFileName, id)
+	if err != nil {
+		return fmt.Errorf("failed to update workflow connection: %v", err)
 	}
 	return nil
 }

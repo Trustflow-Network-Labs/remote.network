@@ -9,22 +9,22 @@ import (
 
 // JobExecution represents a job execution instance
 type JobExecution struct {
-	ID                    int64     `json:"id"`
-	WorkflowJobID         int64     `json:"workflow_job_id"`         // Workflow execution instance ID
-	ServiceID             int64     `json:"service_id"`
-	ExecutorPeerID        string    `json:"executor_peer_id"`        // Ed25519 peer ID who executes
-	OrderingPeerID        string    `json:"ordering_peer_id"`        // Ed25519 peer ID who requested
-	RemoteJobExecutionID  *int64    `json:"remote_job_execution_id"` // Job ID on remote executor peer (nullable for local jobs)
-	Status                string    `json:"status"`                  // IDLE, READY, RUNNING, COMPLETED, ERRORED, CANCELLED
-	Entrypoint            string    `json:"entrypoint,omitempty"`    // JSON array of strings
-	Commands              string    `json:"commands,omitempty"`      // JSON array of strings
-	ExecutionConstraint   string    `json:"execution_constraint"`    // NONE, INPUTS_READY
-	ConstraintDetail      string    `json:"constraint_detail,omitempty"`
-	StartedAt             time.Time `json:"started_at,omitempty"`
-	EndedAt               time.Time `json:"ended_at,omitempty"`
-	ErrorMessage          string    `json:"error_message,omitempty"`
-	CreatedAt             time.Time `json:"created_at"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	ID                   int64     `json:"id"`
+	WorkflowJobID        int64     `json:"workflow_job_id"` // Workflow execution instance ID
+	ServiceID            int64     `json:"service_id"`
+	ExecutorPeerID       string    `json:"executor_peer_id"`        // Ed25519 peer ID who executes
+	OrderingPeerID       string    `json:"ordering_peer_id"`        // Ed25519 peer ID who requested
+	RemoteJobExecutionID *int64    `json:"remote_job_execution_id"` // Job ID on remote executor peer (nullable for local jobs)
+	Status               string    `json:"status"`                  // IDLE, READY, RUNNING, COMPLETED, ERRORED, CANCELLED
+	Entrypoint           string    `json:"entrypoint,omitempty"`    // JSON array of strings
+	Commands             string    `json:"commands,omitempty"`      // JSON array of strings
+	ExecutionConstraint  string    `json:"execution_constraint"`    // NONE, INPUTS_READY
+	ConstraintDetail     string    `json:"constraint_detail,omitempty"`
+	StartedAt            time.Time `json:"started_at,omitempty"`
+	EndedAt              time.Time `json:"ended_at,omitempty"`
+	ErrorMessage         string    `json:"error_message,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // JobInterface represents an interface (STDIN, STDOUT, STDERR, LOGS, MOUNT) for a job
@@ -38,15 +38,16 @@ type JobInterface struct {
 
 // JobInterfacePeer represents a peer connection for a job interface
 type JobInterfacePeer struct {
-	ID                   int64     `json:"id"`
-	JobInterfaceID       int64     `json:"job_interface_id"`
-	PeerID               string    `json:"peer_id"`                // Peer ID (libp2p peer identifier)
-	PeerWorkflowJobID    *int64    `json:"peer_workflow_job_id"`   // Orchestrator's workflow_job_id
-	PeerJobExecutionID   *int64    `json:"peer_job_execution_id"`  // Executor's job_execution_id (for path construction)
-	PeerPath             string    `json:"peer_path"`
-	PeerMountFunction    string    `json:"peer_mount_function"` // INPUT, OUTPUT, BOTH
-	DutyAcknowledged     bool      `json:"duty_acknowledged"`
-	CreatedAt            time.Time `json:"created_at"`
+	ID                 int64     `json:"id"`
+	JobInterfaceID     int64     `json:"job_interface_id"`
+	PeerID             string    `json:"peer_id"`               // Peer ID (libp2p peer identifier)
+	PeerWorkflowJobID  *int64    `json:"peer_workflow_job_id"`  // Orchestrator's workflow_job_id
+	PeerJobExecutionID *int64    `json:"peer_job_execution_id"` // Executor's job_execution_id (for path construction)
+	PeerPath           string    `json:"peer_path"`
+	PeerFileName       *string   `json:"peer_file_name"`      // Optional: rename file/folder when transferring
+	PeerMountFunction  string    `json:"peer_mount_function"` // INPUT, OUTPUT, BOTH
+	DutyAcknowledged   bool      `json:"duty_acknowledged"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 // InitJobExecutionsTable creates the job execution tables
@@ -103,6 +104,7 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 		peer_workflow_job_id INTEGER,
 		peer_job_execution_id INTEGER,
 		peer_path TEXT NOT NULL,
+		peer_file_name TEXT,
 		peer_mount_function TEXT CHECK(peer_mount_function IN ('INPUT', 'OUTPUT', 'BOTH')) NOT NULL,
 		duty_acknowledged BOOLEAN DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -433,14 +435,15 @@ func (sm *SQLiteManager) CreateJobInterfacePeer(peer *JobInterfacePeer) error {
 	result, err := sm.db.Exec(`
 		INSERT INTO job_interface_peers (
 			job_interface_id, peer_id, peer_workflow_job_id, peer_job_execution_id,
-			peer_path, peer_mount_function, duty_acknowledged
-		) VALUES (?, ?, ?, ?, ?, ?, ?)
+			peer_path, peer_file_name, peer_mount_function, duty_acknowledged
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		peer.JobInterfaceID,
 		peer.PeerID,
 		peer.PeerWorkflowJobID,
 		peer.PeerJobExecutionID,
 		peer.PeerPath,
+		peer.PeerFileName,
 		peer.PeerMountFunction,
 		peer.DutyAcknowledged,
 	)
@@ -498,7 +501,7 @@ func (sm *SQLiteManager) GetJobInterfaces(jobExecutionID int64) ([]*JobInterface
 func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInterfacePeer, error) {
 	rows, err := sm.db.Query(`
 		SELECT id, job_interface_id, peer_id, peer_workflow_job_id, peer_job_execution_id,
-		       peer_path, peer_mount_function, duty_acknowledged, created_at
+		       peer_path, peer_file_name, peer_mount_function, duty_acknowledged, created_at
 		FROM job_interface_peers
 		WHERE job_interface_id = ?
 	`, jobInterfaceID)
@@ -513,6 +516,7 @@ func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInter
 		var peer JobInterfacePeer
 		var peerWorkflowJobID sql.NullInt64
 		var peerJobExecutionID sql.NullInt64
+		var peerFileName sql.NullString
 
 		err := rows.Scan(
 			&peer.ID,
@@ -521,6 +525,7 @@ func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInter
 			&peerWorkflowJobID,
 			&peerJobExecutionID,
 			&peer.PeerPath,
+			&peerFileName,
 			&peer.PeerMountFunction,
 			&peer.DutyAcknowledged,
 			&peer.CreatedAt,
@@ -535,6 +540,9 @@ func (sm *SQLiteManager) GetJobInterfacePeers(jobInterfaceID int64) ([]*JobInter
 		}
 		if peerJobExecutionID.Valid {
 			peer.PeerJobExecutionID = &peerJobExecutionID.Int64
+		}
+		if peerFileName.Valid {
+			peer.PeerFileName = &peerFileName.String
 		}
 
 		peers = append(peers, &peer)
@@ -860,7 +868,7 @@ func UnmarshalStringSlice(data string) ([]string, error) {
 
 // Helper function to marshal string maps to JSON
 func MarshalStringMap(m map[string]string) (string, error) {
-	if m == nil || len(m) == 0 {
+	if len(m) == 0 {
 		return "{}", nil
 	}
 	data, err := json.Marshal(m)

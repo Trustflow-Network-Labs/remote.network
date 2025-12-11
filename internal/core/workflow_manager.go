@@ -585,12 +585,13 @@ func (wm *WorkflowManager) buildCompleteInterfaces(interfaces []*types.JobInterf
 
 		for j, peer := range iface.InterfacePeers {
 			completePeer := &types.InterfacePeer{
-				PeerID:            peer.PeerID,
-				PeerWorkflowJobID: peer.PeerWorkflowJobID, // Will be populated below
+				PeerID:             peer.PeerID,
+				PeerWorkflowJobID:  peer.PeerWorkflowJobID,  // Will be populated below
 				PeerJobExecutionID: peer.PeerJobExecutionID, // Will be populated below
-				PeerPath:          peer.PeerPath,
-				PeerMountFunction: peer.PeerMountFunction,
-				DutyAcknowledged:  peer.DutyAcknowledged,
+				PeerPath:           peer.PeerPath,
+				PeerFileName:       peer.PeerFileName, // Optional: rename file/folder at destination
+				PeerMountFunction:  peer.PeerMountFunction,
+				DutyAcknowledged:   peer.DutyAcknowledged,
 			}
 
 			// Translate node_id to workflow_job_id AND job_execution_id
@@ -643,6 +644,7 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 					PeerID             string  `json:"peer_id"`
 					PeerWorkflowNodeID *int64  `json:"peer_workflow_node_id,omitempty"`
 					PeerPath           string  `json:"peer_path"`
+					PeerFileName       *string `json:"peer_file_name,omitempty"`
 					PeerMountFunction  string  `json:"peer_mount_function"`
 					DutyAcknowledged   bool    `json:"duty_acknowledged,omitempty"`
 				} `json:"interface_peers"`
@@ -716,6 +718,7 @@ func (wm *WorkflowManager) parseWorkflowDefinition(workflow *database.Workflow) 
 					PeerID:            peerID, // Use normalized peer ID
 					PeerWorkflowJobID: peerDef.PeerWorkflowNodeID, // NOTE: Contains node_id at parse time; translated to workflow_job_id in Phase 2
 					PeerPath:          peerDef.PeerPath,
+					PeerFileName:      peerDef.PeerFileName, // Optional: rename file/folder at destination
 					PeerMountFunction: peerDef.PeerMountFunction,
 					DutyAcknowledged:  peerDef.DutyAcknowledged,
 				}

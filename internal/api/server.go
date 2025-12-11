@@ -545,8 +545,14 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		// Check if it's a connections request
 		if strings.Contains(r.URL.Path, "/connections") {
 			if strings.Contains(r.URL.Path, "/connections/") {
-				// DELETE /api/workflows/:id/connections/:connectionId
-				s.handleDeleteWorkflowConnection(w, r)
+				// DELETE or PUT /api/workflows/:id/connections/:connectionId
+				if r.Method == http.MethodDelete {
+					s.handleDeleteWorkflowConnection(w, r)
+				} else if r.Method == http.MethodPut {
+					s.handleUpdateWorkflowConnection(w, r)
+				} else {
+					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				}
 			} else if r.Method == http.MethodGet {
 				s.handleGetWorkflowConnections(w, r)
 			} else if r.Method == http.MethodPost {

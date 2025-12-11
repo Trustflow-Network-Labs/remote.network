@@ -32,22 +32,23 @@ func formatPeerID(peerID string) string {
 
 // IncomingTransfer tracks an active incoming file transfer
 type IncomingTransfer struct {
-	TransferID      string
-	JobExecutionID  int64
-	SourcePeerID    string
-	TargetPath      string
-	ExpectedHash    string
-	ExpectedSize    int64
-	TotalChunks     int
-	ReceivedChunks  map[int]bool
-	File            *os.File
-	BytesReceived   int64
-	Passphrase      string // For encrypted transfers (memory-only, cleared after use)
-	Encrypted       bool   // Whether this transfer is encrypted
-	InterfaceType   string // Interface type (STDOUT, MOUNT, PACKAGE, etc.)
-	StartedAt       time.Time
-	LastChunkAt     time.Time
-	mu              sync.Mutex
+	TransferID          string
+	JobExecutionID      int64
+	SourcePeerID        string
+	TargetPath          string
+	ExpectedHash        string
+	ExpectedSize        int64
+	TotalChunks         int
+	ReceivedChunks      map[int]bool
+	File                *os.File
+	BytesReceived       int64
+	Passphrase          string // For encrypted transfers (memory-only, cleared after use)
+	Encrypted           bool   // Whether this transfer is encrypted
+	InterfaceType       string // Interface type (STDOUT, MOUNT, PACKAGE, etc.)
+	DestinationFileName string // Optional: rename file/folder at destination
+	StartedAt           time.Time
+	LastChunkAt         time.Time
+	mu                  sync.Mutex
 }
 
 // DataServiceWorker handles DATA service job execution
@@ -461,6 +462,12 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 			interfaceType = "MOUNT"
 		}
 
+		// Determine destination file name for renaming
+		var destFileName string
+		if peer.PeerFileName != nil {
+			destFileName = *peer.PeerFileName
+		}
+
 		// Send transfer request using destination's WorkflowJobID
 		transferRequest := &types.JobDataTransferRequest{
 			TransferID:                transferID,        // Include transfer ID so both peers use the same one
@@ -472,6 +479,7 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 			DestinationPeerID:         peer.PeerID,
 			SourcePath:                filePath,
 			DestinationPath:           peer.PeerPath,
+			DestinationFileName:       destFileName,      // Optional: rename file/folder at destination
 			DataHash:                  dataDetails.Hash,
 			SizeBytes:                 fileSize,
 			Passphrase:                keyData,
@@ -826,11 +834,11 @@ func (dsw *DataServiceWorker) InitializeIncomingTransfer(transferID string, jobE
 
 // InitializeIncomingTransferWithPassphrase creates a new incoming transfer state with optional encryption
 func (dsw *DataServiceWorker) InitializeIncomingTransferWithPassphrase(transferID string, jobExecutionID int64, sourcePeerID string, targetPath string, expectedHash string, expectedSize int64, totalChunks int, passphrase string, encrypted bool) error {
-	return dsw.InitializeIncomingTransferFull(transferID, jobExecutionID, sourcePeerID, targetPath, expectedHash, expectedSize, totalChunks, passphrase, encrypted, "")
+	return dsw.InitializeIncomingTransferFull(transferID, jobExecutionID, sourcePeerID, targetPath, expectedHash, expectedSize, totalChunks, passphrase, encrypted, "", "")
 }
 
 // InitializeIncomingTransferFull creates a new incoming transfer state with all options
-func (dsw *DataServiceWorker) InitializeIncomingTransferFull(transferID string, jobExecutionID int64, sourcePeerID string, targetPath string, expectedHash string, expectedSize int64, totalChunks int, passphrase string, encrypted bool, interfaceType string) error {
+func (dsw *DataServiceWorker) InitializeIncomingTransferFull(transferID string, jobExecutionID int64, sourcePeerID string, targetPath string, expectedHash string, expectedSize int64, totalChunks int, passphrase string, encrypted bool, interfaceType string, destinationFileName string) error {
 	dsw.transfersMu.Lock()
 	defer dsw.transfersMu.Unlock()
 
@@ -874,21 +882,22 @@ func (dsw *DataServiceWorker) InitializeIncomingTransferFull(transferID string, 
 
 	// Create transfer state
 	transfer := &IncomingTransfer{
-		TransferID:     transferID,
-		JobExecutionID: jobExecutionID,
-		SourcePeerID:   sourcePeerID,
-		TargetPath:     actualFilePath, // Use actual file path, not directory path
-		ExpectedHash:   expectedHash,
-		ExpectedSize:   expectedSize,
-		TotalChunks:    totalChunks,
-		ReceivedChunks: make(map[int]bool),
-		File:           file,
-		BytesReceived:  0,
-		Passphrase:     passphrase, // Store passphrase temporarily in memory
-		Encrypted:      encrypted,
-		InterfaceType:  interfaceType,
-		StartedAt:      time.Now(),
-		LastChunkAt:    time.Now(),
+		TransferID:          transferID,
+		JobExecutionID:      jobExecutionID,
+		SourcePeerID:        sourcePeerID,
+		TargetPath:          actualFilePath, // Use actual file path, not directory path
+		ExpectedHash:        expectedHash,
+		ExpectedSize:        expectedSize,
+		TotalChunks:         totalChunks,
+		ReceivedChunks:      make(map[int]bool),
+		File:                file,
+		BytesReceived:       0,
+		Passphrase:          passphrase, // Store passphrase temporarily in memory
+		Encrypted:           encrypted,
+		InterfaceType:       interfaceType,
+		DestinationFileName: destinationFileName, // Optional: rename file/folder at destination
+		StartedAt:           time.Now(),
+		LastChunkAt:         time.Now(),
 	}
 
 	dsw.incomingTransfers[transferID] = transfer
@@ -1214,7 +1223,8 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 		dsw.logger.Info(fmt.Sprintf("Transfer package %s extracted successfully to %s", transferID, baseDir), "data_worker")
 	} else {
 		// Standard decompression for DATA service transfers
-		if err := utils.Decompress(transfer.TargetPath, extractDir); err != nil {
+		// Use DecompressWithRename if DestinationFileName is set for file/folder renaming
+		if err := utils.DecompressWithRename(transfer.TargetPath, extractDir, transfer.DestinationFileName); err != nil {
 			dsw.logger.Error(fmt.Sprintf("Decompression failed for transfer %s: %v", transferID, err), "data_worker")
 			os.Remove(transfer.TargetPath)
 			os.RemoveAll(extractDir)
@@ -1224,6 +1234,9 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 				transfer.Passphrase = ""
 			}
 			return fmt.Errorf("decompression failed: %v", err)
+		}
+		if transfer.DestinationFileName != "" {
+			dsw.logger.Info(fmt.Sprintf("Transfer %s extracted with rename to '%s'", transferID, transfer.DestinationFileName), "data_worker")
 		}
 
 		// Check if extracted content contains a manifest (backward compatibility check)
@@ -1644,8 +1657,16 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 	// Decompress file (it's a tar.gz archive)
 	// Extract directly to the extraction directory (e.g., input/)
 	// This matches remote transfer behavior where files are extracted directly without a containing folder
-	dsw.logger.Info(fmt.Sprintf("Decompressing file to %s", extractDir), "data_worker")
-	if err := utils.Decompress(decryptedFile, extractDir); err != nil {
+	// If PeerFileName is set, rename the root file/folder during extraction
+	var newName string
+	if peer.PeerFileName != nil && *peer.PeerFileName != "" {
+		newName = *peer.PeerFileName
+		dsw.logger.Info(fmt.Sprintf("Decompressing file to %s with rename to '%s'", extractDir, newName), "data_worker")
+	} else {
+		dsw.logger.Info(fmt.Sprintf("Decompressing file to %s", extractDir), "data_worker")
+	}
+
+	if err := utils.DecompressWithRename(decryptedFile, extractDir, newName); err != nil {
 		return fmt.Errorf("decompression failed: %v", err)
 	}
 

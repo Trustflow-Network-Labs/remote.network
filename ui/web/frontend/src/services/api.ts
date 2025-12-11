@@ -443,6 +443,14 @@ class APIClient {
   }
 
   /**
+   * Update workflow connection (e.g., destination_file_name)
+   */
+  async updateWorkflowConnection(workflowId: number, connectionId: number, data: { destination_file_name?: string | null }) {
+    const response = await this.client.put(`/api/workflows/${workflowId}/connections/${connectionId}`, data)
+    return response.data
+  }
+
+  /**
    * Remove workflow node
    */
   async removeWorkflowNode(workflowId: number, nodeId: number) {

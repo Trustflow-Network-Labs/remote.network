@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Compress compresses a file or directory to a tar.gz archive
@@ -173,6 +174,146 @@ func Decompress(archivePath, targetDir string) error {
 		if _, err := io.Copy(targetFile, tarReader); err != nil {
 			targetFile.Close()
 			return fmt.Errorf("failed to write file content: %w", err)
+		}
+		targetFile.Close()
+	}
+
+	return nil
+}
+
+// DecompressWithRename decompresses a tar.gz archive to a target directory with optional renaming.
+// If newName is provided (non-empty), the root file or folder will be renamed:
+// - For a single file archive: the file is renamed to newName
+// - For a single root folder archive: the folder is renamed to newName
+// - For archives with multiple root entries: rename is ignored (files extracted as-is)
+func DecompressWithRename(archivePath, targetDir, newName string) error {
+	// If no rename requested, use standard Decompress
+	if newName == "" {
+		return Decompress(archivePath, targetDir)
+	}
+
+	// Open the archive file
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to open archive: %w", err)
+	}
+	defer archiveFile.Close()
+
+	// Create gzip reader
+	gzipReader, err := gzip.NewReader(archiveFile)
+	if err != nil {
+		return fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzipReader.Close()
+
+	// Create tar reader
+	tarReader := tar.NewReader(gzipReader)
+
+	// First pass: determine root entries to understand archive structure
+	var headers []*tar.Header
+	var contents [][]byte
+	rootEntries := make(map[string]bool)
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read tar header: %w", err)
+		}
+
+		// Store header
+		headerCopy := *header
+		headers = append(headers, &headerCopy)
+
+		// Read content for files
+		if header.Typeflag != tar.TypeDir {
+			content, err := io.ReadAll(tarReader)
+			if err != nil {
+				return fmt.Errorf("failed to read file content: %w", err)
+			}
+			contents = append(contents, content)
+		} else {
+			contents = append(contents, nil)
+		}
+
+		// Track root entries (first path component)
+		// Skip "." entries as they represent the archive root directory (don't count for rename)
+		if header.Name == "." {
+			// Don't add to rootEntries but still store header/content for extraction
+		} else {
+			rootName := strings.Split(header.Name, string(os.PathSeparator))[0]
+			// Also handle forward slash which is common in tar archives
+			if slashPos := strings.Index(header.Name, "/"); slashPos > 0 && (rootName == header.Name || strings.Index(header.Name, string(os.PathSeparator)) == -1) {
+				rootName = header.Name[:slashPos]
+			}
+			if rootName == "" {
+				rootName = header.Name
+			}
+			rootEntries[rootName] = true
+		}
+	}
+
+	// Determine if we can rename
+	canRename := len(rootEntries) == 1
+	var originalRoot string
+	if canRename {
+		for root := range rootEntries {
+			originalRoot = root
+		}
+	}
+
+	// Extract files with potential renaming
+	for i, header := range headers {
+		// Skip "." directory entry - it's just the archive root marker
+		if header.Name == "." {
+			continue
+		}
+
+		targetPath := header.Name
+
+		// Apply renaming if applicable
+		if canRename && originalRoot != "" {
+			if header.Name == originalRoot {
+				// This is the root entry itself
+				targetPath = newName
+			} else if strings.HasPrefix(header.Name, originalRoot+string(os.PathSeparator)) {
+				// This is inside the root folder
+				targetPath = newName + header.Name[len(originalRoot):]
+			} else if strings.HasPrefix(header.Name, originalRoot+"/") {
+				// Handle Unix-style paths
+				targetPath = newName + header.Name[len(originalRoot):]
+			}
+		}
+
+		targetPath = filepath.Join(targetDir, targetPath)
+
+		// Check if it's a directory
+		if header.Typeflag == tar.TypeDir {
+			if err := os.MkdirAll(targetPath, 0755); err != nil {
+				return fmt.Errorf("failed to create directory: %w", err)
+			}
+			continue
+		}
+
+		// Create parent directories if needed
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return fmt.Errorf("failed to create parent directory: %w", err)
+		}
+
+		// Create file
+		targetFile, err := os.Create(targetPath)
+		if err != nil {
+			return fmt.Errorf("failed to create file: %w", err)
+		}
+
+		// Write content
+		if contents[i] != nil {
+			if _, err := targetFile.Write(contents[i]); err != nil {
+				targetFile.Close()
+				return fmt.Errorf("failed to write file content: %w", err)
+			}
 		}
 		targetFile.Close()
 	}

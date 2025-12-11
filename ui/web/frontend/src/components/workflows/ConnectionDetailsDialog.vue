@@ -30,15 +30,30 @@
 
       <div class="interfaces-section">
         <h4>{{ $t('message.workflows.connectedInterfaces') }}</h4>
-        <div v-if="interfaces.length > 0" class="interfaces-list">
+        <div v-if="localInterfaces.length > 0" class="interfaces-list">
           <div
-            v-for="iface in interfaces"
-            :key="`${iface.from_interface_type}-${iface.to_interface_type}`"
+            v-for="(iface, index) in localInterfaces"
+            :key="`${iface.from_interface_type}-${iface.to_interface_type}-${iface.id}`"
             class="interface-item"
           >
-            <span class="interface-type output">{{ iface.from_interface_type }}</span>
-            <i class="pi pi-arrow-right arrow-icon"></i>
-            <span class="interface-type input">{{ iface.to_interface_type }}</span>
+            <div class="interface-row">
+              <span class="interface-type output">{{ iface.from_interface_type }}</span>
+              <i class="pi pi-arrow-right arrow-icon"></i>
+              <span class="interface-type input">{{ iface.to_interface_type }}</span>
+            </div>
+            <div class="rename-row">
+              <label :for="`rename-${index}`" class="rename-label">
+                <i class="pi pi-pencil"></i>
+                {{ $t('message.workflows.renameAs') }}:
+              </label>
+              <InputText
+                :id="`rename-${index}`"
+                v-model="localInterfaces[index].destination_file_name"
+                :placeholder="$t('message.workflows.optionalNewName')"
+                class="rename-input"
+                size="small"
+              />
+            </div>
           </div>
         </div>
         <div v-else class="no-interfaces">
@@ -56,6 +71,13 @@
           class="p-button-text"
         />
         <Button
+          v-if="hasChanges"
+          :label="$t('message.common.save')"
+          icon="pi pi-save"
+          @click="onSave"
+          class="p-button-success"
+        />
+        <Button
           :label="$t('message.workflows.deleteConnection')"
           icon="pi pi-trash"
           @click="onDelete"
@@ -67,16 +89,19 @@
 </template>
 
 <script setup lang="ts">
+import { ref, watch, computed } from 'vue'
 import Dialog from 'primevue/dialog'
 import Button from 'primevue/button'
+import InputText from 'primevue/inputtext'
 
 interface ConnectionInterface {
   id: number
   from_interface_type: string
   to_interface_type: string
+  destination_file_name?: string | null
 }
 
-defineProps<{
+const props = defineProps<{
   visible: boolean
   fromCardName: string
   toCardName: string
@@ -87,7 +112,39 @@ const emit = defineEmits<{
   (e: 'update:visible', value: boolean): void
   (e: 'delete'): void
   (e: 'cancel'): void
+  (e: 'save', interfaces: ConnectionInterface[]): void
 }>()
+
+// Local copy of interfaces for editing
+const localInterfaces = ref<ConnectionInterface[]>([])
+
+// Watch for prop changes and create local copy
+watch(() => props.interfaces, (newInterfaces) => {
+  localInterfaces.value = newInterfaces.map(iface => ({
+    ...iface,
+    destination_file_name: iface.destination_file_name || ''
+  }))
+}, { immediate: true, deep: true })
+
+// Watch for visibility changes to reset local state
+watch(() => props.visible, (newVisible) => {
+  if (newVisible) {
+    localInterfaces.value = props.interfaces.map(iface => ({
+      ...iface,
+      destination_file_name: iface.destination_file_name || ''
+    }))
+  }
+})
+
+// Check if there are any changes
+const hasChanges = computed(() => {
+  return localInterfaces.value.some((local, index) => {
+    const original = props.interfaces[index]
+    const originalName = original?.destination_file_name || ''
+    const localName = local.destination_file_name || ''
+    return localName !== originalName
+  })
+})
 
 function onDelete() {
   emit('delete')
@@ -95,6 +152,16 @@ function onDelete() {
 
 function onCancel() {
   emit('cancel')
+  emit('update:visible', false)
+}
+
+function onSave() {
+  // Only include interfaces that have a destination_file_name set
+  const updatedInterfaces = localInterfaces.value.map(iface => ({
+    ...iface,
+    destination_file_name: iface.destination_file_name?.trim() || null
+  }))
+  emit('save', updatedInterfaces)
   emit('update:visible', false)
 }
 </script>
@@ -163,8 +230,8 @@ function onCancel() {
 
 .interface-item {
   display: flex;
-  align-items: center;
-  gap: 1rem;
+  flex-direction: column;
+  gap: 0.75rem;
   padding: 0.75rem 1rem;
   background: var(--surface-0);
   border: 1px solid var(--surface-border);
@@ -175,6 +242,34 @@ function onCancel() {
 .interface-item:hover {
   background: var(--surface-50);
   border-color: var(--primary-color);
+}
+
+.interface-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.rename-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--surface-border);
+}
+
+.rename-label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-color-secondary);
+  white-space: nowrap;
+}
+
+.rename-input {
+  flex: 1;
+  font-size: 0.85rem;
 }
 
 .interface-type {

@@ -3,7 +3,7 @@
     v-model:visible="isVisible"
     :header="$t('message.workflows.selectInterfaces')"
     :modal="true"
-    :style="{ width: '500px' }"
+    :style="{ width: '550px' }"
     @update:visible="onVisibilityChange"
   >
     <div class="interface-selector">
@@ -16,18 +16,33 @@
         </div>
 
         <div v-for="iface in availableOutputInterfaces" :key="iface.interface_type" class="interface-item">
-          <Checkbox
-            v-model="selectedSourceOutputs"
-            :inputId="`source-${iface.interface_type}`"
-            :value="iface.interface_type"
-          />
-          <label :for="`source-${iface.interface_type}`" class="interface-label">
-            <span class="interface-type">{{ iface.interface_type }}</span>
-            <span v-if="iface.mount_function" class="mount-function">
-              ({{ iface.mount_function }})
-            </span>
-            <span class="interface-path">{{ iface.path }}</span>
-          </label>
+          <div class="interface-row">
+            <Checkbox
+              v-model="selectedSourceOutputs"
+              :inputId="`source-${iface.interface_type}`"
+              :value="iface.interface_type"
+              @change="onSourceOutputChange(iface.interface_type)"
+            />
+            <label :for="`source-${iface.interface_type}`" class="interface-label">
+              <span class="interface-type">{{ iface.interface_type }}</span>
+              <span v-if="iface.mount_function" class="mount-function">
+                ({{ iface.mount_function }})
+              </span>
+              <span class="interface-path">{{ iface.path }}</span>
+            </label>
+          </div>
+          <div v-if="selectedSourceOutputs.includes(iface.interface_type)" class="rename-row">
+            <label class="rename-label">
+              <i class="pi pi-pencil"></i>
+              {{ $t('message.workflows.renameAs') }}:
+            </label>
+            <InputText
+              v-model="renameMap[iface.interface_type]"
+              :placeholder="$t('message.workflows.optionalNewName')"
+              class="rename-input"
+              size="small"
+            />
+          </div>
         </div>
       </div>
 
@@ -40,18 +55,20 @@
         </div>
 
         <div v-for="iface in availableInputInterfaces" :key="iface.interface_type" class="interface-item">
-          <Checkbox
-            v-model="selectedDestinationInputs"
-            :inputId="`dest-${iface.interface_type}`"
-            :value="iface.interface_type"
-          />
-          <label :for="`dest-${iface.interface_type}`" class="interface-label">
-            <span class="interface-type">{{ iface.interface_type }}</span>
-            <span v-if="iface.mount_function" class="mount-function">
-              ({{ iface.mount_function }})
-            </span>
-            <span class="interface-path">{{ iface.path }}</span>
-          </label>
+          <div class="interface-row">
+            <Checkbox
+              v-model="selectedDestinationInputs"
+              :inputId="`dest-${iface.interface_type}`"
+              :value="iface.interface_type"
+            />
+            <label :for="`dest-${iface.interface_type}`" class="interface-label">
+              <span class="interface-type">{{ iface.interface_type }}</span>
+              <span v-if="iface.mount_function" class="mount-function">
+                ({{ iface.mount_function }})
+              </span>
+              <span class="interface-path">{{ iface.path }}</span>
+            </label>
+          </div>
         </div>
       </div>
     </div>
@@ -74,10 +91,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, reactive } from 'vue'
 import Dialog from 'primevue/dialog'
 import Button from 'primevue/button'
 import Checkbox from 'primevue/checkbox'
+import InputText from 'primevue/inputtext'
 import type { ServiceInterface } from '../../stores/workflows'
 
 interface Props {
@@ -91,13 +109,14 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits<{
   'update:visible': [value: boolean]
-  'confirm': [data: { sourceOutputs: string[], destinationInputs: string[] }]
+  'confirm': [data: { sourceOutputs: string[], destinationInputs: string[], renameMap: Record<string, string> }]
   'cancel': []
 }>()
 
 const isVisible = ref(props.visible)
 const selectedSourceOutputs = ref<string[]>([])
 const selectedDestinationInputs = ref<string[]>([])
+const renameMap = reactive<Record<string, string>>({})
 
 // Watch for prop changes
 watch(() => props.visible, (newVal) => {
@@ -110,8 +129,18 @@ watch(() => props.visible, (newVal) => {
     if (availableInputInterfaces.value.length > 0) {
       selectedDestinationInputs.value = [availableInputInterfaces.value[0].interface_type]
     }
+
+    // Reset rename map
+    Object.keys(renameMap).forEach(key => delete renameMap[key])
   }
 })
+
+function onSourceOutputChange(interfaceType: string) {
+  // Clear rename when unchecked
+  if (!selectedSourceOutputs.value.includes(interfaceType)) {
+    delete renameMap[interfaceType]
+  }
+}
 
 // Get available output interfaces (STDOUT, STDERR, LOGS, MOUNT with OUTPUT/BOTH)
 const availableOutputInterfaces = computed(() => {
@@ -146,7 +175,8 @@ function onVisibilityChange(value: boolean) {
 function confirm() {
   emit('confirm', {
     sourceOutputs: selectedSourceOutputs.value,
-    destinationInputs: selectedDestinationInputs.value
+    destinationInputs: selectedDestinationInputs.value,
+    renameMap: { ...renameMap }
   })
   isVisible.value = false
 }
@@ -190,8 +220,8 @@ function cancel() {
 
 .interface-item {
   display: flex;
-  align-items: center;
-  gap: 0.75rem;
+  flex-direction: column;
+  gap: 0.5rem;
   padding: 0.75rem;
   border: 1px solid var(--surface-border);
   border-radius: 4px;
@@ -203,12 +233,41 @@ function cancel() {
   background: var(--surface-50);
 }
 
+.interface-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 .interface-label {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   flex: 1;
   cursor: pointer;
+}
+
+.rename-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  padding-left: 1.75rem;
+  border-top: 1px dashed var(--surface-border);
+}
+
+.rename-label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-color-secondary);
+  white-space: nowrap;
+}
+
+.rename-input {
+  flex: 1;
+  font-size: 0.85rem;
 }
 
 .interface-type {

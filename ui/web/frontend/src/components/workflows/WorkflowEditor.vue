@@ -61,6 +61,7 @@
         :interfaces="selectedConnection.interfaces"
         @delete="onDeleteConnection"
         @cancel="onConnectionDetailsCancel"
+        @save="onConnectionDetailsSave"
       />
 
       <!-- Job Configuration Dialog -->
@@ -94,6 +95,7 @@ import ConnectionDetailsDialog from './ConnectionDetailsDialog.vue'
 import JobConfigDialog from './JobConfigDialog.vue'
 import { useWorkflowsStore } from '../../stores/workflows'
 import type { WorkflowJob, ServiceInterface } from '../../stores/workflows'
+import { api } from '../../services/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -170,6 +172,7 @@ const selectedConnection = ref<{
     id: number
     from_interface_type: string
     to_interface_type: string
+    destination_file_name?: string | null
   }>
 }>({
   connectionId: '',
@@ -197,6 +200,7 @@ const connections = ref<Array<{
     id: number
     from_interface_type: string
     to_interface_type: string
+    destination_file_name?: string | null
   }> // All database connections for this visual line
   svgElement?: SVGElement // Store reference to SVG element for click handling
   interfaces?: string[] // Store which interfaces are connected (legacy, to be removed)
@@ -1104,7 +1108,7 @@ async function createConnection(fromCardId: string | number, toCardId: string | 
   interfaceSelectorVisible.value = true
 }
 
-async function onInterfacesSelected(data: { sourceOutputs: string[], destinationInputs: string[] }) {
+async function onInterfacesSelected(data: { sourceOutputs: string[], destinationInputs: string[], renameMap: Record<string, string> }) {
   const { fromCardId, toCardId, fromCardName, toCardName } = pendingConnection.value
 
   // Save to database - check if workflow exists first
@@ -1137,16 +1141,21 @@ async function onInterfacesSelected(data: { sourceOutputs: string[], destination
       id: number
       from_interface_type: string
       to_interface_type: string
+      destination_file_name?: string | null
     }> = []
 
     // Create connection for each source output to each destination input
     for (const sourceOutput of data.sourceOutputs) {
       for (const destInput of data.destinationInputs) {
+        // Get the rename value for this source output (if any)
+        const destinationFileName = data.renameMap[sourceOutput]?.trim() || null
+
         const connection = {
           from_node_id: fromNodeId,
           from_interface_type: sourceOutput,  // STDOUT, STDERR, LOGS, or MOUNT
           to_node_id: toNodeId,
-          to_interface_type: destInput  // STDIN or MOUNT
+          to_interface_type: destInput,  // STDIN or MOUNT
+          destination_file_name: destinationFileName
         }
 
         const result = await workflowsStore.addWorkflowConnection(
@@ -1158,7 +1167,8 @@ async function onInterfacesSelected(data: { sourceOutputs: string[], destination
           createdConnections.push({
             id: result.connection.id,
             from_interface_type: sourceOutput,
-            to_interface_type: destInput
+            to_interface_type: destInput,
+            destination_file_name: destinationFileName
           })
         }
       }
@@ -1300,6 +1310,47 @@ function onConnectionDetailsCancel() {
   }
 }
 
+async function onConnectionDetailsSave(updatedInterfaces: Array<{ id: number; destination_file_name?: string | null }>) {
+  if (!workflowsStore.currentWorkflow?.id) return
+
+  try {
+    // Update each connection with its new destination_file_name
+    for (const iface of updatedInterfaces) {
+      await api.updateWorkflowConnection(workflowsStore.currentWorkflow.id, iface.id, {
+        destination_file_name: iface.destination_file_name || null
+      })
+    }
+
+    // Update local connections array with new destination_file_name values
+    // This avoids having to reload all connections and recreate LeaderLines
+    for (const conn of connections.value) {
+      for (const dbConn of conn.dbConnections) {
+        const updated = updatedInterfaces.find(u => u.id === dbConn.id)
+        if (updated) {
+          dbConn.destination_file_name = updated.destination_file_name || null
+        }
+      }
+    }
+
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.workflows.connectionUpdated'),
+      life: 3000
+    })
+  } catch (error) {
+    console.error('Failed to update connection:', error)
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: t('message.workflows.connectionUpdateFailed'),
+      life: 5000
+    })
+  }
+
+  connectionDetailsVisible.value = false
+}
+
 async function loadConnections() {
   if (!workflowsStore.currentWorkflow?.id) return
 
@@ -1400,7 +1451,8 @@ async function loadConnections() {
         dbConnections: dbConnGroup.map(conn => ({
           id: conn.id,
           from_interface_type: conn.from_interface_type,
-          to_interface_type: conn.to_interface_type
+          to_interface_type: conn.to_interface_type,
+          destination_file_name: conn.destination_file_name
         })),
         svgElement: svgElement || undefined
       })

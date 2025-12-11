@@ -425,3 +425,48 @@ func (s *APIServer) handleDeleteWorkflowConnection(w http.ResponseWriter, r *htt
 		"success": true,
 	})
 }
+
+// handleUpdateWorkflowConnection updates a connection (e.g., destination_file_name)
+// PUT /api/workflows/:workflow_id/connections/:connection_id
+func (s *APIServer) handleUpdateWorkflowConnection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract IDs from path
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 5 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	connectionID, err := strconv.ParseInt(parts[4], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid connection ID", http.StatusBadRequest)
+		return
+	}
+
+	// Parse request body
+	var updateData struct {
+		DestinationFileName *string `json:"destination_file_name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&updateData); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	err = s.dbManager.UpdateWorkflowConnection(connectionID, updateData.DestinationFileName)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to update workflow connection: %v", err), "api")
+		http.Error(w, "Failed to update workflow connection", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+	})
+}

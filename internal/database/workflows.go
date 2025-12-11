@@ -292,11 +292,12 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 
 	// Build jobs array
 	type InterfacePeerDef struct {
-		PeerID        string `json:"peer_id"`
-		PeerWorkflowNodeID *int64 `json:"peer_workflow_node_id,omitempty"` // workflow_nodes.id (planning time reference)
-		PeerPath          string `json:"peer_path"`
-		PeerMountFunction string `json:"peer_mount_function"` // INPUT, OUTPUT, or BOTH
-		DutyAcknowledged  bool   `json:"duty_acknowledged,omitempty"`
+		PeerID             string  `json:"peer_id"`
+		PeerWorkflowNodeID *int64  `json:"peer_workflow_node_id,omitempty"` // workflow_nodes.id (planning time reference)
+		PeerPath           string  `json:"peer_path"`
+		PeerFileName       *string `json:"peer_file_name,omitempty"` // Optional: rename file/folder at destination
+		PeerMountFunction  string  `json:"peer_mount_function"`      // INPUT, OUTPUT, or BOTH
+		DutyAcknowledged   bool    `json:"duty_acknowledged,omitempty"`
 	}
 
 	type InterfaceDef struct {
@@ -436,10 +437,11 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 				// Add destination as RECEIVER peer - PeerPath is where data should be SENT TO
 				// peer_mount_function is INPUT because destination receives data
 				interfaceMap[interfaceKey].InterfacePeers = append(interfaceMap[interfaceKey].InterfacePeers, InterfacePeerDef{
-					PeerID:         destPeerID,
+					PeerID:             destPeerID,
 					PeerWorkflowNodeID: destJobID,
-					PeerPath:           destPath, // Actual destination path (e.g., /app for MOUNT)
-					PeerMountFunction:  destMountFunc,  // INPUT - destination receives
+					PeerPath:           destPath,                   // Actual destination path (e.g., /app for MOUNT)
+					PeerFileName:       conn.DestinationFileName,   // Optional: rename file/folder at destination
+					PeerMountFunction:  destMountFunc,              // INPUT - destination receives
 					DutyAcknowledged:   false,
 				})
 			}
