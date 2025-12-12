@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/system"
 )
 
 // NodeStatusResponse represents node status information
@@ -21,9 +23,10 @@ type NodeStatusResponse struct {
 
 // NodeCapabilitiesResponse represents node capabilities (Docker, etc.)
 type NodeCapabilitiesResponse struct {
-	DockerAvailable bool   `json:"docker_available"`
-	DockerVersion   string `json:"docker_version,omitempty"`
-	ColimaStatus    string `json:"colima_status,omitempty"` // macOS only
+	DockerAvailable bool                        `json:"docker_available"`
+	DockerVersion   string                      `json:"docker_version,omitempty"`
+	ColimaStatus    string                      `json:"colima_status,omitempty"` // macOS only
+	System          *system.SystemCapabilities  `json:"system,omitempty"`        // Full system capabilities
 }
 
 // handleNodeStatus returns the current node status
@@ -101,6 +104,19 @@ func (s *APIServer) handleNodeCapabilities(w http.ResponseWriter, r *http.Reques
 				response.ColimaStatus = "stopped"
 			}
 		}
+	}
+
+	// Gather full system capabilities (GPU, CPU, Memory, etc.)
+	// Use home directory for disk info, or current directory as fallback
+	dataDir, err := os.UserHomeDir()
+	if err != nil {
+		dataDir = "."
+	}
+	sysCaps, err := system.GatherSystemCapabilities(dataDir)
+	if err != nil {
+		s.logger.Warn(fmt.Sprintf("Failed to gather system capabilities: %v", err), "api")
+	} else {
+		response.System = sysCaps
 	}
 
 	w.Header().Set("Content-Type", "application/json")

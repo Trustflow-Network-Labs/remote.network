@@ -107,9 +107,9 @@ class APIClient {
   }
 
   /**
-   * Get node capabilities (Docker availability, etc.)
+   * Get node capabilities (Docker availability, system capabilities, etc.)
    */
-  async getNodeCapabilities() {
+  async getNodeCapabilities(): Promise<NodeCapabilitiesResponse> {
     const response = await this.client.get('/api/node/capabilities')
     return response.data
   }
@@ -119,6 +119,14 @@ class APIClient {
    */
   async getPeers() {
     const response = await this.client.get('/api/peers')
+    return response.data
+  }
+
+  /**
+   * Get peer capabilities (GPU, CPU, Memory, etc.) from DHT
+   */
+  async getPeerCapabilities(peerId: string): Promise<PeerCapabilitiesResponse> {
+    const response = await this.client.get(`/api/peers/${peerId}/capabilities`)
     return response.data
   }
 
@@ -602,3 +610,57 @@ export const api = new APIClient()
 
 // Export class for creating custom instances
 export default APIClient
+
+// ===== Type Definitions =====
+
+/**
+ * GPU information
+ */
+export interface GPUInfo {
+  index: number
+  name: string
+  vendor: string
+  memory_mb: number
+  uuid?: string
+  driver_version?: string
+}
+
+/**
+ * System capabilities of a peer
+ */
+export interface SystemCapabilities {
+  platform: string
+  architecture: string
+  kernel_version: string
+  cpu_model: string
+  cpu_cores: number
+  cpu_threads: number
+  total_memory_mb: number
+  available_memory_mb: number
+  total_disk_mb: number
+  available_disk_mb: number
+  gpus?: GPUInfo[]
+  has_docker: boolean
+  docker_version?: string
+  has_python: boolean
+  python_version?: string
+}
+
+/**
+ * Response from peer capabilities endpoint
+ */
+export interface PeerCapabilitiesResponse {
+  peer_id: string
+  capabilities?: SystemCapabilities
+  error?: string
+}
+
+/**
+ * Response from node capabilities endpoint
+ */
+export interface NodeCapabilitiesResponse {
+  docker_available: boolean
+  docker_version?: string
+  colima_status?: string
+  system?: SystemCapabilities
+}

@@ -19,6 +19,10 @@ export interface PeersState {
   error: string | null
 }
 
+// Track unsubscribe functions outside the store
+let _wsUnsubscribePeers: (() => void) | null = null
+let _wsUnsubscribeBlacklist: (() => void) | null = null
+
 export const usePeersStore = defineStore('peers', {
   state: (): PeersState => ({
     peers: [],
@@ -26,10 +30,6 @@ export const usePeersStore = defineStore('peers', {
     loading: false,
     error: null
   }),
-
-  // Track unsubscribe functions
-  _wsUnsubscribePeers: null as (() => void) | null,
-  _wsUnsubscribeBlacklist: null as (() => void) | null,
 
   getters: {
     totalPeers: (state) => state.peers.length,
@@ -123,22 +123,20 @@ export const usePeersStore = defineStore('peers', {
       )
 
       // Store unsubscribe functions
-      ;(this as any)._wsUnsubscribePeers = unsubscribePeers
-      ;(this as any)._wsUnsubscribeBlacklist = unsubscribeBlacklist
+      _wsUnsubscribePeers = unsubscribePeers
+      _wsUnsubscribeBlacklist = unsubscribeBlacklist
     },
 
     // Cleanup WebSocket subscriptions
     cleanupWebSocket() {
-      const unsubscribePeers = (this as any)._wsUnsubscribePeers
-      if (unsubscribePeers) {
-        unsubscribePeers()
-        ;(this as any)._wsUnsubscribePeers = null
+      if (_wsUnsubscribePeers) {
+        _wsUnsubscribePeers()
+        _wsUnsubscribePeers = null
       }
 
-      const unsubscribeBlacklist = (this as any)._wsUnsubscribeBlacklist
-      if (unsubscribeBlacklist) {
-        unsubscribeBlacklist()
-        ;(this as any)._wsUnsubscribeBlacklist = null
+      if (_wsUnsubscribeBlacklist) {
+        _wsUnsubscribeBlacklist()
+        _wsUnsubscribeBlacklist = null
       }
     },
 

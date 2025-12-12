@@ -422,7 +422,12 @@ const activeStep = ref('1')
 const isCreating = ref(false)
 
 // Node capabilities
-const nodeCapabilities = ref({
+const nodeCapabilities = ref<{
+  dockerAvailable: boolean
+  dockerVersion: string
+  colimaStatus: string
+  system?: any
+}>({
   dockerAvailable: false,
   dockerVersion: '',
   colimaStatus: ''
@@ -767,7 +772,13 @@ onMounted(async () => {
   try {
     const response = await api.getNodeCapabilities()
     if (response) {
-      nodeCapabilities.value = response
+      // Map snake_case API response to camelCase local state
+      nodeCapabilities.value = {
+        dockerAvailable: response.docker_available,
+        dockerVersion: response.docker_version || '',
+        colimaStatus: response.colima_status || '',
+        system: response.system
+      }
     }
   } catch (error) {
     console.error('Failed to fetch node capabilities:', error)

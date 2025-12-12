@@ -369,6 +369,15 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 
 	// Peer routes (protected with JWT authentication)
 	mux.Handle("/api/peers", s.jwtManager.AuthMiddleware(http.HandlerFunc(s.handlePeers)))
+	// Pattern for /api/peers/{peer_id}/capabilities
+	mux.Handle("/api/peers/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/capabilities") {
+			s.handlePeerCapabilities(w, r)
+		} else {
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
+	})))
 
 	// Services routes (protected with JWT authentication)
 	mux.Handle("/api/services", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

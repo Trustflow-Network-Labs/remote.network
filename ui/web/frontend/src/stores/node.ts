@@ -1,7 +1,6 @@
 import { defineStore } from 'pinia'
 import { api } from '../services/api'
 import { getWebSocketService, MessageType } from '../services/websocket'
-import type { MessageHandler } from '../services/websocket'
 
 export interface NodeStats {
   uptime: number
@@ -18,6 +17,9 @@ export interface NodeState {
   error: string | null
 }
 
+// Track unsubscribe function outside the store
+let _wsUnsubscribe: (() => void) | null = null
+
 export const useNodeStore = defineStore('node', {
   state: (): NodeState => ({
     peerId: null,
@@ -29,9 +31,6 @@ export const useNodeStore = defineStore('node', {
     loading: false,
     error: null
   }),
-
-  // Track unsubscribe function
-  _wsUnsubscribe: null as (() => void) | null,
 
   getters: {
     isNodeReady: (state) => state.peerId !== null,
@@ -90,15 +89,14 @@ export const useNodeStore = defineStore('node', {
       const unsubscribe = wsService.subscribe(MessageType.NODE_STATUS, this.handleNodeStatusUpdate.bind(this))
 
       // Store unsubscribe function
-      ;(this as any)._wsUnsubscribe = unsubscribe
+      _wsUnsubscribe = unsubscribe
     },
 
     // Cleanup WebSocket subscription
     cleanupWebSocket() {
-      const unsubscribe = (this as any)._wsUnsubscribe
-      if (unsubscribe) {
-        unsubscribe()
-        ;(this as any)._wsUnsubscribe = null
+      if (_wsUnsubscribe) {
+        _wsUnsubscribe()
+        _wsUnsubscribe = null
       }
     },
 

@@ -1,9 +1,29 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+
+const STORAGE_KEY = 'ui-expanded-menu-keys'
+
+function loadFromStorage(): Record<string, boolean> {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    return stored ? JSON.parse(stored) : {}
+  } catch {
+    return {}
+  }
+}
 
 export const useUIStore = defineStore('ui', () => {
-  // Navigation menu expanded state
-  const expandedMenuKeys = ref<Record<string, boolean>>({})
+  // Navigation menu expanded state - load from localStorage on init
+  const expandedMenuKeys = ref<Record<string, boolean>>(loadFromStorage())
+
+  // Persist to localStorage whenever expandedMenuKeys changes
+  watch(expandedMenuKeys, (newValue) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(newValue))
+    } catch {
+      // Ignore storage errors
+    }
+  }, { deep: true })
 
   function setExpandedMenuKeys(keys: Record<string, boolean>) {
     expandedMenuKeys.value = keys
@@ -17,10 +37,5 @@ export const useUIStore = defineStore('ui', () => {
     expandedMenuKeys,
     setExpandedMenuKeys,
     toggleMenuKey
-  }
-}, {
-  persist: {
-    storage: localStorage,
-    paths: ['expandedMenuKeys']
   }
 })

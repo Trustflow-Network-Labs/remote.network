@@ -116,6 +116,12 @@
           <Column :header="$t('message.common.actions')">
             <template #body="slotProps">
               <Button
+                icon="pi pi-server"
+                class="p-button-sm p-button-secondary p-button-text"
+                title="View Capabilities"
+                @click="viewPeerCapabilities(slotProps.data)"
+              />
+              <Button
                 icon="pi pi-box"
                 class="p-button-sm p-button-info p-button-text"
                 :label="$t('message.peers.viewServices')"
@@ -138,6 +144,143 @@
           </Column>
         </DataTable>
       </div>
+
+      <!-- Peer Capabilities Dialog -->
+      <Dialog
+        v-model:visible="capabilitiesDialogVisible"
+        :header="'Peer Capabilities: ' + shorten(selectedPeerId, 6, 6)"
+        :style="{ width: '600px' }"
+        :modal="true"
+        :closable="true"
+      >
+        <div v-if="capabilitiesLoading" class="capabilities-loading">
+          <ProgressSpinner style="width:40px;height:40px" strokeWidth="4" />
+          <p>Loading capabilities from DHT...</p>
+        </div>
+
+        <div v-else-if="capabilitiesError" class="capabilities-error">
+          <i class="pi pi-exclamation-triangle"></i>
+          <p>{{ capabilitiesError }}</p>
+        </div>
+
+        <div v-else-if="peerCapabilities" class="capabilities-content">
+          <!-- System Info -->
+          <div class="capabilities-section">
+            <h4><i class="pi pi-desktop"></i> System</h4>
+            <div class="capabilities-grid">
+              <div class="cap-item">
+                <span class="cap-label">Platform</span>
+                <span class="cap-value">{{ peerCapabilities.platform }}</span>
+              </div>
+              <div class="cap-item">
+                <span class="cap-label">Architecture</span>
+                <span class="cap-value">{{ peerCapabilities.architecture }}</span>
+              </div>
+              <div class="cap-item">
+                <span class="cap-label">Kernel</span>
+                <span class="cap-value">{{ peerCapabilities.kernel_version }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- CPU Info -->
+          <div class="capabilities-section">
+            <h4><i class="pi pi-microchip-ai"></i> CPU</h4>
+            <div class="capabilities-grid">
+              <div class="cap-item full-width">
+                <span class="cap-label">Model</span>
+                <span class="cap-value">{{ peerCapabilities.cpu_model }}</span>
+              </div>
+              <div class="cap-item">
+                <span class="cap-label">Cores</span>
+                <span class="cap-value">{{ peerCapabilities.cpu_cores }}</span>
+              </div>
+              <div class="cap-item">
+                <span class="cap-label">Threads</span>
+                <span class="cap-value">{{ peerCapabilities.cpu_threads }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Memory Info -->
+          <div class="capabilities-section">
+            <h4><i class="pi pi-database"></i> Memory</h4>
+            <div class="capabilities-grid">
+              <div class="cap-item">
+                <span class="cap-label">Total</span>
+                <span class="cap-value">{{ formatMemory(peerCapabilities.total_memory_mb) }}</span>
+              </div>
+              <div class="cap-item">
+                <span class="cap-label">Available</span>
+                <span class="cap-value">{{ formatMemory(peerCapabilities.available_memory_mb) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Disk Info -->
+          <div class="capabilities-section">
+            <h4><i class="pi pi-save"></i> Disk</h4>
+            <div class="capabilities-grid">
+              <div class="cap-item">
+                <span class="cap-label">Total</span>
+                <span class="cap-value">{{ formatDisk(peerCapabilities.total_disk_mb) }}</span>
+              </div>
+              <div class="cap-item">
+                <span class="cap-label">Available</span>
+                <span class="cap-value">{{ formatDisk(peerCapabilities.available_disk_mb) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- GPU Info -->
+          <div class="capabilities-section" v-if="peerCapabilities.gpus && peerCapabilities.gpus.length > 0">
+            <h4><i class="pi pi-bolt"></i> GPU(s)</h4>
+            <div v-for="(gpu, index) in peerCapabilities.gpus" :key="index" class="gpu-card">
+              <div class="gpu-header">
+                <span class="gpu-vendor-badge" :class="gpu.vendor">{{ gpu.vendor.toUpperCase() }}</span>
+                <span class="gpu-name">{{ gpu.name }}</span>
+              </div>
+              <div class="capabilities-grid">
+                <div class="cap-item">
+                  <span class="cap-label">Memory</span>
+                  <span class="cap-value">{{ formatMemory(gpu.memory_mb) }}</span>
+                </div>
+                <div class="cap-item" v-if="gpu.driver_version">
+                  <span class="cap-label">Driver</span>
+                  <span class="cap-value">{{ gpu.driver_version }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="capabilities-section" v-else>
+            <h4><i class="pi pi-bolt"></i> GPU</h4>
+            <p class="no-gpu">No GPU detected</p>
+          </div>
+
+          <!-- Software Info -->
+          <div class="capabilities-section">
+            <h4><i class="pi pi-code"></i> Software</h4>
+            <div class="capabilities-grid">
+              <div class="cap-item">
+                <span class="cap-label">Docker</span>
+                <span class="cap-value" :class="{ 'available': peerCapabilities.has_docker }">
+                  {{ peerCapabilities.has_docker ? (peerCapabilities.docker_version || 'Yes') : 'No' }}
+                </span>
+              </div>
+              <div class="cap-item">
+                <span class="cap-label">Python</span>
+                <span class="cap-value" :class="{ 'available': peerCapabilities.has_python }">
+                  {{ peerCapabilities.has_python ? (peerCapabilities.python_version || 'Yes') : 'No' }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <template #footer>
+          <Button label="Close" icon="pi pi-times" @click="capabilitiesDialogVisible = false" text />
+        </template>
+      </Dialog>
     </div>
   </AppLayout>
 </template>
@@ -157,11 +300,13 @@ import ProgressSpinner from 'primevue/progressspinner'
 import Avatar from 'primevue/avatar'
 import OverlayBadge from 'primevue/overlaybadge'
 import InputText from 'primevue/inputtext'
+import Dialog from 'primevue/dialog'
 
 import AppLayout from '../layout/AppLayout.vue'
 import { usePeersStore } from '../../stores/peers'
 import { useClipboard } from '../../composables/useClipboard'
 import { useTextUtils } from '../../composables/useTextUtils'
+import { api, type SystemCapabilities } from '../../services/api'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -177,6 +322,13 @@ const activeFilter = ref<'all' | 'active' | 'blacklisted'>('all')
 const peersFilters = ref({
   peer_id: { value: null, matchMode: FilterMatchMode.CONTAINS }
 })
+
+// Capabilities dialog state
+const capabilitiesDialogVisible = ref(false)
+const capabilitiesLoading = ref(false)
+const capabilitiesError = ref<string | null>(null)
+const selectedPeerId = ref('')
+const peerCapabilities = ref<SystemCapabilities | null>(null)
 
 // Computed properties
 const filteredPeers = computed(() => {
@@ -244,6 +396,48 @@ function viewPeerServices(peer: any) {
   router.push(`/services/peer/${peer.peer_id}`)
 }
 
+async function viewPeerCapabilities(peer: any) {
+  selectedPeerId.value = peer.peer_id
+  capabilitiesDialogVisible.value = true
+  capabilitiesLoading.value = true
+  capabilitiesError.value = null
+  peerCapabilities.value = null
+
+  try {
+    const response = await api.getPeerCapabilities(peer.peer_id)
+    if (response.error) {
+      capabilitiesError.value = response.error
+    } else if (response.capabilities) {
+      peerCapabilities.value = response.capabilities
+    } else {
+      capabilitiesError.value = 'No capabilities data available'
+    }
+  } catch (error: any) {
+    capabilitiesError.value = error.message || 'Failed to fetch capabilities'
+  } finally {
+    capabilitiesLoading.value = false
+  }
+}
+
+function formatMemory(mb: number): string {
+  if (!mb) return 'N/A'
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(1)} GB`
+  }
+  return `${mb} MB`
+}
+
+function formatDisk(mb: number): string {
+  if (!mb) return 'N/A'
+  if (mb >= 1024 * 1024) {
+    return `${(mb / 1024 / 1024).toFixed(1)} TB`
+  }
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(1)} GB`
+  }
+  return `${mb} MB`
+}
+
 function blacklistPeer(peer: any) {
   confirm.require({
     message: t('message.configuration.blacklistConfirm'),
@@ -252,7 +446,7 @@ function blacklistPeer(peer: any) {
     acceptClass: 'p-button-danger',
     accept: async () => {
       try {
-        await peersStore.addToBlacklist(peer.peer_id, 'Blacklisted from peers view')
+        await peersStore.addToBlacklist(peer.peer_id)
         toast.add({
           severity: 'success',
           summary: t('message.common.success'),
@@ -390,10 +584,6 @@ onMounted(async () => {
 
 .peers-table-section {
   margin-bottom: 1.5rem;
-
-  .peers-table {
-    // Table styling handled by PrimeVue
-  }
 }
 
 .empty-state {
@@ -444,6 +634,140 @@ onMounted(async () => {
   &.no-relay {
     background-color: #757575;
     color: white;
+  }
+}
+
+// Capabilities Dialog Styles
+.capabilities-loading,
+.capabilities-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  text-align: center;
+
+  i {
+    font-size: 2.5rem;
+    color: #f59e0b;
+    margin-bottom: 1rem;
+  }
+
+  p {
+    color: vars.$color-text-secondary;
+    margin: 0.5rem 0 0 0;
+  }
+}
+
+.capabilities-content {
+  .capabilities-section {
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+
+    &:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+    }
+
+    h4 {
+      margin: 0 0 0.75rem 0;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #94a3b8;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+
+      i {
+        font-size: 1rem;
+      }
+    }
+  }
+
+  .capabilities-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem;
+  }
+
+  .cap-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+
+    &.full-width {
+      grid-column: span 2;
+    }
+
+    .cap-label {
+      font-size: 0.75rem;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .cap-value {
+      font-size: 0.9rem;
+      color: #e2e8f0;
+      font-family: monospace;
+
+      &.available {
+        color: #4ade80;
+      }
+    }
+  }
+
+  .gpu-card {
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 0.5rem;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+
+    .gpu-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+
+      .gpu-vendor-badge {
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+
+        &.nvidia {
+          background-color: #76b900;
+          color: #000;
+        }
+
+        &.amd {
+          background-color: #ed1c24;
+          color: #fff;
+        }
+
+        &.intel {
+          background-color: #0071c5;
+          color: #fff;
+        }
+      }
+
+      .gpu-name {
+        font-size: 0.85rem;
+        color: #e2e8f0;
+      }
+    }
+  }
+
+  .no-gpu {
+    color: #64748b;
+    font-style: italic;
+    margin: 0;
   }
 }
 </style>

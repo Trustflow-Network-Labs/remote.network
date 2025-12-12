@@ -179,6 +179,99 @@
         </div>
       </div>
 
+      <!-- System Capabilities Section -->
+      <div class="node-stats-section">
+        <div class="node-stats-title">
+          <i class="pi pi-microchip-ai"></i> System Capabilities
+        </div>
+        <div v-if="capabilitiesLoading" class="loading">
+          <ProgressSpinner style="width:40px;height:40px" strokeWidth="4" />
+        </div>
+        <div v-else-if="systemCapabilities" class="capabilities-grid">
+          <!-- System Info -->
+          <div class="capability-group">
+            <div class="capability-group-title">System</div>
+            <div class="capability-item">
+              <span class="cap-label">Platform</span>
+              <span class="cap-value">{{ systemCapabilities.platform }} / {{ systemCapabilities.architecture }}</span>
+            </div>
+          </div>
+
+          <!-- CPU -->
+          <div class="capability-group">
+            <div class="capability-group-title">CPU</div>
+            <div class="capability-item">
+              <span class="cap-label">Model</span>
+              <span class="cap-value">{{ systemCapabilities.cpu_model }}</span>
+            </div>
+            <div class="capability-item">
+              <span class="cap-label">Cores/Threads</span>
+              <span class="cap-value">{{ systemCapabilities.cpu_cores }} / {{ systemCapabilities.cpu_threads }}</span>
+            </div>
+          </div>
+
+          <!-- Memory -->
+          <div class="capability-group">
+            <div class="capability-group-title">Memory</div>
+            <div class="capability-item">
+              <span class="cap-label">Total</span>
+              <span class="cap-value">{{ formatMemory(systemCapabilities.total_memory_mb) }}</span>
+            </div>
+            <div class="capability-item">
+              <span class="cap-label">Available</span>
+              <span class="cap-value">{{ formatMemory(systemCapabilities.available_memory_mb) }}</span>
+            </div>
+          </div>
+
+          <!-- Disk -->
+          <div class="capability-group">
+            <div class="capability-group-title">Disk</div>
+            <div class="capability-item">
+              <span class="cap-label">Total</span>
+              <span class="cap-value">{{ formatDisk(systemCapabilities.total_disk_mb) }}</span>
+            </div>
+            <div class="capability-item">
+              <span class="cap-label">Available</span>
+              <span class="cap-value">{{ formatDisk(systemCapabilities.available_disk_mb) }}</span>
+            </div>
+          </div>
+
+          <!-- GPU -->
+          <div class="capability-group">
+            <div class="capability-group-title">GPU</div>
+            <div v-if="systemCapabilities.gpus && systemCapabilities.gpus.length > 0">
+              <div v-for="(gpu, index) in systemCapabilities.gpus" :key="index" class="capability-item">
+                <span class="cap-label gpu-vendor" :class="gpu.vendor">{{ gpu.vendor.toUpperCase() }}</span>
+                <span class="cap-value">{{ gpu.name }} ({{ formatMemory(gpu.memory_mb) }})</span>
+              </div>
+            </div>
+            <div v-else class="capability-item">
+              <span class="cap-value no-gpu">No GPU detected</span>
+            </div>
+          </div>
+
+          <!-- Software -->
+          <div class="capability-group">
+            <div class="capability-group-title">Software</div>
+            <div class="capability-item">
+              <span class="cap-label">Docker</span>
+              <span class="cap-value" :class="{ available: systemCapabilities.has_docker }">
+                {{ systemCapabilities.has_docker ? (systemCapabilities.docker_version || 'Yes') : 'No' }}
+              </span>
+            </div>
+            <div class="capability-item">
+              <span class="cap-label">Python</span>
+              <span class="cap-value" :class="{ available: systemCapabilities.has_python }">
+                {{ systemCapabilities.has_python ? (systemCapabilities.python_version || 'Yes') : 'No' }}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div v-else class="no-capabilities">
+          <p>Unable to load system capabilities</p>
+        </div>
+      </div>
+
       <!-- Relay Info Section -->
       <RelayInfoSection
         v-if="showRelaySection"
@@ -205,7 +298,7 @@ import { useNodeStore } from '../../stores/node'
 import { usePeersStore } from '../../stores/peers'
 import { useServicesStore } from '../../stores/services'
 import { useWorkflowsStore } from '../../stores/workflows'
-import { api } from '../../services/api'
+import { api, type SystemCapabilities } from '../../services/api'
 import { useClipboard } from '../../composables/useClipboard'
 import { useTextUtils } from '../../composables/useTextUtils'
 import { disconnectWebSocket } from '../../services/websocket'
@@ -219,10 +312,12 @@ const peersStore = usePeersStore()
 const servicesStore = useServicesStore()
 const workflowsStore = useWorkflowsStore()
 const restarting = ref(false)
+
+// System capabilities state
+const capabilitiesLoading = ref(false)
+const systemCapabilities = ref<SystemCapabilities | null>(null)
 const { copyToClipboard } = useClipboard()
 const { shorten } = useTextUtils()
-
-let refreshInterval: number | null = null
 
 const nodeType = computed(() => {
   const stats = nodeStore.stats
@@ -324,8 +419,41 @@ async function loadDashboardData() {
     peersStore.fetchPeers(),
     peersStore.fetchBlacklist(),
     servicesStore.fetchServices(),
-    workflowsStore.fetchWorkflows()
+    workflowsStore.fetchWorkflows(),
+    loadSystemCapabilities()
   ])
+}
+
+async function loadSystemCapabilities() {
+  capabilitiesLoading.value = true
+  try {
+    const response = await api.getNodeCapabilities()
+    systemCapabilities.value = response.system || null
+  } catch (error) {
+    console.error('Failed to load system capabilities:', error)
+    systemCapabilities.value = null
+  } finally {
+    capabilitiesLoading.value = false
+  }
+}
+
+function formatMemory(mb: number): string {
+  if (!mb) return 'N/A'
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(1)} GB`
+  }
+  return `${mb} MB`
+}
+
+function formatDisk(mb: number): string {
+  if (!mb) return 'N/A'
+  if (mb >= 1024 * 1024) {
+    return `${(mb / 1024 / 1024).toFixed(1)} TB`
+  }
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(1)} GB`
+  }
+  return `${mb} MB`
 }
 
 async function restartPeer() {
@@ -659,6 +787,87 @@ onUnmounted(() => {
         }
       }
     }
+  }
+
+  // System Capabilities Grid
+  .capabilities-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1rem;
+    background-color: rgb(38, 49, 65);
+    padding: 1.5rem;
+    border-radius: 4px;
+
+    .capability-group {
+      .capability-group-title {
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.5rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        padding-bottom: 0.25rem;
+      }
+
+      .capability-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.25rem 0;
+
+        .cap-label {
+          font-size: 0.8rem;
+          color: #64748b;
+
+          &.gpu-vendor {
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            font-weight: 700;
+            font-size: 0.7rem;
+
+            &.nvidia {
+              background-color: #76b900;
+              color: #000;
+            }
+
+            &.amd {
+              background-color: #ed1c24;
+              color: #fff;
+            }
+
+            &.intel {
+              background-color: #0071c5;
+              color: #fff;
+            }
+          }
+        }
+
+        .cap-value {
+          font-size: 0.85rem;
+          color: #e2e8f0;
+          font-family: monospace;
+          text-align: right;
+
+          &.available {
+            color: #4ade80;
+          }
+
+          &.no-gpu {
+            color: #64748b;
+            font-style: italic;
+          }
+        }
+      }
+    }
+  }
+
+  .no-capabilities {
+    background-color: rgb(38, 49, 65);
+    padding: 1.5rem;
+    border-radius: 4px;
+    text-align: center;
+    color: #64748b;
   }
 }
 </style>
