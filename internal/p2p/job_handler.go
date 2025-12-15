@@ -144,14 +144,35 @@ func (jmh *JobMessageHandler) HandleRelayedJobMessage(msg *QUICMessage, sourcePe
 	case MessageTypeJobRequest:
 		return jmh.handleRelayedJobRequest(msg, sourcePeerID)
 
+	case MessageTypeJobResponse:
+		// Response to job request - handle as one-way (caller is waiting for this)
+		if err := jmh.handleJobResponse(msg, nil, sourcePeerID); err != nil {
+			jmh.logger.Error(fmt.Sprintf("Failed to handle relayed job response: %v", err), "job_handler")
+		}
+		return nil
+
 	case MessageTypeJobStart:
 		return jmh.handleRelayedJobStart(msg, sourcePeerID)
+
+	case MessageTypeJobStartResponse:
+		// Response to job start - handle as one-way (caller is waiting for this)
+		if err := jmh.handleJobStartResponse(msg, nil, sourcePeerID); err != nil {
+			jmh.logger.Error(fmt.Sprintf("Failed to handle relayed job start response: %v", err), "job_handler")
+		}
+		return nil
 
 	case MessageTypeJobStatusRequest:
 		return jmh.handleRelayedJobStatusRequest(msg, sourcePeerID)
 
 	case MessageTypeJobDataTransferRequest:
 		return jmh.handleRelayedDataTransferRequest(msg, sourcePeerID)
+
+	case MessageTypeJobDataTransferResponse:
+		// Response to data transfer request - handle as one-way (caller is waiting for this)
+		if err := jmh.handleJobDataTransferResponse(msg, nil, sourcePeerID); err != nil {
+			jmh.logger.Error(fmt.Sprintf("Failed to handle relayed data transfer response: %v", err), "job_handler")
+		}
+		return nil
 
 	case MessageTypeJobCancel:
 		return jmh.handleRelayedJobCancel(msg, sourcePeerID)

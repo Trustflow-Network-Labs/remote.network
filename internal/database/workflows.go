@@ -508,11 +508,14 @@ func (sm *SQLiteManager) BuildWorkflowDefinition(workflowID int64, localPeerID s
 
 				// Add source as PROVIDER peer
 				// peer_mount_function is OUTPUT because source sends data
+				// PeerFileName stores the destination filename (what input files will be named)
+				// This allows the receiver to exclude input files from output transfers
 				interfaceMap[interfaceKey].InterfacePeers = append(interfaceMap[interfaceKey].InterfacePeers, InterfacePeerDef{
-					PeerID:         srcPeerID,
+					PeerID:             srcPeerID,
 					PeerWorkflowNodeID: srcJobID,
-					PeerPath:           srcPath, // Source's output path
-					PeerMountFunction:  srcMountFunc, // OUTPUT - source sends
+					PeerPath:           srcPath,                   // Source's output path
+					PeerFileName:       conn.DestinationFileName,  // Filename input files will have at destination
+					PeerMountFunction:  srcMountFunc,              // OUTPUT - source sends
 					DutyAcknowledged:   false,
 				})
 			}

@@ -290,6 +290,9 @@ func (hp *HolePuncher) getPeerMetadata(peerID string) (*database.PeerMetadata, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to get peer from known_peers: %v", err)
 	}
+	if knownPeer == nil {
+		return nil, fmt.Errorf("peer %s not found in known_peers", peerID[:8])
+	}
 
 	if len(knownPeer.PublicKey) == 0 {
 		return nil, fmt.Errorf("peer %s has no public key in known_peers", peerID[:8])
@@ -490,6 +493,9 @@ func (hp *HolePuncher) initiateHolePunch(peerID string, metadata *database.PeerM
 	relayKnownPeer, err := hp.dbManager.KnownPeers.GetKnownPeer(relayNodeID, topic)
 	if err != nil {
 		return fmt.Errorf("failed to get relay peer from known_peers: %v", err)
+	}
+	if relayKnownPeer == nil {
+		return fmt.Errorf("relay peer %s not found in known_peers", relayNodeID[:8])
 	}
 
 	if len(relayKnownPeer.PublicKey) == 0 {

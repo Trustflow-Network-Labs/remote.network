@@ -480,6 +480,7 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 	outputs := []string{}
 	mounts := make(map[string]string)
 	envVars := make(map[string]string)
+	hasOutputMounts := false // Track if any MOUNT interfaces have output peers (for triggering transfer)
 
 	// Relative path prefix for outputs using new hierarchical structure
 	// Pattern: workflows/{orchestrator_peer}/{workflow_job_id}/jobs/{executor_peer}/{job_execution_id}/output
@@ -566,13 +567,15 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 				}
 			}
 
-			// If this mount has output peers, add to outputs array so transferDockerOutputs gets called
-			if hasOutputFunction && iface.Path != "" {
-				outputs = append(outputs, filepath.Join(relPathPrefix, "mount_"+filepath.Base(iface.Path)))
+			// MOUNT outputs are NOT added to the outputs slice - they are transferred separately
+			// by transferDockerOutputs which reads directly from the mount directory
+			if hasOutputFunction {
+				hasOutputMounts = true
 			}
 
-			if hasInputFunction && iface.Path != "" {
+			if hasInputFunction {
 				// Mount for INPUT: mount the mounts directory containing input files
+				// Note: Path can be empty ("") which means mount at root of mounts directory
 				// For remote data transfers, files are stored in hierarchical sender-receiver structure
 				var hostPath string
 
@@ -609,8 +612,9 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 
 				mounts[hostPath] = iface.Path
 				jm.logger.Info(fmt.Sprintf("Adding INPUT mount: %s -> %s", hostPath, iface.Path), "job_manager")
-			} else if iface.Path != "" {
+			} else {
 				// Mount for OUTPUT: mount the mounts directory for output files
+				// Note: Path can be empty ("") which means mount at root of mounts directory
 				// Output always uses the job's own mount path (not hierarchical)
 				hostPath := utils.BuildJobMountPath(appPaths.DataDir, pathInfo, iface.Path)
 
@@ -660,7 +664,8 @@ func (jm *JobManager) executeDockerService(job *database.JobExecution, service *
 	}
 
 	// Transfer outputs to connected jobs/peers
-	if len(outputs) > 0 {
+	// Transfer is needed if we have std outputs (STDOUT/STDERR/LOGS) OR mount outputs
+	if len(outputs) > 0 || hasOutputMounts {
 		err = jm.transferDockerOutputs(job, pathInfo.WorkflowJobID, outputDir)
 		if err != nil {
 			jm.logger.Error(fmt.Sprintf("Failed to transfer outputs: %v", err), "job_manager")
@@ -763,8 +768,9 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 				}
 			}
 
-			if hasOutputPeer && iface.Path != "" {
+			if hasOutputPeer {
 				// This is a MOUNT used for output - find the actual mount directory
+				// Note: Path can be empty ("") which means mount at root of mounts directory
 				// If this mount also received input, it may be in hierarchical transfer path
 				var mountDir string
 
@@ -773,32 +779,19 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 				inputFileNames := make(map[string]bool)
 
 				// Check if any peer is a source (OUTPUT = sends to us, meaning files were received)
+				// The receiver's peer entry for OUTPUT function peers stores PeerFileName
+				// which is the filename the input file was received as
 				var inputPeer *database.JobInterfacePeer
 				for _, peer := range mountPeers {
 					if peer.PeerMountFunction == types.MountFunctionOutput {
 						inputPeer = peer
 
-						// Get the sender's interfaces to find what filename was used for the transfer
-						if peer.PeerJobExecutionID != nil && *peer.PeerJobExecutionID > 0 {
-							senderInterfaces, err := jm.db.GetJobInterfaces(*peer.PeerJobExecutionID)
-							if err == nil {
-								for _, senderIface := range senderInterfaces {
-									senderPeers, err := jm.db.GetJobInterfacePeers(senderIface.ID)
-									if err != nil {
-										continue
-									}
-									for _, senderPeer := range senderPeers {
-										// Find the peer entry that points to this job
-										if senderPeer.PeerJobExecutionID != nil && *senderPeer.PeerJobExecutionID == job.ID {
-											if senderPeer.PeerFileName != nil && *senderPeer.PeerFileName != "" {
-												inputFileNames[*senderPeer.PeerFileName] = true
-												jm.logger.Info(fmt.Sprintf("Excluding input file '%s' from MOUNT output transfer (received from job %d)",
-													*senderPeer.PeerFileName, *peer.PeerJobExecutionID), "job_manager")
-											}
-										}
-									}
-								}
-							}
+						// PeerFileName on receiver's OUTPUT peer entry contains the input filename
+						// This was set during workflow definition from DestinationFileName
+						if peer.PeerFileName != nil && *peer.PeerFileName != "" {
+							inputFileNames[*peer.PeerFileName] = true
+							jm.logger.Info(fmt.Sprintf("Excluding input file '%s' from MOUNT output transfer (received from peer %s)",
+								*peer.PeerFileName, formatPeerID(peer.PeerID)), "job_manager")
 						}
 					}
 				}
@@ -1683,7 +1676,8 @@ func (jm *JobManager) executeStandaloneService(job *database.JobExecution, servi
 			}
 
 			// Process MOUNT interfaces
-			if jobIface.InterfaceType == "MOUNT" && jobIface.Path != "" {
+			// Note: Path can be empty ("") which means mount at root of mounts directory
+			if jobIface.InterfaceType == "MOUNT" {
 				peers, err := jm.db.GetJobInterfacePeers(jobIface.ID)
 				if err == nil && len(peers) > 0 {
 					for _, peer := range peers {
@@ -1788,26 +1782,29 @@ func (jm *JobManager) executeStandaloneService(job *database.JobExecution, servi
 	// Execute service
 	result := jm.standaloneService.ExecuteService(config)
 
-	// Write outputs to files FIRST (before checking errors/exit code)
-	// This ensures we always have diagnostic output for debugging, even when jobs fail
-	if result.Stdout != "" {
-		stdoutPath := filepath.Join(outputDir, "stdout.txt")
-		if err := jm.standaloneService.WriteOutputToFile(stdoutPath, result.Stdout); err != nil {
-			jm.logger.Warn(fmt.Sprintf("Failed to write stdout: %v", err), "job_manager")
-		}
-	}
+	// Write outputs to files based on defined interfaces (matching Docker behavior)
+	// Files are always written when the interface is defined, even if content is empty
+	// This ensures consistent behavior and proper file transfer to connected peers
+	for _, jobIface := range jobInterfaces {
+		var content string
+		var outputPath string
 
-	if result.Stderr != "" {
-		stderrPath := filepath.Join(outputDir, "stderr.txt")
-		if err := jm.standaloneService.WriteOutputToFile(stderrPath, result.Stderr); err != nil {
-			jm.logger.Warn(fmt.Sprintf("Failed to write stderr: %v", err), "job_manager")
+		switch jobIface.InterfaceType {
+		case "STDOUT":
+			content = result.Stdout
+			outputPath = filepath.Join(outputDir, "stdout.txt")
+		case "STDERR":
+			content = result.Stderr
+			outputPath = filepath.Join(outputDir, "stderr.txt")
+		case "LOGS":
+			content = result.Logs
+			outputPath = filepath.Join(outputDir, "logs.txt")
+		default:
+			continue // Skip non-output interfaces (STDIN, MOUNT handled separately)
 		}
-	}
 
-	if result.Logs != "" {
-		logsPath := filepath.Join(outputDir, "logs.txt")
-		if err := jm.standaloneService.WriteOutputToFile(logsPath, result.Logs); err != nil {
-			jm.logger.Warn(fmt.Sprintf("Failed to write logs: %v", err), "job_manager")
+		if err := jm.standaloneService.WriteOutputToFile(outputPath, content); err != nil {
+			jm.logger.Warn(fmt.Sprintf("Failed to write %s: %v", jobIface.InterfaceType, err), "job_manager")
 		}
 	}
 
@@ -2417,6 +2414,15 @@ func (jm *JobManager) HandleJobStart(request *types.JobStartRequest, peerID stri
 	}
 
 	jm.logger.Info(fmt.Sprintf("Interfaces created for job execution %d", request.JobExecutionID), "job_manager")
+
+	// Mark that HandleJobStart (Phase 2) has been received
+	// This prevents checkIdleJobsForReadiness from prematurely setting the job to READY
+	// before interfaces are created
+	err = jm.db.MarkJobStartReceived(job.ID)
+	if err != nil {
+		jm.logger.Warn(fmt.Sprintf("Failed to mark start_received for job %d: %v", job.ID, err), "job_manager")
+		// Non-fatal - continue with status update
+	}
 
 	// Determine the appropriate status based on execution constraint
 	// Now that interfaces are created, we can properly evaluate if the job is ready
@@ -3145,6 +3151,16 @@ func (jm *JobManager) checkIdleJobsForReadiness() {
 	localPeerID := jm.peerManager.GetPeerID()
 
 	for _, job := range jobs {
+		// Skip jobs that haven't received HandleJobStart yet (Phase 2 not complete)
+		// This prevents a race condition where the job is set to READY before interfaces are created.
+		// For remote jobs received via HandleJobRequest, start_received is set to true only after
+		// HandleJobStart is called (which creates interfaces). Without this check, the job could
+		// be set to READY and execute before interfaces exist, causing "no STDOUT interface found" errors.
+		if !job.StartReceived {
+			jm.logger.Debug(fmt.Sprintf("Job %d waiting for HandleJobStart (start_received=false)", job.ID), "job_manager")
+			continue
+		}
+
 		// Check jobs with INPUTS_READY constraint
 		if job.ExecutionConstraint == types.ExecutionConstraintInputsReady {
 			// Skip jobs that should execute on remote peers - the orchestrator cannot check

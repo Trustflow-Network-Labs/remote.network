@@ -20,6 +20,7 @@ type JobExecution struct {
 	Commands             string    `json:"commands,omitempty"`      // JSON array of strings
 	ExecutionConstraint  string    `json:"execution_constraint"`    // NONE, INPUTS_READY
 	ConstraintDetail     string    `json:"constraint_detail,omitempty"`
+	StartReceived        bool      `json:"start_received"`        // True when HandleJobStart has been called (Phase 2 complete)
 	StartedAt            time.Time `json:"started_at,omitempty"`
 	EndedAt              time.Time `json:"ended_at,omitempty"`
 	ErrorMessage         string    `json:"error_message,omitempty"`
@@ -70,6 +71,7 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 		commands TEXT,
 		execution_constraint TEXT CHECK(execution_constraint IN ('NONE', 'INPUTS_READY')) DEFAULT 'NONE',
 		constraint_detail TEXT,
+		start_received INTEGER NOT NULL DEFAULT 0,
 		started_at DATETIME,
 		ended_at DATETIME,
 		error_message TEXT,
@@ -174,7 +176,7 @@ func (sm *SQLiteManager) GetJobExecution(id int64) (*JobExecution, error) {
 	err := sm.db.QueryRow(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
 		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
-		       started_at, ended_at, error_message, created_at, updated_at
+		       start_received, started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE id = ?
 	`, id).Scan(
@@ -189,6 +191,7 @@ func (sm *SQLiteManager) GetJobExecution(id int64) (*JobExecution, error) {
 		&job.Commands,
 		&job.ExecutionConstraint,
 		&job.ConstraintDetail,
+		&job.StartReceived,
 		&startedAt,
 		&endedAt,
 		&errorMsg,
@@ -277,12 +280,30 @@ func (sm *SQLiteManager) UpdateRemoteJobExecutionID(localID int64, remoteID int6
 	return nil
 }
 
+// MarkJobStartReceived marks a job as having received the start command (Phase 2 complete)
+// This is called by HandleJobStart to indicate that interfaces have been created
+func (sm *SQLiteManager) MarkJobStartReceived(id int64) error {
+	_, err := sm.db.Exec(`
+		UPDATE job_executions
+		SET start_received = 1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, id)
+
+	if err != nil {
+		sm.logger.Error(fmt.Sprintf("Failed to mark start_received for job %d: %v", id, err), "database")
+		return err
+	}
+
+	sm.logger.Debug(fmt.Sprintf("Marked start_received=true for job %d", id), "database")
+	return nil
+}
+
 // GetReadyJobs retrieves all jobs with READY status
 func (sm *SQLiteManager) GetReadyJobs() ([]*JobExecution, error) {
 	rows, err := sm.db.Query(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
 		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
-		       started_at, ended_at, error_message, created_at, updated_at
+		       start_received, started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE status = 'READY'
 		ORDER BY created_at ASC
@@ -312,6 +333,7 @@ func (sm *SQLiteManager) GetReadyJobs() ([]*JobExecution, error) {
 			&job.Commands,
 			&job.ExecutionConstraint,
 			&job.ConstraintDetail,
+			&job.StartReceived,
 			&startedAt,
 			&endedAt,
 			&errorMsg,
@@ -347,7 +369,7 @@ func (sm *SQLiteManager) GetJobsByStatus(status string) ([]*JobExecution, error)
 	rows, err := sm.db.Query(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
 		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
-		       started_at, ended_at, error_message, created_at, updated_at
+		       start_received, started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -377,6 +399,7 @@ func (sm *SQLiteManager) GetJobsByStatus(status string) ([]*JobExecution, error)
 			&job.Commands,
 			&job.ExecutionConstraint,
 			&job.ConstraintDetail,
+			&job.StartReceived,
 			&startedAt,
 			&endedAt,
 			&errorMsg,
@@ -658,7 +681,7 @@ func (sm *SQLiteManager) GetJobExecutionByWorkflowJobAndOrderingPeer(workflowJob
 	err := sm.db.QueryRow(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
 		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
-		       started_at, ended_at, error_message, created_at, updated_at
+		       start_received, started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE workflow_job_id = ? AND ordering_peer_id = ?
 		ORDER BY created_at DESC
@@ -675,6 +698,7 @@ func (sm *SQLiteManager) GetJobExecutionByWorkflowJobAndOrderingPeer(workflowJob
 		&job.Commands,
 		&job.ExecutionConstraint,
 		&job.ConstraintDetail,
+		&job.StartReceived,
 		&startedAt,
 		&endedAt,
 		&errorMsg,
@@ -713,7 +737,7 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowJob(workflowJobID int64) ([]*
 	rows, err := sm.db.Query(`
 		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
 		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
-		       started_at, ended_at, error_message, created_at, updated_at
+		       start_received, started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE workflow_job_id = ?
 		ORDER BY created_at ASC
@@ -743,6 +767,7 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowJob(workflowJobID int64) ([]*
 			&job.Commands,
 			&job.ExecutionConstraint,
 			&job.ConstraintDetail,
+			&job.StartReceived,
 			&startedAt,
 			&endedAt,
 			&errorMsg,
@@ -780,7 +805,7 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowID(workflowID int64) ([]*JobE
 		SELECT
 			je.id, je.workflow_job_id, je.service_id, je.executor_peer_id, je.ordering_peer_id,
 			je.remote_job_execution_id, je.status, je.entrypoint, je.commands, je.execution_constraint, je.constraint_detail,
-			je.started_at, je.ended_at, je.error_message, je.created_at, je.updated_at
+			je.start_received, je.started_at, je.ended_at, je.error_message, je.created_at, je.updated_at
 		FROM job_executions je
 		INNER JOIN workflow_jobs wj ON je.workflow_job_id = wj.id
 		WHERE wj.workflow_id = ?
@@ -811,6 +836,7 @@ func (sm *SQLiteManager) GetJobExecutionsByWorkflowID(workflowID int64) ([]*JobE
 			&job.Commands,
 			&job.ExecutionConstraint,
 			&job.ConstraintDetail,
+			&job.StartReceived,
 			&startedAt,
 			&endedAt,
 			&errorMsg,

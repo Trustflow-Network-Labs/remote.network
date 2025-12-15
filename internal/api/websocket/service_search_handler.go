@@ -905,10 +905,15 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 	// Convert to RemoteServiceInfo
 	services := make([]RemoteServiceInfo, 0, len(searchResponse.Services))
 	for _, svc := range searchResponse.Services {
-		// Use peerID if available, otherwise fallback to peerAddr
-		servicePeerID := peerID
+		// Prefer peer ID from response (actual responder) over query target peer ID
+		// This handles cases where query target IP hosts a different peer than expected
+		servicePeerID := searchResponse.PeerID
 		if servicePeerID == "" {
-			servicePeerID = peerAddr
+			// Fall back to query target peer ID, then address
+			servicePeerID = peerID
+			if servicePeerID == "" {
+				servicePeerID = peerAddr
+			}
 		}
 
 		// Convert interfaces from p2p format to API format

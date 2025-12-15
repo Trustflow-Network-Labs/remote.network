@@ -42,6 +42,8 @@ type QUICPeer struct {
 	connMutex       sync.RWMutex
 	tlsConfig   *tls.Config
 	port         int
+	// Our peer ID for including in responses
+	peerID      string
 	// Database manager for peer metadata
 	dbManager   *database.SQLiteManager
 	// DHT peer reference to get node ID
@@ -85,6 +87,7 @@ func NewQUICPeer(config *utils.ConfigManager, logger *utils.LogsManager, paths *
 		peerConnections: make(map[string]string),
 		tlsConfig:       tlsConfig,
 		port:            port,
+		peerID:          keyPair.PeerID(),
 	}
 
 	// Configure mutual TLS (mTLS) authentication
@@ -397,6 +400,11 @@ func (q *QUICPeer) GetJobHandler() *JobMessageHandler {
 	return q.jobHandler
 }
 
+// GetPeerID returns this peer's ID
+func (q *QUICPeer) GetPeerID() string {
+	return q.peerID
+}
+
 // GetConnectionInfo returns connection info for a given remote address
 func (q *QUICPeer) GetConnectionInfo(remoteAddr string) *ConnectionInfo {
 	q.connMutex.RLock()
@@ -608,7 +616,7 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 			response = q.serviceQueryHandler.HandleServiceSearchRequest(msg, remoteAddr)
 		} else {
 			q.logger.Warn(fmt.Sprintf("Received service_request from %s but service query handler not initialized", remoteAddr), "quic")
-			response = CreateServiceSearchResponse(nil, "service discovery not available")
+			response = CreateServiceSearchResponse(nil, q.peerID, "service discovery not available")
 		}
 	case MessageTypePing:
 		response = q.handlePing(msg, remoteAddr)
@@ -650,7 +658,8 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		}
 		shouldCloseStream = false // HolePuncher manages stream lifecycle
 		return
-	case MessageTypeJobRequest, MessageTypeJobResponse, MessageTypeJobStatusUpdate,
+	case MessageTypeJobRequest, MessageTypeJobResponse, MessageTypeJobStart, MessageTypeJobStartResponse,
+		MessageTypeJobStatusRequest, MessageTypeJobStatusUpdate,
 		MessageTypeJobDataTransferRequest, MessageTypeJobDataTransferResponse,
 		MessageTypeJobDataChunk, MessageTypeJobDataTransferComplete, MessageTypeJobCancel:
 		// Job-related messages are handled by the JobMessageHandler
@@ -1274,12 +1283,13 @@ func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage, sourcePeerID string) *
 			return q.serviceQueryHandler.HandleServiceSearchRequest(msg, sourcePeerID)
 		}
 		q.logger.Warn("Received service_request via relay but handler not initialized", "quic")
-		return CreateServiceSearchResponse(nil, "service discovery not available")
+		return CreateServiceSearchResponse(nil, q.peerID, "service discovery not available")
 
-	case MessageTypeJobRequest, MessageTypeJobStart, MessageTypeJobStatusRequest,
-		MessageTypeJobDataTransferRequest, MessageTypeJobCancel,
-		MessageTypeJobStatusUpdate, MessageTypeJobDataChunk, MessageTypeJobDataTransferComplete,
-		MessageTypeJobDataChunkAck, MessageTypeJobDataTransferResume, MessageTypeJobDataTransferStall:
+	case MessageTypeJobRequest, MessageTypeJobResponse, MessageTypeJobStart, MessageTypeJobStartResponse,
+		MessageTypeJobStatusRequest, MessageTypeJobDataTransferRequest, MessageTypeJobDataTransferResponse,
+		MessageTypeJobCancel, MessageTypeJobStatusUpdate, MessageTypeJobDataChunk,
+		MessageTypeJobDataTransferComplete, MessageTypeJobDataChunkAck,
+		MessageTypeJobDataTransferResume, MessageTypeJobDataTransferStall:
 		// Job-related messages forwarded via relay
 		if q.jobHandler != nil {
 			return q.jobHandler.HandleRelayedJobMessage(msg, sourcePeerID)

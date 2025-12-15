@@ -126,7 +126,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 	quic.SetIdentityExchanger(identityExchanger)
 
 	// Initialize service query handler for service discovery
-	serviceQueryHandler := p2p.NewServiceQueryHandler(dbManager, logger)
+	serviceQueryHandler := p2p.NewServiceQueryHandler(dbManager, logger, keyPair.PeerID())
 	quic.SetServiceQueryHandler(serviceQueryHandler)
 	logger.Info("Service query handler initialized for service discovery", "core")
 
@@ -1065,6 +1065,14 @@ func (pm *PeerManager) checkAndResumeActiveTransfers() {
 			// Mark very old transfers as failed
 			if time.Since(transfer.LastActivity) > 5*time.Minute {
 				pm.dbManager.FailTransfer(transfer.TransferID, fmt.Sprintf("Cannot get peer info: %v", err))
+			}
+			continue
+		}
+		if peer == nil {
+			pm.logger.Warn(fmt.Sprintf("Peer %s not found in known_peers database", transfer.DestinationPeerID[:8]), "core")
+			// Mark very old transfers as failed
+			if time.Since(transfer.LastActivity) > 5*time.Minute {
+				pm.dbManager.FailTransfer(transfer.TransferID, "Peer not found in known_peers database")
 			}
 			continue
 		}

@@ -620,7 +620,7 @@ func (rm *RelayManager) handleRelayedMessage(msg *QUICMessage) error {
 							Message:  fmt.Sprintf("Internal error while processing transfer request: %v", r),
 						})
 					case MessageTypeServiceRequest:
-						response = CreateServiceSearchResponse(nil, fmt.Sprintf("Internal error: %v", r))
+						response = CreateServiceSearchResponse(nil, rm.quicPeer.GetPeerID(), fmt.Sprintf("Internal error: %v", r))
 					}
 				}
 			}

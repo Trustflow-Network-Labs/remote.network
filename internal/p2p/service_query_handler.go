@@ -14,16 +14,19 @@ import (
 type ServiceQueryHandler struct {
 	dbManager *database.SQLiteManager
 	logger    *utils.LogsManager
+	peerID    string // Our peer ID to include in responses
 }
 
 // NewServiceQueryHandler creates a new service query handler
 func NewServiceQueryHandler(
 	dbManager *database.SQLiteManager,
 	logger *utils.LogsManager,
+	peerID string,
 ) *ServiceQueryHandler {
 	return &ServiceQueryHandler{
 		dbManager: dbManager,
 		logger:    logger,
+		peerID:    peerID,
 	}
 }
 
@@ -66,6 +69,7 @@ type ServiceInterface struct {
 type ServiceSearchResponse struct {
 	Services []*ServiceSearchResult `json:"services"`
 	Count    int                    `json:"count"`
+	PeerID   string                 `json:"peer_id,omitempty"` // Responding peer's ID for verification
 	Error    string                 `json:"error,omitempty"`
 }
 
@@ -77,7 +81,7 @@ func (sqh *ServiceQueryHandler) HandleServiceSearchRequest(msg *QUICMessage, rem
 	var request ServiceSearchRequest
 	if err := msg.GetDataAs(&request); err != nil {
 		sqh.logger.Error(fmt.Sprintf("Failed to parse service search request from %s: %v", remoteAddr, err), "service-query")
-		return CreateServiceSearchResponse(nil, fmt.Sprintf("invalid request: %v", err))
+		return CreateServiceSearchResponse(nil, sqh.peerID, fmt.Sprintf("invalid request: %v", err))
 	}
 
 	sqh.logger.Info(fmt.Sprintf("Service search request from %s: phrases=%q, type=%q, activeOnly=%v",
@@ -87,7 +91,7 @@ func (sqh *ServiceQueryHandler) HandleServiceSearchRequest(msg *QUICMessage, rem
 	allServices, err := sqh.dbManager.GetAllServices()
 	if err != nil {
 		sqh.logger.Error(fmt.Sprintf("Failed to retrieve services: %v", err), "service-query")
-		return CreateServiceSearchResponse(nil, fmt.Sprintf("database error: %v", err))
+		return CreateServiceSearchResponse(nil, sqh.peerID, fmt.Sprintf("database error: %v", err))
 	}
 
 	// Filter services based on search criteria
@@ -158,7 +162,7 @@ func (sqh *ServiceQueryHandler) HandleServiceSearchRequest(msg *QUICMessage, rem
 
 	sqh.logger.Info(fmt.Sprintf("Service search from %s: found %d matching services", remoteAddr, len(results)), "service-query")
 
-	return CreateServiceSearchResponse(results, "")
+	return CreateServiceSearchResponse(results, sqh.peerID, "")
 }
 
 // filterServices filters services based on search criteria
@@ -240,10 +244,11 @@ func CreateServiceSearchRequest(phrases string, serviceType string, activeOnly b
 }
 
 // CreateServiceSearchResponse creates a service search response message
-func CreateServiceSearchResponse(services []*ServiceSearchResult, errorMsg string) *QUICMessage {
+func CreateServiceSearchResponse(services []*ServiceSearchResult, peerID string, errorMsg string) *QUICMessage {
 	response := ServiceSearchResponse{
 		Services: services,
 		Count:    len(services),
+		PeerID:   peerID,
 		Error:    errorMsg,
 	}
 
