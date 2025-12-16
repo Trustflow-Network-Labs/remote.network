@@ -15,7 +15,7 @@ import (
 type IdentityExchanger struct {
 	keyPair            *crypto.KeyPair
 	dhtNodeID          string // DHT routing node ID
-	dbManager          *database.SQLiteManager
+	knownPeers         *KnownPeersManager
 	logger             *utils.LogsManager
 	config             *utils.ConfigManager
 	metadataFetcher    *MetadataFetcher // For fetching service counts from DHT
@@ -29,7 +29,7 @@ type IdentityExchanger struct {
 func NewIdentityExchanger(
 	keyPair *crypto.KeyPair,
 	dhtNodeID string,
-	dbManager *database.SQLiteManager,
+	knownPeers *KnownPeersManager,
 	logger *utils.LogsManager,
 	config *utils.ConfigManager,
 ) *IdentityExchanger {
@@ -52,7 +52,7 @@ func NewIdentityExchanger(
 	return &IdentityExchanger{
 		keyPair:     keyPair,
 		dhtNodeID:   dhtNodeID,
-		dbManager:   dbManager,
+		knownPeers:  knownPeers,
 		logger:      logger,
 		config:      config,
 		ourNodeType: nodeType,
@@ -74,7 +74,7 @@ func (ie *IdentityExchanger) SetRelayDiscoveryCallback(callback func(*database.P
 // PerformHandshake performs the complete identity + known peers exchange
 // This is called immediately after QUIC connection is established
 //
-func (ie *IdentityExchanger) PerformHandshake(stream *quic.Stream, topic string, remoteAddr string) (*database.KnownPeer, error) {
+func (ie *IdentityExchanger) PerformHandshake(stream *quic.Stream, topic string, remoteAddr string) (*KnownPeer, error) {
 	ie.logger.Debug("Starting Phase 3 handshake (identity + peers exchange)", "identity-exchange")
 
 	// Step 1: Exchange identities
@@ -95,7 +95,7 @@ func (ie *IdentityExchanger) PerformHandshake(stream *quic.Stream, topic string,
 	return remotePeer, nil
 }
 
-func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic string, remoteAddr string) (*database.KnownPeer, error) {
+func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic string, remoteAddr string) (*KnownPeer, error) {
 	// Send our identity
 	ourIdentity := CreateIdentityExchange(
 		ie.keyPair.PeerID(),
@@ -151,7 +151,7 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 
 	// Store peer identity in known_peers database
 	// Note: Service counts are set to 0 initially and will be updated separately if DHT fetch succeeds
-	knownPeer := &database.KnownPeer{
+	knownPeer := &KnownPeer{
 		PeerID:     remoteIdentity.PeerID,
 		DHTNodeID:  remoteIdentity.DHTNodeID,
 		PublicKey:  remoteIdentity.PublicKey,
@@ -163,7 +163,7 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 		Source:     "identity_exchange",
 	}
 
-	if err := ie.dbManager.KnownPeers.StoreKnownPeer(knownPeer); err != nil {
+	if err := ie.knownPeers.StoreKnownPeer(knownPeer); err != nil {
 		return nil, fmt.Errorf("failed to store known peer: %v", err)
 	}
 
@@ -176,7 +176,7 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 		metadata, err := ie.metadataFetcher.GetPeerMetadata(remoteIdentity.PublicKey)
 		if err == nil && metadata != nil {
 			// Successfully fetched metadata, update service counts
-			if err := ie.dbManager.KnownPeers.UpdatePeerServiceCounts(
+			if err := ie.knownPeers.UpdatePeerServiceCounts(
 				remoteIdentity.PeerID,
 				topic,
 				metadata.FilesCount,
@@ -287,7 +287,7 @@ func (ie *IdentityExchanger) exchangeKnownPeers(stream *quic.Stream, topic, remo
 // selectPeersToShare selects known peers to share (recent, exclude list)
 func (ie *IdentityExchanger) selectPeersToShare(topic string, limit int, exclude []string) ([]*KnownPeerEntry, error) {
 	// Get recent known peers from database
-	knownPeers, err := ie.dbManager.KnownPeers.GetRecentKnownPeers(limit+len(exclude), topic)
+	knownPeers, err := ie.knownPeers.GetRecentKnownPeers(limit+len(exclude), topic)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +350,7 @@ func (ie *IdentityExchanger) storeReceivedPeers(peers []*KnownPeerEntry, topic s
 		}
 
 		// Store in database (with default 0 service counts)
-		knownPeer := &database.KnownPeer{
+		knownPeer := &KnownPeer{
 			PeerID:     entry.PeerID,
 			DHTNodeID:  entry.DHTNodeID,
 			PublicKey:  entry.PublicKey,
@@ -362,7 +362,7 @@ func (ie *IdentityExchanger) storeReceivedPeers(peers []*KnownPeerEntry, topic s
 			Source:     "peer_exchange",
 		}
 
-		if err := ie.dbManager.KnownPeers.StoreKnownPeer(knownPeer); err != nil {
+		if err := ie.knownPeers.StoreKnownPeer(knownPeer); err != nil {
 			ie.logger.Debug(fmt.Sprintf("Failed to store peer %s: %v", entry.PeerID[:8], err), "identity-exchange")
 			continue
 		}
@@ -372,7 +372,7 @@ func (ie *IdentityExchanger) storeReceivedPeers(peers []*KnownPeerEntry, topic s
 			metadata, err := ie.metadataFetcher.GetPeerMetadata(entry.PublicKey)
 			if err == nil && metadata != nil {
 				// Successfully fetched metadata, update service counts
-				if err := ie.dbManager.KnownPeers.UpdatePeerServiceCounts(
+				if err := ie.knownPeers.UpdatePeerServiceCounts(
 					entry.PeerID,
 					topic,
 					metadata.FilesCount,

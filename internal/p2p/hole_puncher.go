@@ -36,7 +36,7 @@ type HolePuncher struct {
 	logger          *utils.LogsManager
 	quicPeer        *QUICPeer
 	dhtPeer         *DHTPeer
-	dbManager       *database.SQLiteManager
+	knownPeers      *KnownPeersManager
 	metadataFetcher *MetadataFetcher
 
 	// NAT detection info
@@ -69,7 +69,7 @@ func NewHolePuncher(
 	logger *utils.LogsManager,
 	quicPeer *QUICPeer,
 	dhtPeer *DHTPeer,
-	dbManager *database.SQLiteManager,
+	knownPeers *KnownPeersManager,
 	metadataFetcher *MetadataFetcher,
 	natDetector *NATDetector,
 ) *HolePuncher {
@@ -80,7 +80,7 @@ func NewHolePuncher(
 		logger:          logger,
 		quicPeer:        quicPeer,
 		dhtPeer:         dhtPeer,
-		dbManager:       dbManager,
+		knownPeers:      knownPeers,
 		metadataFetcher: metadataFetcher,
 		natDetector:     natDetector,
 		active:          make(map[string]struct{}),
@@ -286,7 +286,7 @@ func (hp *HolePuncher) getPeerMetadata(peerID string) (*database.PeerMetadata, e
 	topic := topics[0] // Use first topic for now
 
 	// Get peer's public key from known_peers database
-	knownPeer, err := hp.dbManager.KnownPeers.GetKnownPeer(peerID, topic)
+	knownPeer, err := hp.knownPeers.GetKnownPeer(peerID, topic)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get peer from known_peers: %v", err)
 	}
@@ -490,7 +490,7 @@ func (hp *HolePuncher) initiateHolePunch(peerID string, metadata *database.PeerM
 	topic := topics[0]
 
 	// Get relay peer's public key from known_peers
-	relayKnownPeer, err := hp.dbManager.KnownPeers.GetKnownPeer(relayNodeID, topic)
+	relayKnownPeer, err := hp.knownPeers.GetKnownPeer(relayNodeID, topic)
 	if err != nil {
 		return fmt.Errorf("failed to get relay peer from known_peers: %v", err)
 	}

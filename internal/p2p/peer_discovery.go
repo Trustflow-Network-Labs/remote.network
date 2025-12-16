@@ -11,11 +11,11 @@ import (
 
 // PeerDiscoveryService discovers and filters connectable peers
 type PeerDiscoveryService struct {
-	metadataQuery       *MetadataQueryService
+	metadataQuery        *MetadataQueryService
 	connectabilityFilter *ConnectabilityFilter
-	dbManager           *database.SQLiteManager
-	logger              *utils.LogsManager
-	config              *utils.ConfigManager
+	knownPeers           *KnownPeersManager
+	logger               *utils.LogsManager
+	config               *utils.ConfigManager
 }
 
 // DiscoveredPeer represents a peer that has been discovered and filtered
@@ -40,14 +40,14 @@ type DiscoveryOptions struct {
 func NewPeerDiscoveryService(
 	metadataQuery *MetadataQueryService,
 	connectabilityFilter *ConnectabilityFilter,
-	dbManager *database.SQLiteManager,
+	knownPeers *KnownPeersManager,
 	logger *utils.LogsManager,
 	config *utils.ConfigManager,
 ) *PeerDiscoveryService {
 	return &PeerDiscoveryService{
 		metadataQuery:        metadataQuery,
 		connectabilityFilter: connectabilityFilter,
-		dbManager:            dbManager,
+		knownPeers:           knownPeers,
 		logger:               logger,
 		config:               config,
 	}
@@ -105,15 +105,15 @@ func (pds *PeerDiscoveryService) DiscoverPeers(options DiscoveryOptions) ([]*Dis
 }
 
 // getKnownPeersForDiscovery retrieves known peers suitable for discovery
-func (pds *PeerDiscoveryService) getKnownPeersForDiscovery(topic string, limit int) ([]*database.KnownPeer, error) {
+func (pds *PeerDiscoveryService) getKnownPeersForDiscovery(topic string, limit int) ([]*KnownPeer, error) {
 	// Get recent known peers (sorted by last_seen)
-	knownPeers, err := pds.dbManager.KnownPeers.GetRecentKnownPeers(limit, topic)
+	knownPeers, err := pds.knownPeers.GetRecentKnownPeers(limit, topic)
 	if err != nil {
 		return nil, err
 	}
 
 	// Filter out peers without public keys (migrated data)
-	var validPeers []*database.KnownPeer
+	var validPeers []*KnownPeer
 	for _, peer := range knownPeers {
 		if len(peer.PublicKey) == 0 {
 			pds.logger.Debug(fmt.Sprintf("Skipping peer %s without public key", peer.PeerID[:8]), "peer-discovery")
@@ -148,7 +148,7 @@ func (pds *PeerDiscoveryService) createDiscoveryContext(timeout time.Duration) (
 // queryPeerMetadata queries metadata for all known peers
 func (pds *PeerDiscoveryService) queryPeerMetadata(
 	ctx chan struct{},
-	knownPeers []*database.KnownPeer,
+	knownPeers []*KnownPeer,
 	options DiscoveryOptions,
 ) []*DiscoveredPeer {
 	var discovered []*DiscoveredPeer
@@ -160,7 +160,7 @@ func (pds *PeerDiscoveryService) queryPeerMetadata(
 	for _, peer := range knownPeers {
 		wg.Add(1)
 
-		go func(p *database.KnownPeer) {
+		go func(p *KnownPeer) {
 			defer wg.Done()
 
 			// Check timeout
@@ -303,7 +303,7 @@ func (pds *PeerDiscoveryService) RefreshPeerMetadata(peerID string, publicKey []
 // GetDiscoveryStats returns statistics about peer discovery
 func (pds *PeerDiscoveryService) GetDiscoveryStats(topic string) (map[string]interface{}, error) {
 	// Get known peers count
-	knownPeersCount, err := pds.dbManager.KnownPeers.GetKnownPeersCount()
+	knownPeersCount, err := pds.knownPeers.GetKnownPeersCount()
 	if err != nil {
 		return nil, err
 	}

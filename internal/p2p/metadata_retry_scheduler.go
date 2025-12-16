@@ -15,7 +15,7 @@ type MetadataRetryScheduler struct {
 	config          *utils.ConfigManager
 	logger          *utils.LogsManager
 	metadataFetcher *MetadataFetcher
-	dbManager       *database.SQLiteManager
+	knownPeers      *KnownPeersManager
 
 	pendingFetches map[string]*PendingFetch
 	fetchMutex     sync.RWMutex
@@ -39,7 +39,7 @@ func NewMetadataRetryScheduler(
 	config *utils.ConfigManager,
 	logger *utils.LogsManager,
 	metadataFetcher *MetadataFetcher,
-	dbManager *database.SQLiteManager,
+	knownPeers *KnownPeersManager,
 ) *MetadataRetryScheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -47,7 +47,7 @@ func NewMetadataRetryScheduler(
 		config:          config,
 		logger:          logger,
 		metadataFetcher: metadataFetcher,
-		dbManager:       dbManager,
+		knownPeers:      knownPeers,
 		pendingFetches:  make(map[string]*PendingFetch),
 		ctx:             ctx,
 		cancel:          cancel,
@@ -141,7 +141,7 @@ func (mrs *MetadataRetryScheduler) retryPendingFetches() {
 			// Delete from database - get topic from config
 			topics := mrs.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 			if len(topics) > 0 {
-				if err := mrs.dbManager.KnownPeers.DeleteKnownPeer(peerID, topics[0]); err != nil {
+				if err := mrs.knownPeers.DeleteKnownPeer(peerID, topics[0]); err != nil {
 					mrs.logger.Error(fmt.Sprintf("Failed to delete stale peer %s: %v", peerID[:8], err), "metadata-retry")
 				}
 			}
@@ -158,7 +158,7 @@ func (mrs *MetadataRetryScheduler) retryPendingFetches() {
 			// Delete from database - get topic from config
 			topics := mrs.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 			if len(topics) > 0 {
-				if err := mrs.dbManager.KnownPeers.DeleteKnownPeer(peerID, topics[0]); err != nil {
+				if err := mrs.knownPeers.DeleteKnownPeer(peerID, topics[0]); err != nil {
 					mrs.logger.Error(fmt.Sprintf("Failed to delete stale peer %s: %v", peerID[:8], err), "metadata-retry")
 				}
 			}

@@ -19,7 +19,8 @@ import (
 type RelayManager struct {
 	config            *utils.ConfigManager
 	logger            *utils.LogsManager
-	dbManager         *database.SQLiteManager
+	dbManager         *database.SQLiteManager // For RelayDB access
+	knownPeers        *KnownPeersManager
 	keyPair           *crypto.KeyPair
 	quicPeer          *QUICPeer
 	dhtPeer           *DHTPeer
@@ -56,7 +57,7 @@ type RelayManager struct {
 }
 
 // NewRelayManager creates a new relay manager for NAT peers
-func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, keyPair *crypto.KeyPair, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher, metadataFetcher *MetadataFetcher, metadataQuery *MetadataQueryService) *RelayManager {
+func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbManager *database.SQLiteManager, knownPeers *KnownPeersManager, keyPair *crypto.KeyPair, quicPeer *QUICPeer, dhtPeer *DHTPeer, metadataPublisher *MetadataPublisher, metadataFetcher *MetadataFetcher, metadataQuery *MetadataQueryService) *RelayManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Pass our peer ID to selector so it can check for preferred relay
@@ -66,6 +67,7 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 		config:            config,
 		logger:            logger,
 		dbManager:         dbManager,
+		knownPeers:        knownPeers,
 		keyPair:           keyPair,
 		quicPeer:          quicPeer,
 		dhtPeer:           dhtPeer,
@@ -967,7 +969,7 @@ func (rm *RelayManager) rediscoverRelayCandidates() int {
 	addedCount := 0
 	for _, topic := range topics {
 		// Get relay peers from known_peers (which now has is_relay flag)
-		relayPeers, err := rm.dbManager.KnownPeers.GetRelayPeers(topic)
+		relayPeers, err := rm.knownPeers.GetRelayPeers(topic)
 		if err != nil {
 			rm.logger.Warn(fmt.Sprintf("Failed to get relay peers for topic %s: %v", topic, err), "relay-manager")
 			continue

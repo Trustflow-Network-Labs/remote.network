@@ -2804,7 +2804,7 @@ func (jm *JobManager) ensurePeerConnection(peerID string) error {
 	jm.logger.Info(fmt.Sprintf("No existing connection to peer %s, establishing new connection", peerID[:8]), "job_manager")
 
 	// Get peer from known peers
-	peer, err := jm.db.KnownPeers.GetKnownPeer(peerID, "remote-network-mesh")
+	peer, err := jm.peerManager.GetKnownPeers().GetKnownPeer(peerID, "remote-network-mesh")
 	if err != nil || peer == nil {
 		return fmt.Errorf("peer %s not found in known peers", peerID[:8])
 	}

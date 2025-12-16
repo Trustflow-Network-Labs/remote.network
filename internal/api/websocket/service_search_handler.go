@@ -19,6 +19,7 @@ import (
 type ServiceSearchHandler struct {
 	logger        *logrus.Logger
 	dbManager     *database.SQLiteManager
+	knownPeers    *p2p.KnownPeersManager
 	quicPeer      *p2p.QUICPeer
 	metadataQuery *p2p.MetadataQueryService
 	dhtPeer       *p2p.DHTPeer
@@ -30,6 +31,7 @@ type ServiceSearchHandler struct {
 func NewServiceSearchHandler(
 	logger *logrus.Logger,
 	dbManager *database.SQLiteManager,
+	knownPeers *p2p.KnownPeersManager,
 	quicPeer *p2p.QUICPeer,
 	metadataQuery *p2p.MetadataQueryService,
 	dhtPeer *p2p.DHTPeer,
@@ -39,6 +41,7 @@ func NewServiceSearchHandler(
 	return &ServiceSearchHandler{
 		logger:        logger,
 		dbManager:     dbManager,
+		knownPeers:    knownPeers,
 		quicPeer:      quicPeer,
 		metadataQuery: metadataQuery,
 		dhtPeer:       dhtPeer,
@@ -315,7 +318,7 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 		// General search - get all known peers from database
 		// Get configured topic(s) for peer discovery
 		topic := "remote-network-mesh" // Default topic
-		knownPeers, err := ssh.dbManager.KnownPeers.GetKnownPeersByTopic(topic)
+		knownPeers, err := ssh.knownPeers.GetKnownPeersByTopic(topic)
 		if err != nil {
 			ssh.logger.WithError(err).Warn("Failed to get known peers from database for relay query")
 		} else {
@@ -383,7 +386,7 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 		// Always check DHT metadata to determine correct connectivity (even if already in list)
 		{
 			// Get peer from database to query metadata
-			peer, err := ssh.dbManager.KnownPeers.GetKnownPeer(peerID, "remote-network-mesh")
+			peer, err := ssh.knownPeers.GetKnownPeer(peerID, "remote-network-mesh")
 			if err != nil || peer == nil || len(peer.PublicKey) == 0 {
 				ssh.logger.WithError(err).WithField("peer_id", peerID).Debug("Could not get peer from database, skipping")
 				continue
@@ -966,7 +969,7 @@ func (ssh *ServiceSearchHandler) getPeerRelayInfo(peerID string, topic string) (
 	}
 
 	// Get peer from database
-	peer, err := ssh.dbManager.KnownPeers.GetKnownPeer(peerID, topic)
+	peer, err := ssh.knownPeers.GetKnownPeer(peerID, topic)
 	if err != nil {
 		ssh.logger.WithFields(logrus.Fields{
 			"peer_id": peerID[:8],

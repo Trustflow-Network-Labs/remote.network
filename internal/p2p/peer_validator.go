@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -13,7 +12,7 @@ import (
 // Removes peers that haven't been seen in 24h+ and are no longer in DHT
 type PeerValidator struct {
 	metadataFetcher *MetadataFetcher
-	dbManager       *database.SQLiteManager
+	knownPeers      *KnownPeersManager
 	logger          *utils.LogsManager
 	config          *utils.ConfigManager
 
@@ -27,13 +26,13 @@ type PeerValidator struct {
 // NewPeerValidator creates a new peer validator
 func NewPeerValidator(
 	metadataFetcher *MetadataFetcher,
-	dbManager *database.SQLiteManager,
+	knownPeers *KnownPeersManager,
 	logger *utils.LogsManager,
 	config *utils.ConfigManager,
 ) *PeerValidator {
 	return &PeerValidator{
 		metadataFetcher: metadataFetcher,
-		dbManager:       dbManager,
+		knownPeers:      knownPeers,
 		logger:          logger,
 		config:          config,
 		stopChan:        make(chan struct{}),
@@ -47,7 +46,7 @@ func (pv *PeerValidator) ValidateStalePeers(topic string) error {
 	pv.logger.Info("Starting stale peer validation", "peer-validator")
 
 	// Get all known peers for topic
-	knownPeers, err := pv.dbManager.KnownPeers.GetKnownPeersByTopic(topic)
+	knownPeers, err := pv.knownPeers.GetKnownPeersByTopic(topic)
 	if err != nil {
 		return fmt.Errorf("failed to get known peers: %v", err)
 	}
@@ -75,7 +74,7 @@ func (pv *PeerValidator) ValidateStalePeers(topic string) error {
 			pv.logger.Info(fmt.Sprintf("Removing stale peer %s (not found in DHT, last_seen: %v ago)",
 				peer.PeerID[:8], time.Since(peer.LastSeen).Round(time.Hour)), "peer-validator")
 
-			if err := pv.dbManager.KnownPeers.DeleteKnownPeer(peer.PeerID, topic); err != nil {
+			if err := pv.knownPeers.DeleteKnownPeer(peer.PeerID, topic); err != nil {
 				pv.logger.Warn(fmt.Sprintf("Failed to remove stale peer %s: %v", peer.PeerID[:8], err), "peer-validator")
 			} else {
 				removedCount++
@@ -89,13 +88,13 @@ func (pv *PeerValidator) ValidateStalePeers(topic string) error {
 		peer.DHTNodeID = metadata.NodeID // Update DHT node ID from fresh metadata
 
 		// Update peer identity (dht_node_id, last_seen)
-		if err := pv.dbManager.KnownPeers.StoreKnownPeer(peer); err != nil {
+		if err := pv.knownPeers.StoreKnownPeer(peer); err != nil {
 			pv.logger.Warn(fmt.Sprintf("Failed to update validated peer identity %s: %v", peer.PeerID[:8], err), "peer-validator")
 			continue
 		}
 
 		// Update service counts separately from DHT metadata
-		if err := pv.dbManager.KnownPeers.UpdatePeerServiceCounts(peer.PeerID, peer.Topic, metadata.FilesCount, metadata.AppsCount); err != nil {
+		if err := pv.knownPeers.UpdatePeerServiceCounts(peer.PeerID, peer.Topic, metadata.FilesCount, metadata.AppsCount); err != nil {
 			pv.logger.Warn(fmt.Sprintf("Failed to update service counts for validated peer %s: %v", peer.PeerID[:8], err), "peer-validator")
 		} else {
 			pv.logger.Debug(fmt.Sprintf("Validated peer %s (found in DHT, updated last_seen, dht_node_id, and service counts: files=%d, apps=%d)",

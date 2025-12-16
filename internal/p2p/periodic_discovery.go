@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -13,7 +12,7 @@ import (
 // Runs discovery every N hours to find new peers in the network
 type PeriodicDiscovery struct {
 	discoveryService *PeerDiscoveryService
-	dbManager        *database.SQLiteManager
+	knownPeers       *KnownPeersManager
 	logger           *utils.LogsManager
 	config           *utils.ConfigManager
 
@@ -32,13 +31,13 @@ type PeriodicDiscovery struct {
 // NewPeriodicDiscovery creates a new periodic discovery manager
 func NewPeriodicDiscovery(
 	discoveryService *PeerDiscoveryService,
-	dbManager *database.SQLiteManager,
+	knownPeers *KnownPeersManager,
 	logger *utils.LogsManager,
 	config *utils.ConfigManager,
 ) *PeriodicDiscovery {
 	return &PeriodicDiscovery{
 		discoveryService: discoveryService,
-		dbManager:        dbManager,
+		knownPeers:       knownPeers,
 		logger:           logger,
 		config:           config,
 		stopChan:         make(chan struct{}),
@@ -54,7 +53,7 @@ func (pd *PeriodicDiscovery) RunDiscovery(topic string) (int, error) {
 	startTime := time.Now()
 
 	// Get current known peers count (before discovery)
-	beforeCount, err := pd.dbManager.KnownPeers.GetKnownPeersCountByTopic(topic)
+	beforeCount, err := pd.knownPeers.GetKnownPeersCountByTopic(topic)
 	if err != nil {
 		pd.logger.Warn(fmt.Sprintf("Failed to get initial peer count: %v", err), "periodic-discovery")
 		beforeCount = 0
@@ -77,7 +76,7 @@ func (pd *PeriodicDiscovery) RunDiscovery(topic string) (int, error) {
 	}
 
 	// Get new known peers count (after discovery)
-	afterCount, err := pd.dbManager.KnownPeers.GetKnownPeersCountByTopic(topic)
+	afterCount, err := pd.knownPeers.GetKnownPeersCountByTopic(topic)
 	if err != nil {
 		pd.logger.Warn(fmt.Sprintf("Failed to get final peer count: %v", err), "periodic-discovery")
 		afterCount = beforeCount

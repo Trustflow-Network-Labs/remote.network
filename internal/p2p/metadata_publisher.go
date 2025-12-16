@@ -17,7 +17,8 @@ type MetadataPublisher struct {
 	keyPair      *crypto.KeyPair
 	logger       *utils.LogsManager
 	config       *utils.ConfigManager
-	dbManager    *database.SQLiteManager
+	dbManager    *database.SQLiteManager // For service count database access
+	knownPeers   *KnownPeersManager
 
 	// Current metadata state
 	currentMetadata *database.PeerMetadata
@@ -42,6 +43,7 @@ func NewMetadataPublisher(
 	logger *utils.LogsManager,
 	config *utils.ConfigManager,
 	dbManager *database.SQLiteManager,
+	knownPeers *KnownPeersManager,
 ) *MetadataPublisher {
 	return &MetadataPublisher{
 		bep44Manager:    bep44Manager,
@@ -49,6 +51,7 @@ func NewMetadataPublisher(
 		logger:          logger,
 		config:          config,
 		dbManager:       dbManager,
+		knownPeers:      knownPeers,
 		currentSequence: 0,
 		stopChan:        make(chan struct{}),
 	}
@@ -72,7 +75,7 @@ func (mp *MetadataPublisher) PublishMetadata(metadata *database.PeerMetadata) er
 	topic := topics[0] // Use first topic
 
 	// Publish to DHT with store peer discovery
-	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadata, mp.currentSequence, mp.dbManager, topic)
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadata, mp.currentSequence, mp.knownPeers, topic)
 	if err != nil {
 		mp.logger.Error(fmt.Sprintf("Metadata publish FAILED: %v", err), "metadata-publisher")
 		return fmt.Errorf("failed to publish metadata to DHT: %v", err)
@@ -113,7 +116,7 @@ func (mp *MetadataPublisher) UpdateMetadata(metadata *database.PeerMetadata) err
 	topic := topics[0]
 
 	// Publish updated metadata to DHT with store peer discovery
-	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadata, mp.currentSequence, mp.dbManager, topic)
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadata, mp.currentSequence, mp.knownPeers, topic)
 	if err != nil {
 		mp.logger.Error(fmt.Sprintf("Metadata update FAILED: %v", err), "metadata-publisher")
 		return fmt.Errorf("failed to update metadata in DHT: %v", err)
@@ -154,7 +157,7 @@ func (mp *MetadataPublisher) Republish() error {
 	topic := topics[0]
 
 	// Republish with same sequence number (no changes, just keeping it alive)
-	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadata, sequence, mp.dbManager, topic)
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadata, sequence, mp.knownPeers, topic)
 	if err != nil {
 		return fmt.Errorf("failed to republish metadata: %v", err)
 	}
@@ -291,7 +294,7 @@ func (mp *MetadataPublisher) NotifyRelayConnected(relayPeerID, relaySessionID, r
 	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 	topic := topics[0]
 
-	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.dbManager, topic)
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.knownPeers, topic)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata with relay info: %v", err)
 	}
@@ -342,7 +345,7 @@ func (mp *MetadataPublisher) NotifyRelayDisconnected() error {
 	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 	topic := topics[0]
 
-	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.dbManager, topic)
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.knownPeers, topic)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata after relay disconnect: %v", err)
 	}
@@ -381,7 +384,7 @@ func (mp *MetadataPublisher) NotifyIPChange(newPublicIP, newPrivateIP string) er
 	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 	topic := topics[0]
 
-	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.dbManager, topic)
+	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.knownPeers, topic)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata with new IPs: %v", err)
 	}
@@ -424,7 +427,7 @@ func (mp *MetadataPublisher) UpdateServiceMetadata() error {
 	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 	topic := topics[0]
 
-	err = mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.dbManager, topic)
+	err = mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.knownPeers, topic)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata with service counts: %v", err)
 	}

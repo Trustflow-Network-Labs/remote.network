@@ -180,7 +180,7 @@ func (mqs *MetadataQueryService) parseMetadata(data []byte) (*database.PeerMetad
 }
 
 // BatchQueryMetadata queries metadata for multiple peers in parallel
-func (mqs *MetadataQueryService) BatchQueryMetadata(peers []*database.KnownPeer) map[string]*database.PeerMetadata {
+func (mqs *MetadataQueryService) BatchQueryMetadata(peers []*KnownPeer) map[string]*database.PeerMetadata {
 	results := make(map[string]*database.PeerMetadata)
 	resultsMutex := sync.Mutex{}
 
@@ -190,7 +190,7 @@ func (mqs *MetadataQueryService) BatchQueryMetadata(peers []*database.KnownPeer)
 	for _, peer := range peers {
 		wg.Add(1)
 
-		go func(p *database.KnownPeer) {
+		go func(p *KnownPeer) {
 			defer wg.Done()
 
 			semaphore <- struct{}{} // Acquire

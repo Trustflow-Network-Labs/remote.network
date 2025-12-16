@@ -42,7 +42,7 @@ func (s *APIServer) handleNodeStatus(w http.ResponseWriter, r *http.Request) {
 	stats := s.peerManager.GetStats()
 
 	// Get known peers count
-	peersCount, err := s.dbManager.KnownPeers.GetKnownPeersCount()
+	peersCount, err := s.peerManager.GetKnownPeers().GetKnownPeersCount()
 	if err != nil {
 		s.logger.Warn("Failed to get known peers count", "api")
 		peersCount = 0

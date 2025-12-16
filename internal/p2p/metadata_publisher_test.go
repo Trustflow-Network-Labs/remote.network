@@ -187,7 +187,7 @@ func TestMetadataPublisherStopChannel(t *testing.T) {
 	logger := utils.NewLogsManager(cm)
 	keyPair, _ := crypto.GenerateKeypair()
 
-	mp := NewMetadataPublisher(nil, keyPair, logger, cm, nil)
+	mp := NewMetadataPublisher(nil, keyPair, logger, cm, nil, nil)
 
 	// Verify stop channel is initialized
 	if mp.stopChan == nil {
@@ -220,7 +220,7 @@ func TestMetadataPublisherInitialization(t *testing.T) {
 	logger := utils.NewLogsManager(cm)
 	keyPair, _ := crypto.GenerateKeypair()
 
-	mp := NewMetadataPublisher(nil, keyPair, logger, cm, nil)
+	mp := NewMetadataPublisher(nil, keyPair, logger, cm, nil, nil)
 
 	// Verify fields are initialized
 	if mp.keyPair == nil {
@@ -354,7 +354,7 @@ func TestMetadataPublisherFields(t *testing.T) {
 	logger := utils.NewLogsManager(cm)
 	keyPair, _ := crypto.GenerateKeypair()
 
-	mp := NewMetadataPublisher(nil, keyPair, logger, cm, nil)
+	mp := NewMetadataPublisher(nil, keyPair, logger, cm, nil, nil)
 
 	// Test keyPair access
 	if mp.keyPair != keyPair {

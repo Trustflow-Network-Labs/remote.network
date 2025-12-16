@@ -78,7 +78,7 @@ func (e *Emitter) broadcastNodeStatus() {
 			stats := e.peerManager.GetStats()
 
 			// Get known peers count
-			peersCount, err := e.dbManager.KnownPeers.GetKnownPeersCount()
+			peersCount, err := e.peerManager.GetKnownPeers().GetKnownPeersCount()
 			if err != nil {
 				e.logger.WithError(err).Error("Failed to get peers count")
 				peersCount = 0
@@ -136,7 +136,7 @@ func (e *Emitter) broadcastPeers() {
 			}
 
 			// Get known peers from database
-			peers, err := e.dbManager.KnownPeers.GetAllKnownPeers()
+			peers, err := e.peerManager.GetKnownPeers().GetAllKnownPeers()
 			if err != nil {
 				e.logger.WithError(err).Error("Failed to get peers")
 				continue

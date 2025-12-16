@@ -49,7 +49,7 @@ func NewBEP44Manager(dhtPeer *DHTPeer, logger *utils.LogsManager, config *utils.
 // 2. Discover and PUT to known store peers (public peers with -s=true)
 // 3. PUT to bootstrap nodes
 // 4. PUT to public DHT
-func (b *BEP44Manager) PutMutableWithDiscovery(keyPair *crypto.KeyPair, value interface{}, sequence int64, dbManager *database.SQLiteManager, topic string) error {
+func (b *BEP44Manager) PutMutableWithDiscovery(keyPair *crypto.KeyPair, value interface{}, sequence int64, knownPeersManager *KnownPeersManager, topic string) error {
 	// Storage key is SHA1(public_key)
 	storageKey := keyPair.StorageKey()
 
@@ -82,7 +82,7 @@ func (b *BEP44Manager) PutMutableWithDiscovery(keyPair *crypto.KeyPair, value in
 	}
 
 	// Tier 2: Discover store peers and PUT to them
-	storePeers := b.discoverStorePeers(dbManager, topic, 10)
+	storePeers := b.discoverStorePeers(knownPeersManager, topic, 10)
 	storePeerSuccesses := 0
 
 	for _, storePeer := range storePeers {
@@ -736,13 +736,13 @@ type StorePeerInfo struct {
 // 2. For public peers: uses PublicIP:30609
 // 3. Excludes NAT peers (even if is_store=true) as they can't receive direct PUTs
 // 4. Returns best-effort list (skips unreachable peers)
-func (b *BEP44Manager) discoverStorePeers(dbManager *database.SQLiteManager, topic string, maxPeers int) []*StorePeerInfo {
+func (b *BEP44Manager) discoverStorePeers(knownPeersManager *KnownPeersManager, topic string, maxPeers int) []*StorePeerInfo {
 	if maxPeers <= 0 {
 		maxPeers = 10 // Default
 	}
 
 	// Query database for store peers
-	knownPeers, err := dbManager.KnownPeers.GetAllKnownPeers()
+	knownPeers, err := knownPeersManager.GetAllKnownPeers()
 	if err != nil {
 		b.logger.Warn(fmt.Sprintf("Failed to query known_peers: %v", err), "dht-bep44")
 		return nil

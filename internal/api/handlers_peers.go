@@ -39,7 +39,7 @@ func (s *APIServer) handlePeers(w http.ResponseWriter, r *http.Request) {
 	// TODO: Add JWT authentication middleware
 
 	// Get known peers from database
-	knownPeers, err := s.dbManager.KnownPeers.GetAllKnownPeers()
+	knownPeers, err := s.peerManager.GetKnownPeers().GetAllKnownPeers()
 	if err != nil {
 		s.logger.Error("Failed to get known peers", "api")
 		http.Error(w, "Failed to fetch peers", http.StatusInternalServerError)
@@ -113,7 +113,7 @@ func (s *APIServer) handlePeerCapabilities(w http.ResponseWriter, r *http.Reques
 		topic = topics[0]
 	}
 
-	knownPeer, err := s.dbManager.KnownPeers.GetKnownPeer(peerID, topic)
+	knownPeer, err := s.peerManager.GetKnownPeers().GetKnownPeer(peerID, topic)
 	if err != nil {
 		s.logger.Error(fmt.Sprintf("Failed to get peer %s from database: %v", peerID[:min(8, len(peerID))], err), "api")
 		w.Header().Set("Content-Type", "application/json")

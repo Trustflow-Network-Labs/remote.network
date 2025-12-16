@@ -21,8 +21,7 @@ type SQLiteManager struct {
 	logger *utils.LogsManager
 
 	// Specialized managers
-	Relay         *RelayDB
-	KnownPeers    *KnownPeersManager  // Minimal peer identity storage
+	Relay *RelayDB
 }
 
 // NewSQLiteManager creates a new enhanced SQLite manager with peer metadata support
@@ -154,12 +153,6 @@ func (sqlm *SQLiteManager) initializeManagers() error {
 	sqlm.Relay, err = NewRelayDB(sqlm.db, logsManager)
 	if err != nil {
 		return fmt.Errorf("failed to initialize relay database manager: %v", err)
-	}
-
-	// Initialize known peers manager (direct table creation, no migration)
-	sqlm.KnownPeers, err = NewKnownPeersManager(sqlm.db, logsManager)
-	if err != nil {
-		return fmt.Errorf("failed to initialize known peers manager: %v", err)
 	}
 
 	logsManager.Info("Database managers initialized successfully", "database")

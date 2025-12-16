@@ -49,7 +49,8 @@ type PeerManager struct {
 	periodicDiscoveryMgr    *p2p.PeriodicDiscovery
 	connectabilityFilter    *p2p.ConnectabilityFilter
 	peerDiscovery           *p2p.PeerDiscoveryService
-	dbManager             *database.SQLiteManager
+	dbManager               *database.SQLiteManager
+	knownPeers              *p2p.KnownPeersManager
 	// Job and workflow management
 	jobManager            *JobManager
 	workflowManager       *WorkflowManager
@@ -92,6 +93,10 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 		return nil, fmt.Errorf("failed to initialize database manager: %v", err)
 	}
 
+	// Initialize known peers manager (in-memory)
+	knownPeers := p2p.NewKnownPeersManager(logger)
+	logger.Info("Known peers manager initialized (in-memory)", "core")
+
 	// Initialize NAT detector
 	quicPort := config.GetConfigInt("quic_port", 30906, 1024, 65535)
 	natDetector := p2p.NewNATDetector(config, logger, quicPort)
@@ -115,11 +120,11 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 	logger.Info("BEP_44 manager initialized for DHT mutable data", "core")
 
 	// Initialize metadata publisher for publishing our own metadata to DHT
-	metadataPublisher := p2p.NewMetadataPublisher(bep44Manager, keyPair, logger, config, dbManager)
+	metadataPublisher := p2p.NewMetadataPublisher(bep44Manager, keyPair, logger, config, dbManager, knownPeers)
 	logger.Info("Metadata publisher initialized for DHT updates", "core")
 
 	// Initialize identity exchanger for Phase 3 identity + known peers exchange
-	identityExchanger := p2p.NewIdentityExchanger(keyPair, dht.NodeID(), dbManager, logger, config)
+	identityExchanger := p2p.NewIdentityExchanger(keyPair, dht.NodeID(), knownPeers, logger, config)
 	logger.Info("Identity exchanger initialized for QUIC handshakes", "core")
 
 	// Set identity exchanger on QUIC peer
@@ -141,7 +146,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 	identityExchanger.SetMetadataFetcher(metadataFetcher)
 
 	// Initialize metadata retry scheduler for failed metadata fetches
-	metadataRetryScheduler := p2p.NewMetadataRetryScheduler(config, logger, metadataFetcher, dbManager)
+	metadataRetryScheduler := p2p.NewMetadataRetryScheduler(config, logger, metadataFetcher, knownPeers)
 	logger.Info("Metadata retry scheduler initialized", "core")
 
 	// Initialize relay peer/manager (needs metadata publisher and fetcher)
@@ -150,22 +155,22 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 		logger.Info("Relay mode enabled - node will act as relay", "core")
 	} else {
 		// For NAT peers, initialize relay manager for connecting to relays
-		relayManager = p2p.NewRelayManager(config, logger, dbManager, keyPair, quic, dht, metadataPublisher, metadataFetcher, metadataQuery)
+		relayManager = p2p.NewRelayManager(config, logger, dbManager, knownPeers, keyPair, quic, dht, metadataPublisher, metadataFetcher, metadataQuery)
 		logger.Info("Relay manager initialized for NAT peer", "core")
 	}
 
 	// Initialize peer validator for stale peer cleanup (validates 24h+ old peers via DHT)
-	peerValidator := p2p.NewPeerValidator(metadataFetcher, dbManager, logger, config)
+	peerValidator := p2p.NewPeerValidator(metadataFetcher, knownPeers, logger, config)
 	logger.Info("Peer validator initialized (stale peer cleanup via DHT)", "core")
 
 	connectabilityFilter := p2p.NewConnectabilityFilter(logger)
 	logger.Info("Connectability filter initialized (peer reachability detection)", "core")
 
-	peerDiscovery := p2p.NewPeerDiscoveryService(metadataQuery, connectabilityFilter, dbManager, logger, config)
+	peerDiscovery := p2p.NewPeerDiscoveryService(metadataQuery, connectabilityFilter, knownPeers, logger, config)
 	logger.Info("Peer discovery service initialized (on-demand peer filtering)", "core")
 
 	// Initialize periodic discovery for 3-hour DHT rediscovery
-	periodicDiscoveryMgr := p2p.NewPeriodicDiscovery(peerDiscovery, dbManager, logger, config)
+	periodicDiscoveryMgr := p2p.NewPeriodicDiscovery(peerDiscovery, knownPeers, logger, config)
 	logger.Info("Periodic discovery initialized (3-hour DHT rediscovery)", "core")
 
 	// Initialize network state monitor for IP/NAT change detection
@@ -195,6 +200,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 		connectabilityFilter:    connectabilityFilter,
 		peerDiscovery:           peerDiscovery,
 		dbManager:               dbManager,
+		knownPeers:              knownPeers,
 		topics:                  make(map[string]*TopicState),
 		ctx:                     ctx,
 		cancel:                  cancel,
@@ -205,7 +211,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 
 	// Initialize and set hole puncher if not in relay mode
 	if !config.GetConfigBool("relay_mode", false) && config.GetConfigBool("hole_punch_enabled", true) {
-		pm.holePuncher = p2p.NewHolePuncher(config, logger, quic, dht, dbManager, metadataFetcher, natDetector)
+		pm.holePuncher = p2p.NewHolePuncher(config, logger, quic, dht, knownPeers, metadataFetcher, natDetector)
 		quic.SetHolePuncher(pm.holePuncher)
 		logger.Info("Hole puncher initialized for NAT traversal", "core")
 	}
@@ -826,7 +832,7 @@ func (pm *PeerManager) InitializeJobSystem() error {
 	pm.logger.Info("JobMessageHandler created and set on QUIC peer", "core")
 
 	// Set dependencies for relay forwarding
-	jobHandler.SetDependencies(pm.dbManager, pm.metadataQuery, pm.GetPeerID())
+	jobHandler.SetDependencies(pm.dbManager, pm.knownPeers, pm.metadataQuery, pm.GetPeerID())
 	pm.logger.Info("JobMessageHandler dependencies set (relay forwarding enabled)", "core")
 
 	// Set up callbacks for job operations
@@ -913,6 +919,11 @@ func (pm *PeerManager) GetQUICPeer() *p2p.QUICPeer {
 // GetMetadataQueryService returns the metadata query service instance
 func (pm *PeerManager) GetMetadataQueryService() *p2p.MetadataQueryService {
 	return pm.metadataQuery
+}
+
+// GetKnownPeers returns the known peers manager instance
+func (pm *PeerManager) GetKnownPeers() *p2p.KnownPeersManager {
+	return pm.knownPeers
 }
 
 // Job message handler callbacks
@@ -1059,7 +1070,7 @@ func (pm *PeerManager) checkAndResumeActiveTransfers() {
 		pm.logger.Debug(fmt.Sprintf("Querying DHT for fresh metadata of peer %s before resuming transfer", transfer.DestinationPeerID[:8]), "core")
 
 		// Get peer's public key from known_peers
-		peer, err := pm.dbManager.KnownPeers.GetKnownPeer(transfer.DestinationPeerID, "")
+		peer, err := pm.knownPeers.GetKnownPeer(transfer.DestinationPeerID, "")
 		if err != nil {
 			pm.logger.Error(fmt.Sprintf("Failed to get peer %s from known_peers: %v", transfer.DestinationPeerID[:8], err), "core")
 			// Mark very old transfers as failed
@@ -1420,7 +1431,7 @@ func (pm *PeerManager) connectToBootstrapPeers() {
 	topics := pm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 	if len(topics) > 0 {
 		topic := topics[0]
-		peerCount, err := pm.dbManager.KnownPeers.GetKnownPeersCountByTopic(topic)
+		peerCount, err := pm.knownPeers.GetKnownPeersCountByTopic(topic)
 		if err != nil {
 			pm.logger.Error(fmt.Sprintf("Post-bootstrap verification failed: cannot query known_peers: %v", err), "core")
 		} else {
@@ -1449,7 +1460,7 @@ func (pm *PeerManager) periodicBootstrapRequery(topic string) {
 	}
 
 	// Get current peer count from database
-	initialPeers, err := pm.dbManager.KnownPeers.GetKnownPeersByTopic(topic)
+	initialPeers, err := pm.knownPeers.GetKnownPeersByTopic(topic)
 	if err != nil {
 		pm.logger.Error(fmt.Sprintf("Failed to get initial peer count: %v", err), "core")
 		return
@@ -1493,7 +1504,7 @@ func (pm *PeerManager) periodicBootstrapRequery(topic string) {
 	time.Sleep(2 * time.Second)
 
 	// Check if we discovered new peers
-	updatedPeers, err := pm.dbManager.KnownPeers.GetKnownPeersByTopic(topic)
+	updatedPeers, err := pm.knownPeers.GetKnownPeersByTopic(topic)
 	if err != nil {
 		pm.logger.Error(fmt.Sprintf("Failed to get updated peer count: %v", err), "core")
 		return
@@ -1519,7 +1530,7 @@ func (pm *PeerManager) connectToKnownPeers(topic string) {
 	pm.logger.Info("Connecting to known peers with metadata-first strategy...", "core")
 
 	// Get all known peers for the topic from database
-	knownPeers, err := pm.dbManager.KnownPeers.GetKnownPeersByTopic(topic)
+	knownPeers, err := pm.knownPeers.GetKnownPeersByTopic(topic)
 	if err != nil {
 		pm.logger.Error(fmt.Sprintf("Failed to get known peers from database: %v", err), "core")
 		return

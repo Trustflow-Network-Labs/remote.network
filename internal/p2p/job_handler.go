@@ -26,7 +26,8 @@ type JobMessageHandler struct {
 	logger        *utils.LogsManager
 	cm            *utils.ConfigManager
 	quicPeer      *QUICPeer
-	dbManager     *database.SQLiteManager
+	dbManager     *database.SQLiteManager // For transfer database access
+	knownPeers    *KnownPeersManager
 	metadataQuery *MetadataQueryService
 	ourPeerID     string
 	// Callbacks for job operations
@@ -54,8 +55,9 @@ func NewJobMessageHandler(cm *utils.ConfigManager, quicPeer *QUICPeer) *JobMessa
 }
 
 // SetDependencies sets the additional dependencies needed for relay forwarding
-func (jmh *JobMessageHandler) SetDependencies(dbManager *database.SQLiteManager, metadataQuery *MetadataQueryService, ourPeerID string) {
+func (jmh *JobMessageHandler) SetDependencies(dbManager *database.SQLiteManager, knownPeers *KnownPeersManager, metadataQuery *MetadataQueryService, ourPeerID string) {
 	jmh.dbManager = dbManager
+	jmh.knownPeers = knownPeers
 	jmh.metadataQuery = metadataQuery
 	jmh.ourPeerID = ourPeerID
 }
@@ -1278,7 +1280,7 @@ func (jmh *JobMessageHandler) getRelayInfo(peerID string) (relayAddress string, 
 	jmh.logger.Debug(fmt.Sprintf("Querying relay metadata for peer %s (cache miss or expired)", peerID[:8]), "job_handler")
 
 	// Get peer from database
-	peer, err := jmh.dbManager.KnownPeers.GetKnownPeer(peerID, "remote-network-mesh")
+	peer, err := jmh.knownPeers.GetKnownPeer(peerID, "remote-network-mesh")
 	if err != nil || peer == nil || len(peer.PublicKey) == 0 {
 		return "", "", fmt.Errorf("peer %s not found or has no public key", peerID[:8])
 	}
