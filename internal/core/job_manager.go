@@ -887,29 +887,18 @@ func (jm *JobManager) transferDockerOutputs(job *database.JobExecution, workflow
 							}
 						} else {
 							// Collect for remote package transfer
-							// Use peer.PeerPath (receiver's mount path) for destination, not iface.Path (sender's)
-							// The receiver expects files at their mount point, not ours
 							var destPath string
-							peerPath := filepath.Clean(peer.PeerPath)
 
 							if peer.PeerFileName != nil && *peer.PeerFileName != "" {
-								// PeerFileName is set - rename the file directly
-								// This replaces the filename while preserving any directory structure in mountRelPath
-								destDir := filepath.Dir(mountRelPath)
-								if destDir == "." {
-									// File is at mount root - use PeerFileName as the filename
-									destPath = filepath.Join("mounts", *peer.PeerFileName)
-								} else {
-									// File is in a subdirectory - preserve directory, rename file
-									destPath = filepath.Join("mounts", destDir, *peer.PeerFileName)
-								}
+								// PeerFileName is set - rename the file to the specified name at mounts root
+								destPath = filepath.Join("mounts", *peer.PeerFileName)
 								jm.logger.Info(fmt.Sprintf("Remote MOUNT transfer: renaming file '%s' to '%s'", mountRelPath, destPath), "job_manager")
-							} else if peerPath == "." || peerPath == "" {
-								// No rename, destination is mount root
-								destPath = filepath.Join("mounts", mountRelPath)
 							} else {
-								// No rename, use peer's mount path as subdirectory
-								destPath = filepath.Join("mounts", filepath.Base(peerPath), mountRelPath)
+								// No rename - use just the filename, placed at mounts root
+								// mountRelPath may contain subdirectories from Docker's internal structure,
+								// but we only want the filename for the destination
+								destPath = filepath.Join("mounts", filepath.Base(mountRelPath))
+								jm.logger.Debug(fmt.Sprintf("Remote MOUNT transfer: using original filename '%s' -> '%s'", mountRelPath, destPath), "job_manager")
 							}
 
 							remoteOutputs[peer.PeerID] = append(remoteOutputs[peer.PeerID], outputInfo{
@@ -2887,6 +2876,7 @@ func (jm *JobManager) sendJobToRemotePeer(job *database.JobExecution) {
 				PeerWorkflowJobID:  peer.PeerWorkflowJobID,
 				PeerJobExecutionID: peer.PeerJobExecutionID,
 				PeerPath:           peer.PeerPath,
+				PeerFileName:       peer.PeerFileName,
 				PeerMountFunction:  peer.PeerMountFunction,
 				DutyAcknowledged:   peer.DutyAcknowledged,
 			})
