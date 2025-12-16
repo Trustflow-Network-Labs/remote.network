@@ -418,6 +418,31 @@ async function addServiceToWorkflow(service: any, x: number, y: number) {
   }
 }
 
+// Check for and add a picked service from the store (set via Services page "Add to Workflow")
+async function addPickedServiceIfPresent() {
+  const pickedService = workflowsStore.pickedService
+  if (!pickedService) return
+
+  // Calculate a default position for the new service card
+  // Position it to the right of existing cards, or at a default location
+  let x = 250
+  let y = 150
+
+  if (serviceCards.value.length > 0) {
+    // Find the rightmost card and position new card to its right
+    const maxX = Math.max(...serviceCards.value.map(c => c.x || 0))
+    x = maxX + 200
+    // Use similar Y position as existing cards
+    y = serviceCards.value[0].y || 150
+  }
+
+  // Add the service to the workflow
+  await addServiceToWorkflow(pickedService, x, y)
+
+  // Clear the picked service from the store
+  workflowsStore.setPickedService(null)
+}
+
 function initializeDraggableCard(cardId: number, x: number, y: number) {
   const card = serviceCards.value.find(c => c.id === cardId)
   if (!card) {
@@ -805,6 +830,9 @@ function updateSnapToGrid(enabled: boolean) {
 async function loadWorkflow() {
   const workflowId = route.params.id
 
+  // Save picked service before clearing (clearCurrentWorkflow also clears pickedService)
+  const savedPickedService = workflowsStore.pickedService
+
   // Clean up existing UI connections and cards before loading (without deleting from database)
   clearConnectionsUI()
   serviceCards.value = []
@@ -812,10 +840,16 @@ async function loadWorkflow() {
   // Handle new workflow or invalid ID
   if (!workflowId || workflowId === 'design' || workflowId === 'new' || Array.isArray(workflowId)) {
     workflowsStore.clearCurrentWorkflow()
+    // Restore picked service after clearing
+    if (savedPickedService) {
+      workflowsStore.setPickedService(savedPickedService)
+    }
     // Still initialize self-peer for new workflows
     await initializeSelfPeerDraggable()
     await nextTick()
     await setupConnectorHandlers()
+    // Check if there's a picked service to add to a new workflow
+    await addPickedServiceIfPresent()
     return
   }
 
@@ -823,10 +857,16 @@ async function loadWorkflow() {
   const numericId = Number(workflowId)
   if (isNaN(numericId) || numericId <= 0) {
     workflowsStore.clearCurrentWorkflow()
+    // Restore picked service after clearing
+    if (savedPickedService) {
+      workflowsStore.setPickedService(savedPickedService)
+    }
     // Still initialize self-peer for invalid IDs
     await initializeSelfPeerDraggable()
     await nextTick()
     await setupConnectorHandlers()
+    // Check if there's a picked service to add
+    await addPickedServiceIfPresent()
     return
   }
 
@@ -876,6 +916,9 @@ async function loadWorkflow() {
       await nextTick() // Extra tick to ensure everything is ready
       await loadConnections()
     }
+
+    // Check if there's a picked service to add to this workflow
+    await addPickedServiceIfPresent()
   } catch (error: any) {
     toast.add({
       severity: 'error',

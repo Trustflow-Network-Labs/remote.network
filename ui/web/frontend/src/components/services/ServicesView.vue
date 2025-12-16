@@ -40,11 +40,6 @@
                 <i class="pi pi-plus-circle"></i> {{ $t('message.services.addLocalService') }}
               </button>
             </div>
-            <div class="input-box">
-              <button class="btn light" @click="showSearchRemoteDialog = true">
-                <i class="pi pi-search"></i> {{ $t('message.services.searchRemoteService') }}
-              </button>
-            </div>
           </div>
         </div>
 
@@ -102,35 +97,31 @@
                 {{ formatPricing(slotProps.data) }}
               </template>
             </Column>
-            <Column :header="$t('message.common.actions')" :exportable="false" style="min-width:10rem">
+            <Column :header="$t('message.common.actions')" :exportable="false" style="min-width:8rem">
               <template #body="slotProps">
                 <Button
-                  :label="$t('message.services.details')"
                   icon="pi pi-info-circle"
-                  text
-                  size="small"
+                  class="p-button-sm p-button-secondary p-button-text"
+                  :title="$t('message.services.details')"
                   @click.stop="viewServiceDetails(slotProps.data)"
                 />
                 <Button
-                  :label="$t('message.services.changeStatus')"
                   icon="pi pi-sync"
-                  text
-                  size="small"
+                  class="p-button-sm p-button-secondary p-button-text"
+                  :title="$t('message.services.changeStatus')"
                   @click.stop="confirmChangeStatus(slotProps.data)"
                 />
                 <Button
-                  :label="$t('message.services.viewPassphrase')"
-                  icon="pi pi-key"
-                  text
-                  size="small"
-                  @click.stop="viewPassphrase(slotProps.data)"
                   v-if="slotProps.data.service_type === 'DATA'"
+                  icon="pi pi-key"
+                  class="p-button-sm p-button-secondary p-button-text"
+                  :title="$t('message.services.viewPassphrase')"
+                  @click.stop="viewPassphrase(slotProps.data)"
                 />
                 <Button
                   icon="pi pi-trash"
-                  text
-                  rounded
-                  severity="danger"
+                  class="p-button-sm p-button-danger p-button-text"
+                  :title="$t('message.common.delete')"
                   @click.stop="confirmDeleteService(slotProps.data)"
                 />
               </template>
@@ -283,6 +274,60 @@
           <Button :label="$t('message.common.close')" icon="pi pi-times" @click="showPassphraseDialog = false" />
         </template>
       </Dialog>
+
+      <!-- Workflow Selection Dialog -->
+      <Dialog
+        v-model:visible="showWorkflowSelectionDialog"
+        :header="$t('message.services.selectWorkflow')"
+        :modal="true"
+        :style="{ width: '500px' }"
+      >
+        <div class="workflow-selection-content">
+          <p class="workflow-selection-label">{{ $t('message.services.selectWorkflowDescription') }}</p>
+
+          <Listbox
+            v-model="selectedWorkflow"
+            :options="availableWorkflows"
+            optionLabel="name"
+            class="workflow-listbox"
+            :emptyMessage="$t('message.services.noWorkflowsAvailable')"
+          >
+            <template #option="slotProps">
+              <div class="workflow-option">
+                <span class="workflow-name">{{ slotProps.option.name }}</span>
+                <span class="workflow-description" v-if="slotProps.option.description">
+                  {{ slotProps.option.description }}
+                </span>
+              </div>
+            </template>
+          </Listbox>
+        </div>
+
+        <template #footer>
+          <div class="workflow-dialog-footer">
+            <Button
+              :label="$t('message.services.createNewWorkflow')"
+              icon="pi pi-plus"
+              class="p-button-secondary"
+              @click="createNewWorkflowWithService"
+            />
+            <div class="footer-right">
+              <Button
+                :label="$t('message.common.cancel')"
+                icon="pi pi-times"
+                class="p-button-text"
+                @click="showWorkflowSelectionDialog = false"
+              />
+              <Button
+                :label="$t('message.services.addToSelectedWorkflow')"
+                icon="pi pi-check"
+                @click="confirmAddToWorkflow"
+                :disabled="!selectedWorkflow"
+              />
+            </div>
+          </div>
+        </template>
+      </Dialog>
     </div>
   </AppLayout>
 </template>
@@ -305,8 +350,10 @@ import MultiSelect from 'primevue/multiselect'
 
 import AppLayout from '../layout/AppLayout.vue'
 import AddDataServiceDialog from './AddDataServiceDialog.vue'
+import Listbox from 'primevue/listbox'
 import { useServicesStore } from '../../stores/services'
 import { usePeersStore } from '../../stores/peers'
+import { useWorkflowsStore } from '../../stores/workflows'
 import { useClipboard } from '../../composables/useClipboard'
 import { useTextUtils } from '../../composables/useTextUtils'
 
@@ -318,6 +365,7 @@ const toast = useToast()
 
 const servicesStore = useServicesStore() as any // TODO: Fix Pinia typing
 const peersStore = usePeersStore() as any // TODO: Fix Pinia typing
+const workflowsStore = useWorkflowsStore()
 const { copyToClipboard } = useClipboard()
 const { shorten } = useTextUtils()
 
@@ -355,10 +403,18 @@ const pageTitle = computed(() => {
 
 // Dialog states
 const showAddDataServiceDialog = ref(false)
-const showSearchRemoteDialog = ref(false)
 const showPassphraseDialog = ref(false)
+const showWorkflowSelectionDialog = ref(false)
 const currentPassphrase = ref('')
 const selectedService = ref<any>(null)
+const serviceToAddToWorkflow = ref<any>(null)
+const selectedWorkflow = ref<any>(null)
+
+// Computed properties for workflow selection
+const availableWorkflows = computed(() => {
+  // Filter to draft workflows (status is undefined or 'draft')
+  return workflowsStore.workflows.filter((w: any) => !w.status || w.status === 'draft')
+})
 
 // Helper functions
 function truncateDescription(description: string | undefined): string {
@@ -513,14 +569,51 @@ function confirmDeleteService(service: any) {
   })
 }
 
-function addToWorkflow(_service: any) {
-  // TODO: Implement add to workflow functionality
-  toast.add({
-    severity: 'info',
-    summary: t('message.common.info'),
-    detail: 'Add to workflow functionality coming soon',
-    life: 3000
-  })
+async function addToWorkflow(service: any) {
+  // First ensure workflows are loaded
+  if (workflowsStore.workflows.length === 0) {
+    await workflowsStore.fetchWorkflows()
+  }
+
+  // Store the service we want to add
+  serviceToAddToWorkflow.value = service
+
+  // Check if there are any draft workflows to add to
+  if (availableWorkflows.value.length > 0) {
+    // Show workflow selection dialog
+    selectedWorkflow.value = null
+    showWorkflowSelectionDialog.value = true
+  } else {
+    // No workflows - set picked service and navigate to create new workflow
+    workflowsStore.setPickedService(service)
+    router.push('/workflows/design')
+  }
+}
+
+function confirmAddToWorkflow() {
+  if (!selectedWorkflow.value || !serviceToAddToWorkflow.value) {
+    toast.add({
+      severity: 'warn',
+      summary: t('message.common.warning'),
+      detail: t('message.services.selectWorkflowFirst'),
+      life: 3000
+    })
+    return
+  }
+
+  // Set picked service and navigate to the selected workflow
+  workflowsStore.setPickedService(serviceToAddToWorkflow.value)
+  showWorkflowSelectionDialog.value = false
+  router.push(`/workflows/design/${selectedWorkflow.value.id}`)
+}
+
+function createNewWorkflowWithService() {
+  if (!serviceToAddToWorkflow.value) return
+
+  // Set picked service and navigate to create new workflow
+  workflowsStore.setPickedService(serviceToAddToWorkflow.value)
+  showWorkflowSelectionDialog.value = false
+  router.push('/workflows/design')
 }
 
 function onServiceAdded() {
@@ -580,6 +673,14 @@ onMounted(async () => {
     await servicesStore.fetchServices()
     // Fetch peers for the filter
     await peersStore.fetchPeers()
+
+    // Check if peer filter was passed via query parameter
+    const peerQuery = route.query.peer as string
+    if (peerQuery) {
+      selectedPeers.value = [peerQuery]
+      // Auto-trigger search with preselected peer
+      performSearch()
+    }
   }
   // TODO: Fetch peer-specific services when backend API is ready
 })
@@ -895,6 +996,53 @@ onMounted(async () => {
       margin: 0;
       line-height: 1.6;
     }
+  }
+}
+
+// Workflow Selection Dialog
+.workflow-selection-content {
+  display: flex;
+  flex-direction: column;
+  gap: vars.$spacing-md;
+
+  .workflow-selection-label {
+    margin: 0;
+    color: vars.$color-text-secondary;
+  }
+
+  .workflow-listbox {
+    width: 100%;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .workflow-option {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.5rem 0;
+
+    .workflow-name {
+      font-weight: 500;
+      color: vars.$color-text;
+    }
+
+    .workflow-description {
+      font-size: 0.85rem;
+      color: vars.$color-text-secondary;
+    }
+  }
+}
+
+.workflow-dialog-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+
+  .footer-right {
+    display: flex;
+    gap: 0.5rem;
   }
 }
 </style>

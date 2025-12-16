@@ -5,17 +5,17 @@
       <div class="dashboard-controls">
         <div class="dashboard-controls-buttons">
           <div class="input-box">
-            <button class="btn" @click="router.push('/workflows/create')">
+            <button class="btn" @click="router.push('/workflows/design')">
               <i class="pi pi-plus-circle"></i> {{ $t('message.workflows.create') }}
             </button>
           </div>
           <div class="input-box">
-            <button class="btn" @click="router.push('/configuration')">
+            <button class="btn" @click="router.push('/services/add')">
               <i class="pi pi-plus-circle"></i> {{ $t('message.dashboard.addLocalService') }}
             </button>
           </div>
           <div class="input-box">
-            <button class="btn light" @click="searchRemoteServices">
+            <button class="btn light" @click="router.push('/services')">
               <i class="pi pi-search"></i> {{ $t('message.dashboard.searchRemoteService') }}
             </button>
           </div>
@@ -403,15 +403,6 @@ async function copyDhtNodeId() {
   }
 }
 
-function searchRemoteServices() {
-  // TODO: Implement remote service search
-  toast.add({
-    severity: 'info',
-    summary: t('message.common.info'),
-    detail: 'Remote service search coming soon',
-    life: 3000
-  })
-}
 
 async function loadDashboardData() {
   await Promise.all([

@@ -306,6 +306,12 @@ export default {
       changeStatus: 'Change Status',
       viewPassphrase: 'View Passphrase',
       addToWorkflow: 'Add to Workflow',
+      selectWorkflow: 'Select Workflow',
+      selectWorkflowDescription: 'Select a workflow to add this service to, or create a new workflow.',
+      noWorkflowsAvailable: 'No workflows available',
+      selectWorkflowFirst: 'Please select a workflow first',
+      createNewWorkflow: 'Create New Workflow',
+      addToSelectedWorkflow: 'Add to Workflow',
 
       // Service Details Page
       serviceDetails: 'Service Details',
@@ -482,6 +488,8 @@ export default {
       servicesFiles: 'File Services',
       servicesApps: 'App Services',
       viewServices: 'View Services',
+      viewCapabilities: 'View Capabilities',
+      unblacklist: 'Remove from Blacklist',
       noPeers: 'No peers found'
     },
     configuration: {

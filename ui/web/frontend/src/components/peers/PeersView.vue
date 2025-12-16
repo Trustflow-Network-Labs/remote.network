@@ -118,26 +118,27 @@
               <Button
                 icon="pi pi-server"
                 class="p-button-sm p-button-secondary p-button-text"
-                title="View Capabilities"
+                :title="$t('message.peers.viewCapabilities')"
                 @click="viewPeerCapabilities(slotProps.data)"
               />
               <Button
                 icon="pi pi-box"
                 class="p-button-sm p-button-info p-button-text"
-                :label="$t('message.peers.viewServices')"
+                :title="$t('message.peers.viewServices')"
                 @click="viewPeerServices(slotProps.data)"
               />
               <Button
                 v-if="!peersStore.isBlacklisted(slotProps.data.peer_id)"
                 icon="pi pi-ban"
                 class="p-button-sm p-button-danger p-button-text"
-                :label="$t('message.dashboard.blacklist')"
+                :title="$t('message.dashboard.blacklist')"
                 @click="blacklistPeer(slotProps.data)"
               />
               <Button
                 v-else
                 icon="pi pi-check"
                 class="p-button-sm p-button-success p-button-text"
+                :title="$t('message.peers.unblacklist')"
                 @click="unblacklistPeer(slotProps.data)"
               />
             </template>
@@ -393,7 +394,10 @@ function getAppServicesCount(peer: any): number {
 }
 
 function viewPeerServices(peer: any) {
-  router.push(`/services/peer/${peer.peer_id}`)
+  router.push({
+    path: '/services',
+    query: { peer: peer.peer_id }
+  })
 }
 
 async function viewPeerCapabilities(peer: any) {
