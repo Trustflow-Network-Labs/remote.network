@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 )
 
 // handleGetServices returns all services offered by this node
@@ -44,7 +45,7 @@ func (s *APIServer) handleGetServices(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Add Docker details for Docker services
-		if services[i].ServiceType == "DOCKER" {
+		if services[i].ServiceType == types.ServiceTypeDocker {
 			dockerDetails, err := s.dbManager.GetDockerServiceDetails(services[i].ID)
 			if err == nil {
 				enhancedServices[i].DockerDetails = dockerDetails
@@ -148,7 +149,7 @@ func (s *APIServer) handleAddService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Endpoint is required for non-DATA services
-	if service.ServiceType != "DATA" && service.Endpoint == "" {
+	if service.ServiceType != types.ServiceTypeData && service.Endpoint == "" {
 		http.Error(w, "Missing required field: endpoint", http.StatusBadRequest)
 		return
 	}
@@ -312,7 +313,7 @@ func (s *APIServer) handleDeleteService(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// If it's a Docker service, clean up Docker resources
-	if service.ServiceType == "DOCKER" {
+	if service.ServiceType == types.ServiceTypeDocker {
 		dockerDetails, err := s.dbManager.GetDockerServiceDetails(id)
 		if err == nil && dockerDetails != nil && dockerDetails.ImageName != "" {
 			imageName := fmt.Sprintf("%s:%s", dockerDetails.ImageName, dockerDetails.ImageTag)
@@ -435,7 +436,7 @@ func (s *APIServer) handleGetServicePassphrase(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if service.ServiceType != "DATA" {
+	if service.ServiceType != types.ServiceTypeData {
 		http.Error(w, "Passphrase only available for DATA services", http.StatusBadRequest)
 		return
 	}
@@ -537,7 +538,7 @@ func (s *APIServer) updatePeerMetadataAfterServiceChange() {
 // createDefaultServiceInterfaces creates default interfaces for a service based on its type
 // Only DATA services get auto-created interfaces. DOCKER and STANDALONE interfaces are user-defined.
 func (s *APIServer) createDefaultServiceInterfaces(service *database.OfferedService) error {
-	if service.ServiceType != "DATA" {
+	if service.ServiceType != types.ServiceTypeData {
 		// DOCKER and STANDALONE interfaces will be defined by user in service creation wizard
 		return nil
 	}

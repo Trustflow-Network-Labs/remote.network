@@ -246,82 +246,70 @@ func (sm *SQLiteManager) AddWorkflowNode(node *WorkflowNode) error {
 
 // GetWorkflowNodes retrieves all nodes for a workflow
 func (sm *SQLiteManager) GetWorkflowNodes(workflowID int64) ([]*WorkflowNode, error) {
-	rows, err := sm.db.Query(`
-		SELECT id, workflow_id, service_id, peer_id, service_name, service_type, "order", gui_x, gui_y,
+	query := `SELECT id, workflow_id, service_id, peer_id, service_name, service_type, "order", gui_x, gui_y,
 		       input_mapping, output_mapping, interfaces, entrypoint, cmd, pricing_amount, pricing_type, pricing_interval, pricing_unit, created_at, updated_at
 		FROM workflow_nodes
 		WHERE workflow_id = ?
-		ORDER BY "order" ASC
-	`, workflowID)
+		ORDER BY "order" ASC`
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to query workflow nodes: %v", err)
-	}
-	defer rows.Close()
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*WorkflowNode, error) {
+			node := &WorkflowNode{}
+			var inputMappingStr, outputMappingStr, interfacesStr, entrypointStr, cmdStr sql.NullString
+			var pricingType, pricingUnit sql.NullString
+			var pricingInterval sql.NullInt64
 
-	var nodes []*WorkflowNode
-	for rows.Next() {
-		node := &WorkflowNode{}
-		var inputMappingStr, outputMappingStr, interfacesStr, entrypointStr, cmdStr sql.NullString
-		var pricingType, pricingUnit sql.NullString
-		var pricingInterval sql.NullInt64
-
-		err := rows.Scan(
-			&node.ID, &node.WorkflowID, &node.ServiceID, &node.PeerID, &node.ServiceName,
-			&node.ServiceType, &node.Order, &node.GUIX, &node.GUIY,
-			&inputMappingStr, &outputMappingStr, &interfacesStr, &entrypointStr, &cmdStr, &node.PricingAmount, &pricingType, &pricingInterval, &pricingUnit,
-			&node.CreatedAt, &node.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan workflow node: %v", err)
-		}
-
-		// Parse JSON mappings
-		if inputMappingStr.Valid {
-			if err := json.Unmarshal([]byte(inputMappingStr.String), &node.InputMapping); err != nil {
-				node.InputMapping = make(map[string]interface{})
+			err := rows.Scan(
+				&node.ID, &node.WorkflowID, &node.ServiceID, &node.PeerID, &node.ServiceName,
+				&node.ServiceType, &node.Order, &node.GUIX, &node.GUIY,
+				&inputMappingStr, &outputMappingStr, &interfacesStr, &entrypointStr, &cmdStr, &node.PricingAmount, &pricingType, &pricingInterval, &pricingUnit,
+				&node.CreatedAt, &node.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
 			}
-		}
-		if outputMappingStr.Valid {
-			if err := json.Unmarshal([]byte(outputMappingStr.String), &node.OutputMapping); err != nil {
-				node.OutputMapping = make(map[string]interface{})
+
+			// Parse JSON mappings
+			if inputMappingStr.Valid {
+				if err := json.Unmarshal([]byte(inputMappingStr.String), &node.InputMapping); err != nil {
+					node.InputMapping = make(map[string]interface{})
+				}
 			}
-		}
-		if interfacesStr.Valid {
-			if err := json.Unmarshal([]byte(interfacesStr.String), &node.Interfaces); err != nil {
+			if outputMappingStr.Valid {
+				if err := json.Unmarshal([]byte(outputMappingStr.String), &node.OutputMapping); err != nil {
+					node.OutputMapping = make(map[string]interface{})
+				}
+			}
+			if interfacesStr.Valid {
+				if err := json.Unmarshal([]byte(interfacesStr.String), &node.Interfaces); err != nil {
+					node.Interfaces = make([]interface{}, 0)
+				}
+			} else {
 				node.Interfaces = make([]interface{}, 0)
 			}
-		} else {
-			node.Interfaces = make([]interface{}, 0)
-		}
 
-		// Parse entrypoint and cmd JSON arrays
-		if entrypointStr.Valid {
-			if err := json.Unmarshal([]byte(entrypointStr.String), &node.Entrypoint); err != nil {
-				node.Entrypoint = nil
+			// Parse entrypoint and cmd JSON arrays
+			if entrypointStr.Valid {
+				if err := json.Unmarshal([]byte(entrypointStr.String), &node.Entrypoint); err != nil {
+					node.Entrypoint = nil
+				}
 			}
-		}
-		if cmdStr.Valid {
-			if err := json.Unmarshal([]byte(cmdStr.String), &node.Cmd); err != nil {
-				node.Cmd = nil
+			if cmdStr.Valid {
+				if err := json.Unmarshal([]byte(cmdStr.String), &node.Cmd); err != nil {
+					node.Cmd = nil
+				}
 			}
-		}
 
-		// Handle nullable pricing fields
-		if pricingType.Valid {
-			node.PricingType = pricingType.String
-		}
-		if pricingUnit.Valid {
-			node.PricingUnit = pricingUnit.String
-		}
-		if pricingInterval.Valid {
-			node.PricingInterval = int(pricingInterval.Int64)
-		}
+			// Handle nullable pricing fields
+			node.PricingType = ScanNullableString(pricingType)
+			node.PricingUnit = ScanNullableString(pricingUnit)
+			if pricingInterval.Valid {
+				node.PricingInterval = int(pricingInterval.Int64)
+			}
 
-		nodes = append(nodes, node)
-	}
-
-	return nodes, nil
+			return node, nil
+		},
+		sm.logger, "database", workflowID)
 }
 
 // UpdateWorkflowNodeGUIProps updates the GUI position of a workflow node
@@ -384,21 +372,28 @@ func (sm *SQLiteManager) DeleteWorkflowNode(nodeID int64) error {
 
 // GetWorkflowUIState retrieves UI state for a workflow
 func (sm *SQLiteManager) GetWorkflowUIState(workflowID int64) (*WorkflowUIState, error) {
-	state := &WorkflowUIState{}
-	err := sm.db.QueryRow(`
-		SELECT id, workflow_id, snap_to_grid, zoom_level, pan_x, pan_y, self_peer_x, self_peer_y, created_at, updated_at
+	query := `SELECT id, workflow_id, snap_to_grid, zoom_level, pan_x, pan_y, self_peer_x, self_peer_y, created_at, updated_at
 		FROM workflow_ui_state
-		WHERE workflow_id = ?
-	`, workflowID).Scan(
-		&state.ID, &state.WorkflowID, &state.SnapToGrid, &state.ZoomLevel,
-		&state.PanX, &state.PanY, &state.SelfPeerX, &state.SelfPeerY, &state.CreatedAt, &state.UpdatedAt,
-	)
+		WHERE workflow_id = ?`
 
-	if err == sql.ErrNoRows {
+	state, err := QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*WorkflowUIState, error) {
+			var s WorkflowUIState
+			err := row.Scan(
+				&s.ID, &s.WorkflowID, &s.SnapToGrid, &s.ZoomLevel,
+				&s.PanX, &s.PanY, &s.SelfPeerX, &s.SelfPeerY, &s.CreatedAt, &s.UpdatedAt,
+			)
+			return &s, err
+		},
+		sm.logger, "database", workflowID)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workflow UI state: %v", err)
+	}
+
+	if state == nil {
 		// Create default UI state
 		return sm.CreateWorkflowUIState(workflowID)
-	} else if err != nil {
-		return nil, fmt.Errorf("failed to get workflow UI state: %v", err)
 	}
 
 	return state, nil
@@ -481,41 +476,35 @@ func (sm *SQLiteManager) AddWorkflowConnection(conn *WorkflowConnection) error {
 
 // GetWorkflowConnections retrieves all connections for a workflow
 func (sm *SQLiteManager) GetWorkflowConnections(workflowID int64) ([]*WorkflowConnection, error) {
-	rows, err := sm.db.Query(`
-		SELECT id, workflow_id, from_node_id, from_interface_type, to_node_id, to_interface_type, destination_file_name, created_at
+	query := `SELECT id, workflow_id, from_node_id, from_interface_type, to_node_id, to_interface_type, destination_file_name, created_at
 		FROM workflow_connections
-		WHERE workflow_id = ?
-	`, workflowID)
+		WHERE workflow_id = ?`
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to get workflow connections: %v", err)
-	}
-	defer rows.Close()
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*WorkflowConnection, error) {
+			var conn WorkflowConnection
+			var destinationFileName sql.NullString
+			err := rows.Scan(
+				&conn.ID,
+				&conn.WorkflowID,
+				&conn.FromNodeID,
+				&conn.FromInterfaceType,
+				&conn.ToNodeID,
+				&conn.ToInterfaceType,
+				&destinationFileName,
+				&conn.CreatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
 
-	var connections []*WorkflowConnection
-	for rows.Next() {
-		var conn WorkflowConnection
-		var destinationFileName sql.NullString
-		err := rows.Scan(
-			&conn.ID,
-			&conn.WorkflowID,
-			&conn.FromNodeID,
-			&conn.FromInterfaceType,
-			&conn.ToNodeID,
-			&conn.ToInterfaceType,
-			&destinationFileName,
-			&conn.CreatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan workflow connection: %v", err)
-		}
-		if destinationFileName.Valid {
-			conn.DestinationFileName = &destinationFileName.String
-		}
-		connections = append(connections, &conn)
-	}
+			if destinationFileName.Valid {
+				conn.DestinationFileName = &destinationFileName.String
+			}
 
-	return connections, nil
+			return &conn, nil
+		},
+		sm.logger, "database", workflowID)
 }
 
 // DeleteWorkflowConnection deletes a connection by ID

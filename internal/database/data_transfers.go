@@ -203,76 +203,80 @@ func (sm *SQLiteManager) UpdateTransferCheckpoint(transferID string) error {
 
 // GetTransferByID retrieves a transfer by transfer ID
 func (sm *SQLiteManager) GetTransferByID(transferID string) (*DataTransfer, error) {
-	query := `
-		SELECT id, transfer_id, job_execution_id, source_peer_id, destination_peer_id,
+	query := `SELECT id, transfer_id, job_execution_id, source_peer_id, destination_peer_id,
 		       file_path, total_chunks, chunk_size, total_bytes, file_hash, encrypted,
 		       chunks_sent, chunks_received, chunks_acked, bytes_transferred,
 		       status, direction, last_activity, last_checkpoint, error_message,
 		       created_at, updated_at
 		FROM data_transfers
-		WHERE transfer_id = ?
-	`
+		WHERE transfer_id = ?`
 
-	var transfer DataTransfer
-	var chunksSentJSON, chunksReceivedJSON, chunksAckedJSON sql.NullString
-	var lastActivity, lastCheckpoint sql.NullTime
-	var errorMsg sql.NullString
+	result, err := QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*DataTransfer, error) {
+			var transfer DataTransfer
+			var chunksSentJSON, chunksReceivedJSON, chunksAckedJSON sql.NullString
+			var lastActivity, lastCheckpoint sql.NullTime
+			var errorMsg sql.NullString
 
-	err := sm.db.QueryRow(query, transferID).Scan(
-		&transfer.ID,
-		&transfer.TransferID,
-		&transfer.JobExecutionID,
-		&transfer.SourcePeerID,
-		&transfer.DestinationPeerID,
-		&transfer.FilePath,
-		&transfer.TotalChunks,
-		&transfer.ChunkSize,
-		&transfer.TotalBytes,
-		&transfer.FileHash,
-		&transfer.Encrypted,
-		&chunksSentJSON,
-		&chunksReceivedJSON,
-		&chunksAckedJSON,
-		&transfer.BytesTransferred,
-		&transfer.Status,
-		&transfer.Direction,
-		&lastActivity,
-		&lastCheckpoint,
-		&errorMsg,
-		&transfer.CreatedAt,
-		&transfer.UpdatedAt,
-	)
+			err := row.Scan(
+				&transfer.ID,
+				&transfer.TransferID,
+				&transfer.JobExecutionID,
+				&transfer.SourcePeerID,
+				&transfer.DestinationPeerID,
+				&transfer.FilePath,
+				&transfer.TotalChunks,
+				&transfer.ChunkSize,
+				&transfer.TotalBytes,
+				&transfer.FileHash,
+				&transfer.Encrypted,
+				&chunksSentJSON,
+				&chunksReceivedJSON,
+				&chunksAckedJSON,
+				&transfer.BytesTransferred,
+				&transfer.Status,
+				&transfer.Direction,
+				&lastActivity,
+				&lastCheckpoint,
+				&errorMsg,
+				&transfer.CreatedAt,
+				&transfer.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			// Unmarshal chunk arrays
+			if chunksSentJSON.Valid {
+				json.Unmarshal([]byte(chunksSentJSON.String), &transfer.ChunksSent)
+			}
+			if chunksReceivedJSON.Valid {
+				json.Unmarshal([]byte(chunksReceivedJSON.String), &transfer.ChunksReceived)
+			}
+			if chunksAckedJSON.Valid {
+				json.Unmarshal([]byte(chunksAckedJSON.String), &transfer.ChunksAcked)
+			}
+
+			if lastActivity.Valid {
+				transfer.LastActivity = lastActivity.Time
+			}
+			if lastCheckpoint.Valid {
+				transfer.LastCheckpoint = lastCheckpoint.Time
+			}
+			transfer.ErrorMessage = ScanNullableString(errorMsg)
+
+			return &transfer, nil
+		},
+		sm.logger, "database", transferID)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("transfer not found: %s", transferID)
-		}
-		sm.logger.Error(fmt.Sprintf("Failed to get transfer: %v", err), "database")
 		return nil, err
 	}
-
-	// Unmarshal chunk arrays
-	if chunksSentJSON.Valid {
-		json.Unmarshal([]byte(chunksSentJSON.String), &transfer.ChunksSent)
-	}
-	if chunksReceivedJSON.Valid {
-		json.Unmarshal([]byte(chunksReceivedJSON.String), &transfer.ChunksReceived)
-	}
-	if chunksAckedJSON.Valid {
-		json.Unmarshal([]byte(chunksAckedJSON.String), &transfer.ChunksAcked)
+	if result == nil {
+		return nil, fmt.Errorf("transfer not found: %s", transferID)
 	}
 
-	if lastActivity.Valid {
-		transfer.LastActivity = lastActivity.Time
-	}
-	if lastCheckpoint.Valid {
-		transfer.LastCheckpoint = lastCheckpoint.Time
-	}
-	if errorMsg.Valid {
-		transfer.ErrorMessage = errorMsg.String
-	}
-
-	return &transfer, nil
+	return result, nil
 }
 
 // GetActiveTransfers retrieves all active transfers

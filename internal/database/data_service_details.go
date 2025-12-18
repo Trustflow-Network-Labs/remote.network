@@ -99,30 +99,25 @@ func (sm *SQLiteManager) GetDataServiceDetails(serviceID int64) (*DataServiceDet
 		WHERE service_id = ?
 	`
 
-	var details DataServiceDetails
-	err := sm.db.QueryRow(query, serviceID).Scan(
-		&details.ID,
-		&details.ServiceID,
-		&details.FilePath,
-		&details.EncryptedPath,
-		&details.Hash,
-		&details.CompressionType,
-		&details.EncryptionKeyID,
-		&details.SizeBytes,
-		&details.OriginalSizeBytes,
-		&details.UploadCompleted,
-		&details.CreatedAt,
-	)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		sm.logger.Error("Failed to get data service details", "database")
-		return nil, err
-	}
-
-	return &details, nil
+	return QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*DataServiceDetails, error) {
+			var details DataServiceDetails
+			err := row.Scan(
+				&details.ID,
+				&details.ServiceID,
+				&details.FilePath,
+				&details.EncryptedPath,
+				&details.Hash,
+				&details.CompressionType,
+				&details.EncryptionKeyID,
+				&details.SizeBytes,
+				&details.OriginalSizeBytes,
+				&details.UploadCompleted,
+				&details.CreatedAt,
+			)
+			return &details, err
+		},
+		sm.logger, "database", serviceID)
 }
 
 // UpdateDataServiceDetails updates data service details
@@ -134,8 +129,11 @@ func (sm *SQLiteManager) UpdateDataServiceDetails(details *DataServiceDetails) e
 		WHERE id = ?
 	`
 
-	result, err := sm.db.Exec(
+	_, err := ExecWithAffectedRowsCheck(
+		sm.db,
 		query,
+		sm.logger,
+		"database",
 		details.FilePath,
 		details.EncryptedPath,
 		details.Hash,
@@ -147,21 +145,7 @@ func (sm *SQLiteManager) UpdateDataServiceDetails(details *DataServiceDetails) e
 		details.ID,
 	)
 
-	if err != nil {
-		sm.logger.Error("Failed to update data service details", "database")
-		return err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
-	}
-
-	return nil
+	return err
 }
 
 // AddEncryptionKey adds an encryption key to the database
@@ -204,26 +188,32 @@ func (sm *SQLiteManager) GetEncryptionKey(serviceID int64) (*EncryptionKey, erro
 		WHERE service_id = ?
 	`
 
-	var key EncryptionKey
-	err := sm.db.QueryRow(query, serviceID).Scan(
-		&key.ID,
-		&key.ServiceID,
-		&key.PassphraseHash,
-		&key.KeyData,
-		&key.CreatedAt,
-	)
+	key, err := QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*EncryptionKey, error) {
+			var k EncryptionKey
+			err := row.Scan(
+				&k.ID,
+				&k.ServiceID,
+				&k.PassphraseHash,
+				&k.KeyData,
+				&k.CreatedAt,
+			)
+			return &k, err
+		},
+		sm.logger, "database", serviceID)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
-			sm.logger.Warn(fmt.Sprintf("GetEncryptionKey: No encryption key found for service_id=%d (sql.ErrNoRows)", serviceID), "database")
-			return nil, nil
-		}
 		sm.logger.Error(fmt.Sprintf("GetEncryptionKey: Database error for service_id=%d: %v", serviceID, err), "database")
 		return nil, err
 	}
 
+	if key == nil {
+		sm.logger.Warn(fmt.Sprintf("GetEncryptionKey: No encryption key found for service_id=%d (sql.ErrNoRows)", serviceID), "database")
+		return nil, nil
+	}
+
 	sm.logger.Debug(fmt.Sprintf("GetEncryptionKey: Found encryption key id=%d for service_id=%d, key_data_len=%d", key.ID, serviceID, len(key.KeyData)), "database")
-	return &key, nil
+	return key, nil
 }
 
 // CreateUploadSession creates a new upload session
@@ -281,36 +271,31 @@ func (sm *SQLiteManager) GetUploadSession(sessionID string) (*UploadSession, err
 		WHERE session_id = ?
 	`
 
-	var session UploadSession
-	err := sm.db.QueryRow(query, sessionID).Scan(
-		&session.ID,
-		&session.ServiceID,
-		&session.SessionID,
-		&session.UploadGroupID,
-		&session.Filename,
-		&session.FilePath,
-		&session.FileIndex,
-		&session.TotalFiles,
-		&session.ChunkIndex,
-		&session.TotalChunks,
-		&session.BytesUploaded,
-		&session.TotalBytes,
-		&session.ChunkSize,
-		&session.TempFilePath,
-		&session.Status,
-		&session.CreatedAt,
-		&session.UpdatedAt,
-	)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		sm.logger.Error("Failed to get upload session", "database")
-		return nil, err
-	}
-
-	return &session, nil
+	return QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*UploadSession, error) {
+			var session UploadSession
+			err := row.Scan(
+				&session.ID,
+				&session.ServiceID,
+				&session.SessionID,
+				&session.UploadGroupID,
+				&session.Filename,
+				&session.FilePath,
+				&session.FileIndex,
+				&session.TotalFiles,
+				&session.ChunkIndex,
+				&session.TotalChunks,
+				&session.BytesUploaded,
+				&session.TotalBytes,
+				&session.ChunkSize,
+				&session.TempFilePath,
+				&session.Status,
+				&session.CreatedAt,
+				&session.UpdatedAt,
+			)
+			return &session, err
+		},
+		sm.logger, "database", sessionID)
 }
 
 // UpdateUploadSession updates an upload session
@@ -321,8 +306,11 @@ func (sm *SQLiteManager) UpdateUploadSession(session *UploadSession) error {
 		WHERE session_id = ?
 	`
 
-	result, err := sm.db.Exec(
+	_, err := ExecWithAffectedRowsCheck(
+		sm.db,
 		query,
+		sm.logger,
+		"database",
 		session.ChunkIndex,
 		session.BytesUploaded,
 		session.Status,
@@ -330,17 +318,7 @@ func (sm *SQLiteManager) UpdateUploadSession(session *UploadSession) error {
 	)
 
 	if err != nil {
-		sm.logger.Error("Failed to update upload session", "database")
 		return err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
 	}
 
 	session.UpdatedAt = time.Now()
@@ -359,43 +337,31 @@ func (sm *SQLiteManager) GetUploadSessionsByGroup(uploadGroupID string) ([]*Uplo
 		ORDER BY file_index ASC
 	`
 
-	rows, err := sm.db.Query(query, uploadGroupID)
-	if err != nil {
-		sm.logger.Error("Failed to get upload sessions by group", "database")
-		return nil, err
-	}
-	defer rows.Close()
-
-	var sessions []*UploadSession
-	for rows.Next() {
-		var session UploadSession
-		err := rows.Scan(
-			&session.ID,
-			&session.ServiceID,
-			&session.SessionID,
-			&session.UploadGroupID,
-			&session.Filename,
-			&session.FilePath,
-			&session.FileIndex,
-			&session.TotalFiles,
-			&session.ChunkIndex,
-			&session.TotalChunks,
-			&session.BytesUploaded,
-			&session.TotalBytes,
-			&session.ChunkSize,
-			&session.TempFilePath,
-			&session.Status,
-			&session.CreatedAt,
-			&session.UpdatedAt,
-		)
-		if err != nil {
-			sm.logger.Error("Failed to scan upload session", "database")
-			return nil, err
-		}
-		sessions = append(sessions, &session)
-	}
-
-	return sessions, nil
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*UploadSession, error) {
+			var session UploadSession
+			err := rows.Scan(
+				&session.ID,
+				&session.ServiceID,
+				&session.SessionID,
+				&session.UploadGroupID,
+				&session.Filename,
+				&session.FilePath,
+				&session.FileIndex,
+				&session.TotalFiles,
+				&session.ChunkIndex,
+				&session.TotalChunks,
+				&session.BytesUploaded,
+				&session.TotalBytes,
+				&session.ChunkSize,
+				&session.TempFilePath,
+				&session.Status,
+				&session.CreatedAt,
+				&session.UpdatedAt,
+			)
+			return &session, err
+		},
+		sm.logger, "database", uploadGroupID)
 }
 
 // IsUploadGroupComplete checks if all files in an upload group are completed
@@ -423,22 +389,15 @@ func (sm *SQLiteManager) IsUploadGroupComplete(uploadGroupID string) (bool, erro
 func (sm *SQLiteManager) DeleteUploadSession(sessionID string) error {
 	query := `DELETE FROM upload_sessions WHERE session_id = ?`
 
-	result, err := sm.db.Exec(query, sessionID)
-	if err != nil {
-		sm.logger.Error("Failed to delete upload session", "database")
-		return err
-	}
+	_, err := ExecWithAffectedRowsCheck(
+		sm.db,
+		query,
+		sm.logger,
+		"database",
+		sessionID,
+	)
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
-	}
-
-	return nil
+	return err
 }
 
 // GetActiveUploadSessions retrieves all active upload sessions
@@ -452,40 +411,25 @@ func (sm *SQLiteManager) GetActiveUploadSessions() ([]*UploadSession, error) {
 		ORDER BY updated_at DESC
 	`
 
-	rows, err := sm.db.Query(query)
-	if err != nil {
-		sm.logger.Error("Failed to get active upload sessions", "database")
-		return nil, err
-	}
-	defer rows.Close()
-
-	var sessions []*UploadSession
-
-	for rows.Next() {
-		var session UploadSession
-		err := rows.Scan(
-			&session.ID,
-			&session.ServiceID,
-			&session.SessionID,
-			&session.Filename,
-			&session.ChunkIndex,
-			&session.TotalChunks,
-			&session.BytesUploaded,
-			&session.TotalBytes,
-			&session.ChunkSize,
-			&session.TempFilePath,
-			&session.Status,
-			&session.CreatedAt,
-			&session.UpdatedAt,
-		)
-
-		if err != nil {
-			sm.logger.Error("Failed to scan upload session", "database")
-			continue
-		}
-
-		sessions = append(sessions, &session)
-	}
-
-	return sessions, nil
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*UploadSession, error) {
+			var session UploadSession
+			err := rows.Scan(
+				&session.ID,
+				&session.ServiceID,
+				&session.SessionID,
+				&session.Filename,
+				&session.ChunkIndex,
+				&session.TotalChunks,
+				&session.BytesUploaded,
+				&session.TotalBytes,
+				&session.ChunkSize,
+				&session.TempFilePath,
+				&session.Status,
+				&session.CreatedAt,
+				&session.UpdatedAt,
+			)
+			return &session, err
+		},
+		sm.logger, "database")
 }

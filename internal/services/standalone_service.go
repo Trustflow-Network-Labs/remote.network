@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -85,7 +86,7 @@ func (ss *StandaloneService) CreateFromLocal(
 
 	// 4. Create service record
 	service := &database.OfferedService{
-		ServiceType:  "STANDALONE",
+		ServiceType:  types.ServiceTypeStandalone,
 		Type:         "standalone",
 		Name:         serviceName,
 		Description:  description,

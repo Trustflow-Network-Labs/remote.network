@@ -55,6 +55,44 @@ func NewTransferPackageBuilder(
 	}, nil
 }
 
+// StageFileResult contains metadata about a staged file
+type StageFileResult struct {
+	StagingPath string
+	Hash        string
+	SizeBytes   int64
+}
+
+// stageFile is an internal helper that checks existence → copies → hashes → returns metadata
+// This common pattern is used in AddStdOutput and AddMountOutput
+func (b *TransferPackageBuilder) stageFile(sourcePath string, archivePath string) (*StageFileResult, error) {
+	// Check if source file exists
+	fileInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("source file not found: %w", err)
+		}
+		return nil, fmt.Errorf("failed to stat source file: %w", err)
+	}
+
+	// Copy file to staging directory
+	stagingPath := filepath.Join(b.stagingDir, archivePath)
+	if err := CopyFile(sourcePath, stagingPath); err != nil {
+		return nil, fmt.Errorf("failed to copy file to staging: %w", err)
+	}
+
+	// Calculate hash
+	hash, err := HashFileToCID(stagingPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash file: %w", err)
+	}
+
+	return &StageFileResult{
+		StagingPath: stagingPath,
+		Hash:        hash,
+		SizeBytes:   fileInfo.Size(),
+	}, nil
+}
+
 // AddStdOutput adds a standard output file (STDOUT, STDERR, or LOGS) to the package
 func (b *TransferPackageBuilder) AddStdOutput(interfaceType, sourcePath, destPath string) error {
 	// Validate interface type
@@ -62,16 +100,6 @@ func (b *TransferPackageBuilder) AddStdOutput(interfaceType, sourcePath, destPat
 		interfaceType != types.InterfaceTypeStderr &&
 		interfaceType != types.InterfaceTypeLogs {
 		return fmt.Errorf("invalid interface type for std output: %s", interfaceType)
-	}
-
-	// Check if source file exists
-	fileInfo, err := os.Stat(sourcePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			b.logger.Warn(fmt.Sprintf("Source file not found, skipping: %s", sourcePath), "transfer_package")
-			return nil // Skip missing files
-		}
-		return fmt.Errorf("failed to stat source file: %w", err)
 	}
 
 	// Determine archive path based on interface type
@@ -85,16 +113,14 @@ func (b *TransferPackageBuilder) AddStdOutput(interfaceType, sourcePath, destPat
 		archivePath = "logs.txt"
 	}
 
-	// Copy file to staging directory
-	stagingPath := filepath.Join(b.stagingDir, archivePath)
-	if err := copyFile(sourcePath, stagingPath); err != nil {
-		return fmt.Errorf("failed to copy file to staging: %w", err)
-	}
-
-	// Calculate hash
-	hash, err := HashFileToCID(stagingPath)
+	// Stage the file (check exists → copy → hash)
+	result, err := b.stageFile(sourcePath, archivePath)
 	if err != nil {
-		return fmt.Errorf("failed to hash file: %w", err)
+		if os.IsNotExist(err) {
+			b.logger.Warn(fmt.Sprintf("Source file not found, skipping: %s", sourcePath), "transfer_package")
+			return nil // Skip missing files
+		}
+		return err
 	}
 
 	// Add entry to manifest
@@ -102,28 +128,18 @@ func (b *TransferPackageBuilder) AddStdOutput(interfaceType, sourcePath, destPat
 		Type:            interfaceType,
 		ArchivePath:     archivePath,
 		DestinationPath: destPath,
-		SizeBytes:       fileInfo.Size(),
-		Hash:            hash,
+		SizeBytes:       result.SizeBytes,
+		Hash:            result.Hash,
 	})
 
 	b.logger.Info(fmt.Sprintf("Added %s to transfer package: %s (%d bytes)",
-		interfaceType, archivePath, fileInfo.Size()), "transfer_package")
+		interfaceType, archivePath, result.SizeBytes), "transfer_package")
 
 	return nil
 }
 
 // AddMountOutput adds a mount output file to the package
 func (b *TransferPackageBuilder) AddMountOutput(mountPath, sourcePath, destPath string) error {
-	// Check if source file exists
-	fileInfo, err := os.Stat(sourcePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			b.logger.Warn(fmt.Sprintf("Mount source file not found, skipping: %s", sourcePath), "transfer_package")
-			return nil // Skip missing files
-		}
-		return fmt.Errorf("failed to stat mount source file: %w", err)
-	}
-
 	// Create archive path: mounts/<mount_basename>/<filename>
 	mountBasename := filepath.Base(mountPath)
 	fileName := filepath.Base(sourcePath)
@@ -135,16 +151,14 @@ func (b *TransferPackageBuilder) AddMountOutput(mountPath, sourcePath, destPath 
 		return fmt.Errorf("failed to create staging subdirectory: %w", err)
 	}
 
-	// Copy file to staging directory
-	stagingPath := filepath.Join(b.stagingDir, archivePath)
-	if err := copyFile(sourcePath, stagingPath); err != nil {
-		return fmt.Errorf("failed to copy mount file to staging: %w", err)
-	}
-
-	// Calculate hash
-	hash, err := HashFileToCID(stagingPath)
+	// Stage the file (check exists → copy → hash)
+	result, err := b.stageFile(sourcePath, archivePath)
 	if err != nil {
-		return fmt.Errorf("failed to hash mount file: %w", err)
+		if os.IsNotExist(err) {
+			b.logger.Warn(fmt.Sprintf("Mount source file not found, skipping: %s", sourcePath), "transfer_package")
+			return nil // Skip missing files
+		}
+		return err
 	}
 
 	// Add entry to manifest
@@ -153,12 +167,12 @@ func (b *TransferPackageBuilder) AddMountOutput(mountPath, sourcePath, destPath 
 		MountPath:       mountPath,
 		ArchivePath:     archivePath,
 		DestinationPath: destPath,
-		SizeBytes:       fileInfo.Size(),
-		Hash:            hash,
+		SizeBytes:       result.SizeBytes,
+		Hash:            result.Hash,
 	})
 
 	b.logger.Info(fmt.Sprintf("Added MOUNT output to transfer package: %s -> %s (%d bytes)",
-		archivePath, destPath, fileInfo.Size()), "transfer_package")
+		archivePath, destPath, result.SizeBytes), "transfer_package")
 
 	return nil
 }
@@ -398,24 +412,8 @@ func (e *TransferPackageExtractor) ExtractManifestOnly(archivePath string) (*typ
 	return nil, fmt.Errorf("manifest not found in archive")
 }
 
-// copyFile copies a file from src to dst
+// copyFile is deprecated - use CopyFile from file_ops.go instead
+// Kept for backward compatibility, delegates to CopyFile
 func copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer destFile.Close()
-
-	_, err = io.Copy(destFile, sourceFile)
-	if err != nil {
-		return err
-	}
-
-	return destFile.Sync()
+	return CopyFile(src, dst)
 }

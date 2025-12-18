@@ -141,75 +141,75 @@ func (sm *SQLiteManager) AddWorkflow(workflow *Workflow) error {
 
 // GetAllWorkflows retrieves all workflows
 func (sm *SQLiteManager) GetAllWorkflows() ([]*Workflow, error) {
-	rows, err := sm.db.Query("SELECT id, name, description, definition, created_at, updated_at FROM workflows ORDER BY created_at DESC")
-	if err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to get workflows: %v", err), "database")
-		return nil, err
-	}
-	defer rows.Close()
+	query := `SELECT id, name, description, definition, created_at, updated_at FROM workflows ORDER BY created_at DESC`
 
-	var workflows []*Workflow
-	for rows.Next() {
-		var workflow Workflow
-		var definitionJSON string
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*Workflow, error) {
+			var workflow Workflow
+			var definitionJSON string
 
-		err := rows.Scan(
-			&workflow.ID,
-			&workflow.Name,
-			&workflow.Description,
-			&definitionJSON,
-			&workflow.CreatedAt,
-			&workflow.UpdatedAt,
-		)
-		if err != nil {
-			sm.logger.Error(fmt.Sprintf("Failed to scan workflow: %v", err), "database")
-			continue
-		}
+			err := rows.Scan(
+				&workflow.ID,
+				&workflow.Name,
+				&workflow.Description,
+				&definitionJSON,
+				&workflow.CreatedAt,
+				&workflow.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
 
-		// Parse definition JSON
-		if err := json.Unmarshal([]byte(definitionJSON), &workflow.Definition); err != nil {
-			sm.logger.Error(fmt.Sprintf("Failed to unmarshal workflow definition: %v", err), "database")
-			workflow.Definition = make(map[string]interface{})
-		}
+			// Parse definition JSON
+			if err := json.Unmarshal([]byte(definitionJSON), &workflow.Definition); err != nil {
+				sm.logger.Error(fmt.Sprintf("Failed to unmarshal workflow definition: %v", err), "database")
+				workflow.Definition = make(map[string]interface{})
+			}
 
-		workflows = append(workflows, &workflow)
-	}
-
-	return workflows, nil
+			return &workflow, nil
+		},
+		sm.logger, "database")
 }
 
 // GetWorkflowByID retrieves a specific workflow by ID
 func (sm *SQLiteManager) GetWorkflowByID(id int64) (*Workflow, error) {
-	var workflow Workflow
-	var definitionJSON string
+	query := `SELECT id, name, description, definition, created_at, updated_at FROM workflows WHERE id = ?`
 
-	err := sm.db.QueryRow(
-		"SELECT id, name, description, definition, created_at, updated_at FROM workflows WHERE id = ?",
-		id,
-	).Scan(
-		&workflow.ID,
-		&workflow.Name,
-		&workflow.Description,
-		&definitionJSON,
-		&workflow.CreatedAt,
-		&workflow.UpdatedAt,
-	)
+	result, err := QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*Workflow, error) {
+			var workflow Workflow
+			var definitionJSON string
 
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("workflow not found")
-	}
+			err := row.Scan(
+				&workflow.ID,
+				&workflow.Name,
+				&workflow.Description,
+				&definitionJSON,
+				&workflow.CreatedAt,
+				&workflow.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			// Parse definition JSON
+			if err := json.Unmarshal([]byte(definitionJSON), &workflow.Definition); err != nil {
+				sm.logger.Error(fmt.Sprintf("Failed to unmarshal workflow definition: %v", err), "database")
+				workflow.Definition = make(map[string]interface{})
+			}
+
+			return &workflow, nil
+		},
+		sm.logger, "database", id)
+
 	if err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to get workflow: %v", err), "database")
 		return nil, err
 	}
-
-	// Parse definition JSON
-	if err := json.Unmarshal([]byte(definitionJSON), &workflow.Definition); err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to unmarshal workflow definition: %v", err), "database")
-		workflow.Definition = make(map[string]interface{})
+	if result == nil {
+		return nil, fmt.Errorf("workflow not found")
 	}
 
-	return &workflow, nil
+	return result, nil
 }
 
 // UpdateWorkflow updates an existing workflow
@@ -219,25 +219,24 @@ func (sm *SQLiteManager) UpdateWorkflow(id int64, workflow *Workflow) error {
 		return fmt.Errorf("failed to marshal workflow definition: %v", err)
 	}
 
-	result, err := sm.db.Exec(
-		"UPDATE workflows SET name = ?, description = ?, definition = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+	query := `UPDATE workflows SET name = ?, description = ?, definition = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+
+	_, err = ExecWithAffectedRowsCheck(
+		sm.db,
+		query,
+		sm.logger,
+		"database",
 		workflow.Name,
 		workflow.Description,
 		string(definitionJSON),
 		id,
 	)
-	if err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to update workflow: %v", err), "database")
-		return err
-	}
 
-	rowsAffected, err := result.RowsAffected()
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("workflow not found")
+		}
 		return err
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("workflow not found")
 	}
 
 	sm.logger.Info(fmt.Sprintf("Workflow updated successfully: ID %d", id), "database")
@@ -246,19 +245,21 @@ func (sm *SQLiteManager) UpdateWorkflow(id int64, workflow *Workflow) error {
 
 // DeleteWorkflow deletes a workflow
 func (sm *SQLiteManager) DeleteWorkflow(id int64) error {
-	result, err := sm.db.Exec("DELETE FROM workflows WHERE id = ?", id)
-	if err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to delete workflow: %v", err), "database")
-		return err
-	}
+	query := `DELETE FROM workflows WHERE id = ?`
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
+	_, err := ExecWithAffectedRowsCheck(
+		sm.db,
+		query,
+		sm.logger,
+		"database",
+		id,
+	)
 
-	if rowsAffected == 0 {
-		return fmt.Errorf("workflow not found")
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("workflow not found")
+		}
+		return err
 	}
 
 	sm.logger.Info(fmt.Sprintf("Workflow deleted successfully: ID %d", id), "database")
@@ -690,103 +691,88 @@ func (sm *SQLiteManager) UpdateWorkflowJobStatus(jobID int64, status string, res
 
 // GetWorkflowJobsByExecution retrieves all jobs for a specific workflow execution
 func (sm *SQLiteManager) GetWorkflowJobsByExecution(executionID int64) ([]*WorkflowJob, error) {
-	rows, err := sm.db.Query(
-		"SELECT id, workflow_execution_id, workflow_id, node_id, job_name, service_id, executor_peer_id, remote_job_execution_id, status, result, error, created_at, updated_at FROM workflow_jobs WHERE workflow_execution_id = ? ORDER BY created_at ASC",
-		executionID,
-	)
-	if err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to get workflow jobs: %v", err), "database")
-		return nil, err
-	}
-	defer rows.Close()
+	query := `SELECT id, workflow_execution_id, workflow_id, node_id, job_name, service_id, executor_peer_id, remote_job_execution_id, status, result, error, created_at, updated_at FROM workflow_jobs WHERE workflow_execution_id = ? ORDER BY created_at ASC`
 
-	var jobs []*WorkflowJob
-	for rows.Next() {
-		var job WorkflowJob
-		var remoteJobExecID sql.NullInt64
-		var resultJSON sql.NullString
-		var errorMsg sql.NullString
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*WorkflowJob, error) {
+			var job WorkflowJob
+			var remoteJobExecID sql.NullInt64
+			var resultJSON sql.NullString
+			var errorMsg sql.NullString
 
-		err := rows.Scan(
-			&job.ID,
-			&job.WorkflowExecutionID,
-			&job.WorkflowID,
-			&job.NodeID,
-			&job.JobName,
-			&job.ServiceID,
-			&job.ExecutorPeerID,
-			&remoteJobExecID,
-			&job.Status,
-			&resultJSON,
-			&errorMsg,
-			&job.CreatedAt,
-			&job.UpdatedAt,
-		)
-		if err != nil {
-			sm.logger.Error(fmt.Sprintf("Failed to scan workflow job: %v", err), "database")
-			continue
-		}
-
-		// Set remote job execution ID if valid
-		if remoteJobExecID.Valid {
-			job.RemoteJobExecutionID = &remoteJobExecID.Int64
-		}
-
-		// Parse result JSON
-		if resultJSON.Valid && resultJSON.String != "" {
-			if err := json.Unmarshal([]byte(resultJSON.String), &job.Result); err != nil {
-				sm.logger.Error(fmt.Sprintf("Failed to unmarshal job result: %v", err), "database")
+			err := rows.Scan(
+				&job.ID,
+				&job.WorkflowExecutionID,
+				&job.WorkflowID,
+				&job.NodeID,
+				&job.JobName,
+				&job.ServiceID,
+				&job.ExecutorPeerID,
+				&remoteJobExecID,
+				&job.Status,
+				&resultJSON,
+				&errorMsg,
+				&job.CreatedAt,
+				&job.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
 			}
-		}
 
-		if errorMsg.Valid {
-			job.Error = errorMsg.String
-		}
+			// Set remote job execution ID if valid
+			job.RemoteJobExecutionID = ScanNullableInt64(remoteJobExecID)
 
-		jobs = append(jobs, &job)
-	}
+			// Parse result JSON
+			if resultJSON.Valid && resultJSON.String != "" {
+				if err := json.Unmarshal([]byte(resultJSON.String), &job.Result); err != nil {
+					sm.logger.Error(fmt.Sprintf("Failed to unmarshal job result: %v", err), "database")
+				}
+			}
 
-	return jobs, nil
+			job.Error = ScanNullableString(errorMsg)
+
+			return &job, nil
+		},
+		sm.logger, "database", executionID)
 }
 
 // GetWorkflowJobByID retrieves a workflow job by its ID
 func (sm *SQLiteManager) GetWorkflowJobByID(id int64) (*WorkflowJob, error) {
-	var job WorkflowJob
-	var remoteJobExecID sql.NullInt64
-	var resultStr, errorStr sql.NullString
+	query := `SELECT id, workflow_execution_id, workflow_id, node_id, job_name, service_id, executor_peer_id,
+	       remote_job_execution_id, status, result, error, created_at, updated_at
+	FROM workflow_jobs
+	WHERE id = ?`
 
-	err := sm.db.QueryRow(`
-		SELECT id, workflow_execution_id, workflow_id, node_id, job_name, service_id, executor_peer_id,
-		       remote_job_execution_id, status, result, error, created_at, updated_at
-		FROM workflow_jobs
-		WHERE id = ?
-	`, id).Scan(
-		&job.ID, &job.WorkflowExecutionID, &job.WorkflowID, &job.NodeID, &job.JobName,
-		&job.ServiceID, &job.ExecutorPeerID, &remoteJobExecID, &job.Status,
-		&resultStr, &errorStr, &job.CreatedAt, &job.UpdatedAt,
-	)
+	return QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*WorkflowJob, error) {
+			var job WorkflowJob
+			var remoteJobExecID sql.NullInt64
+			var resultStr, errorStr sql.NullString
 
-	if err != nil {
-		return nil, err
-	}
+			err := row.Scan(
+				&job.ID, &job.WorkflowExecutionID, &job.WorkflowID, &job.NodeID, &job.JobName,
+				&job.ServiceID, &job.ExecutorPeerID, &remoteJobExecID, &job.Status,
+				&resultStr, &errorStr, &job.CreatedAt, &job.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
 
-	// Set remote job execution ID if valid
-	if remoteJobExecID.Valid {
-		job.RemoteJobExecutionID = &remoteJobExecID.Int64
-	}
+			// Set remote job execution ID if valid
+			job.RemoteJobExecutionID = ScanNullableInt64(remoteJobExecID)
 
-	// Parse JSON result if present
-	if resultStr.Valid && resultStr.String != "" {
-		if err := json.Unmarshal([]byte(resultStr.String), &job.Result); err != nil {
-			return nil, fmt.Errorf("failed to parse result JSON: %v", err)
-		}
-	}
+			// Parse JSON result if present
+			if resultStr.Valid && resultStr.String != "" {
+				if err := json.Unmarshal([]byte(resultStr.String), &job.Result); err != nil {
+					return nil, fmt.Errorf("failed to parse result JSON: %v", err)
+				}
+			}
 
-	if errorStr.Valid {
-		job.Error = errorStr.String
-	}
+			job.Error = ScanNullableString(errorStr)
 
-	return &job, nil
+			return &job, nil
+		},
+		sm.logger, "database", id)
 }
 
 // GetWorkflowJobs is a legacy compatibility method
@@ -845,87 +831,82 @@ func (sm *SQLiteManager) UpdateWorkflowJobRemoteExecutionID(workflowJobID int64,
 
 // GetWorkflowExecutionsByWorkflowID retrieves all execution instances for a specific workflow
 func (sm *SQLiteManager) GetWorkflowExecutionsByWorkflowID(workflowID int64) ([]*WorkflowExecution, error) {
-	rows, err := sm.db.Query(`
-		SELECT id, workflow_id, status, error, started_at, completed_at, created_at, updated_at
+	query := `SELECT id, workflow_id, status, error, started_at, completed_at, created_at, updated_at
 		FROM workflow_executions
 		WHERE workflow_id = ?
-		ORDER BY created_at DESC
-	`, workflowID)
-	if err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to get workflow executions for workflow %d: %v", workflowID, err), "database")
-		return nil, err
-	}
-	defer rows.Close()
+		ORDER BY created_at DESC`
 
-	var executions []*WorkflowExecution
-	for rows.Next() {
-		var execution WorkflowExecution
-		var errorMsg sql.NullString
-		var completedAt sql.NullTime
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*WorkflowExecution, error) {
+			var execution WorkflowExecution
+			var errorMsg sql.NullString
+			var completedAt sql.NullTime
 
-		err := rows.Scan(
-			&execution.ID,
-			&execution.WorkflowID,
-			&execution.Status,
-			&errorMsg,
-			&execution.StartedAt,
-			&completedAt,
-			&execution.CreatedAt,
-			&execution.UpdatedAt,
-		)
-		if err != nil {
-			sm.logger.Error(fmt.Sprintf("Failed to scan workflow execution: %v", err), "database")
-			continue
-		}
+			err := rows.Scan(
+				&execution.ID,
+				&execution.WorkflowID,
+				&execution.Status,
+				&errorMsg,
+				&execution.StartedAt,
+				&completedAt,
+				&execution.CreatedAt,
+				&execution.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
 
-		if errorMsg.Valid {
-			execution.Error = errorMsg.String
-		}
-		if completedAt.Valid {
-			execution.CompletedAt = completedAt.Time
-		}
+			execution.Error = ScanNullableString(errorMsg)
+			if completedAt.Valid {
+				execution.CompletedAt = completedAt.Time
+			}
 
-		executions = append(executions, &execution)
-	}
-
-	return executions, nil
+			return &execution, nil
+		},
+		sm.logger, "database", workflowID)
 }
 
 // GetWorkflowExecutionByID retrieves a specific workflow execution by ID
 func (sm *SQLiteManager) GetWorkflowExecutionByID(executionID int64) (*WorkflowExecution, error) {
-	var execution WorkflowExecution
-	var errorMsg sql.NullString
-	var completedAt sql.NullTime
-
-	err := sm.db.QueryRow(`
-		SELECT id, workflow_id, status, error, started_at, completed_at, created_at, updated_at
+	query := `SELECT id, workflow_id, status, error, started_at, completed_at, created_at, updated_at
 		FROM workflow_executions
-		WHERE id = ?
-	`, executionID).Scan(
-		&execution.ID,
-		&execution.WorkflowID,
-		&execution.Status,
-		&errorMsg,
-		&execution.StartedAt,
-		&completedAt,
-		&execution.CreatedAt,
-		&execution.UpdatedAt,
-	)
+		WHERE id = ?`
+
+	result, err := QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*WorkflowExecution, error) {
+			var execution WorkflowExecution
+			var errorMsg sql.NullString
+			var completedAt sql.NullTime
+
+			err := row.Scan(
+				&execution.ID,
+				&execution.WorkflowID,
+				&execution.Status,
+				&errorMsg,
+				&execution.StartedAt,
+				&completedAt,
+				&execution.CreatedAt,
+				&execution.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			execution.Error = ScanNullableString(errorMsg)
+			if completedAt.Valid {
+				execution.CompletedAt = completedAt.Time
+			}
+
+			return &execution, nil
+		},
+		sm.logger, "database", executionID)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("workflow execution not found")
-		}
-		sm.logger.Error(fmt.Sprintf("Failed to get workflow execution %d: %v", executionID, err), "database")
 		return nil, err
 	}
-
-	if errorMsg.Valid {
-		execution.Error = errorMsg.String
-	}
-	if completedAt.Valid {
-		execution.CompletedAt = completedAt.Time
+	if result == nil {
+		return nil, fmt.Errorf("workflow execution not found")
 	}
 
-	return &execution, nil
+	return result, nil
 }

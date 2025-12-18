@@ -268,45 +268,45 @@ func (sm *SQLiteManager) GetService(id int64) (*OfferedService, error) {
 		WHERE id = ?
 	`
 
-	var service OfferedService
-	var capabilitiesJSON string
+	return QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*OfferedService, error) {
+			var service OfferedService
+			var capabilitiesJSON string
 
-	err := sm.db.QueryRow(query, id).Scan(
-		&service.ID,
-		&service.ServiceType,
-		&service.Type,
-		&service.Name,
-		&service.Description,
-		&service.Endpoint,
-		&capabilitiesJSON,
-		&service.Status,
-		&service.PricingAmount,
-		&service.PricingType,
-		&service.PricingInterval,
-		&service.PricingUnit,
-		&service.Pricing,
-		&service.CreatedAt,
-		&service.UpdatedAt,
-	)
+			err := row.Scan(
+				&service.ID,
+				&service.ServiceType,
+				&service.Type,
+				&service.Name,
+				&service.Description,
+				&service.Endpoint,
+				&capabilitiesJSON,
+				&service.Status,
+				&service.PricingAmount,
+				&service.PricingType,
+				&service.PricingInterval,
+				&service.PricingUnit,
+				&service.Pricing,
+				&service.CreatedAt,
+				&service.UpdatedAt,
+			)
 
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		sm.logger.Error("Failed to get service", "database")
-		return nil, err
-	}
+			if err != nil {
+				return nil, err
+			}
 
-	// Parse capabilities JSON
-	if capabilitiesJSON != "" {
-		err = json.Unmarshal([]byte(capabilitiesJSON), &service.Capabilities)
-		if err != nil {
-			sm.logger.Error("Failed to parse service capabilities", "database")
-			return nil, err
-		}
-	}
+			// Parse capabilities JSON
+			if capabilitiesJSON != "" {
+				err = json.Unmarshal([]byte(capabilitiesJSON), &service.Capabilities)
+				if err != nil {
+					sm.logger.Error("Failed to parse service capabilities", "database")
+					return nil, err
+				}
+			}
 
-	return &service, nil
+			return &service, nil
+		},
+		sm.logger, "database", id)
 }
 
 // GetAllServices retrieves all services
@@ -319,55 +319,45 @@ func (sm *SQLiteManager) GetAllServices() ([]*OfferedService, error) {
 		ORDER BY created_at DESC
 	`
 
-	rows, err := sm.db.Query(query)
-	if err != nil {
-		sm.logger.Error("Failed to get services", "database")
-		return nil, err
-	}
-	defer rows.Close()
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*OfferedService, error) {
+			var service OfferedService
+			var capabilitiesJSON string
 
-	var services []*OfferedService
+			err := rows.Scan(
+				&service.ID,
+				&service.ServiceType,
+				&service.Type,
+				&service.Name,
+				&service.Description,
+				&service.Endpoint,
+				&capabilitiesJSON,
+				&service.Status,
+				&service.PricingAmount,
+				&service.PricingType,
+				&service.PricingInterval,
+				&service.PricingUnit,
+				&service.Pricing,
+				&service.CreatedAt,
+				&service.UpdatedAt,
+			)
 
-	for rows.Next() {
-		var service OfferedService
-		var capabilitiesJSON string
-
-		err := rows.Scan(
-			&service.ID,
-			&service.ServiceType,
-			&service.Type,
-			&service.Name,
-			&service.Description,
-			&service.Endpoint,
-			&capabilitiesJSON,
-			&service.Status,
-			&service.PricingAmount,
-			&service.PricingType,
-			&service.PricingInterval,
-			&service.PricingUnit,
-			&service.Pricing,
-			&service.CreatedAt,
-			&service.UpdatedAt,
-		)
-
-		if err != nil {
-			sm.logger.Error("Failed to scan service", "database")
-			continue
-		}
-
-		// Parse capabilities JSON
-		if capabilitiesJSON != "" {
-			err = json.Unmarshal([]byte(capabilitiesJSON), &service.Capabilities)
 			if err != nil {
-				sm.logger.Error("Failed to parse service capabilities", "database")
-				continue
+				return nil, err
 			}
-		}
 
-		services = append(services, &service)
-	}
+			// Parse capabilities JSON
+			if capabilitiesJSON != "" {
+				err = json.Unmarshal([]byte(capabilitiesJSON), &service.Capabilities)
+				if err != nil {
+					sm.logger.Error("Failed to parse service capabilities", "database")
+					return nil, err
+				}
+			}
 
-	return services, nil
+			return &service, nil
+		},
+		sm.logger, "database")
 }
 
 // UpdateService updates an existing service
@@ -385,8 +375,11 @@ func (sm *SQLiteManager) UpdateService(service *OfferedService) error {
 		WHERE id = ?
 	`
 
-	result, err := sm.db.Exec(
+	_, err = ExecWithAffectedRowsCheck(
+		sm.db,
 		query,
+		sm.logger,
+		"database",
 		service.ServiceType,
 		service.Type,
 		service.Name,
@@ -403,17 +396,7 @@ func (sm *SQLiteManager) UpdateService(service *OfferedService) error {
 	)
 
 	if err != nil {
-		sm.logger.Error("Failed to update service", "database")
 		return err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
 	}
 
 	service.UpdatedAt = time.Now()
@@ -548,66 +531,49 @@ func (sm *SQLiteManager) GetServiceInterfaces(serviceID int64) ([]*ServiceInterf
 		ORDER BY created_at ASC
 	`
 
-	rows, err := sm.db.Query(query, serviceID)
-	if err != nil {
-		sm.logger.Error("Failed to get service interfaces", "database")
-		return nil, err
-	}
-	defer rows.Close()
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*ServiceInterface, error) {
+			var si ServiceInterface
+			var mountFunction sql.NullString
+			var description sql.NullString
 
-	var interfaces []*ServiceInterface
+			err := rows.Scan(
+				&si.ID,
+				&si.ServiceID,
+				&si.InterfaceType,
+				&si.Path,
+				&mountFunction,
+				&description,
+				&si.CreatedAt,
+			)
 
-	for rows.Next() {
-		var si ServiceInterface
-		var mountFunction sql.NullString
-		var description sql.NullString
+			if err != nil {
+				return nil, err
+			}
 
-		err := rows.Scan(
-			&si.ID,
-			&si.ServiceID,
-			&si.InterfaceType,
-			&si.Path,
-			&mountFunction,
-			&description,
-			&si.CreatedAt,
-		)
+			// Handle nullable fields
+			si.MountFunction = ScanNullableString(mountFunction)
+			si.Description = ScanNullableString(description)
 
-		if err != nil {
-			sm.logger.Error("Failed to scan service interface", "database")
-			continue
-		}
-
-		// Handle nullable fields
-		if mountFunction.Valid {
-			si.MountFunction = mountFunction.String
-		}
-		if description.Valid {
-			si.Description = description.String
-		}
-
-		interfaces = append(interfaces, &si)
-	}
-
-	return interfaces, nil
+			return &si, nil
+		},
+		sm.logger, "database", serviceID)
 }
 
 // DeleteServiceInterface deletes a service interface by ID
 func (sm *SQLiteManager) DeleteServiceInterface(id int64) error {
 	query := `DELETE FROM service_interfaces WHERE id = ?`
 
-	result, err := sm.db.Exec(query, id)
-	if err != nil {
-		sm.logger.Error("Failed to delete service interface", "database")
-		return err
-	}
+	_, err := ExecWithAffectedRowsCheck(
+		sm.db,
+		query,
+		sm.logger,
+		"database",
+		id,
+	)
 
-	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
 	}
 
 	sm.logger.Info("Service interface deleted successfully", "database")

@@ -42,6 +42,37 @@ const (
 	ServiceTypeStandalone = "STANDALONE"
 )
 
+// Service source type constants
+const (
+	ServiceSourceRegistry = "registry"
+	ServiceSourceGit      = "git"
+	ServiceSourceLocal    = "local"
+	ServiceSourceUpload   = "upload"
+)
+
+// Service status constants
+const (
+	ServiceStatusActive   = "ACTIVE"
+	ServiceStatusInactive = "INACTIVE"
+)
+
+// Pricing type constants
+const (
+	PricingTypeOneTime   = "ONE_TIME"
+	PricingTypeRecurring = "RECURRING"
+)
+
+// Pricing unit constants
+const (
+	PricingUnitSeconds = "SECONDS"
+	PricingUnitMinutes = "MINUTES"
+	PricingUnitHours   = "HOURS"
+	PricingUnitDays    = "DAYS"
+	PricingUnitWeeks   = "WEEKS"
+	PricingUnitMonths  = "MONTHS"
+	PricingUnitYears   = "YEARS"
+)
+
 // JobExecutionRequest represents a request to execute a job on a peer
 type JobExecutionRequest struct {
 	WorkflowID          int64              `json:"workflow_id"`

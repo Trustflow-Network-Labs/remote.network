@@ -75,32 +75,27 @@ func (sm *SQLiteManager) GetDockerServiceDetails(serviceID int64) (*DockerServic
 		WHERE service_id = ?
 	`
 
-	var details DockerServiceDetails
-	err := sm.db.QueryRow(query, serviceID).Scan(
-		&details.ID,
-		&details.ServiceID,
-		&details.ImageName,
-		&details.ImageTag,
-		&details.DockerfilePath,
-		&details.ComposePath,
-		&details.Source,
-		&details.GitRepoURL,
-		&details.GitCommitHash,
-		&details.LocalContextPath,
-		&details.Entrypoint,
-		&details.Cmd,
-		&details.CreatedAt,
-	)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		sm.logger.Error("Failed to get docker service details", "database")
-		return nil, err
-	}
-
-	return &details, nil
+	return QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*DockerServiceDetails, error) {
+			var details DockerServiceDetails
+			err := row.Scan(
+				&details.ID,
+				&details.ServiceID,
+				&details.ImageName,
+				&details.ImageTag,
+				&details.DockerfilePath,
+				&details.ComposePath,
+				&details.Source,
+				&details.GitRepoURL,
+				&details.GitCommitHash,
+				&details.LocalContextPath,
+				&details.Entrypoint,
+				&details.Cmd,
+				&details.CreatedAt,
+			)
+			return &details, err
+		},
+		sm.logger, "database", serviceID)
 }
 
 // GetAllDockerServiceDetails retrieves all Docker service details
@@ -113,39 +108,27 @@ func (sm *SQLiteManager) GetAllDockerServiceDetails() ([]*DockerServiceDetails, 
 		ORDER BY created_at DESC
 	`
 
-	rows, err := sm.db.Query(query)
-	if err != nil {
-		sm.logger.Error("Failed to get all docker service details", "database")
-		return nil, err
-	}
-	defer rows.Close()
-
-	var allDetails []*DockerServiceDetails
-	for rows.Next() {
-		var details DockerServiceDetails
-		err := rows.Scan(
-			&details.ID,
-			&details.ServiceID,
-			&details.ImageName,
-			&details.ImageTag,
-			&details.DockerfilePath,
-			&details.ComposePath,
-			&details.Source,
-			&details.GitRepoURL,
-			&details.GitCommitHash,
-			&details.LocalContextPath,
-			&details.Entrypoint,
-			&details.Cmd,
-			&details.CreatedAt,
-		)
-		if err != nil {
-			sm.logger.Error("Failed to scan docker service details", "database")
-			continue
-		}
-		allDetails = append(allDetails, &details)
-	}
-
-	return allDetails, nil
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*DockerServiceDetails, error) {
+			var details DockerServiceDetails
+			err := rows.Scan(
+				&details.ID,
+				&details.ServiceID,
+				&details.ImageName,
+				&details.ImageTag,
+				&details.DockerfilePath,
+				&details.ComposePath,
+				&details.Source,
+				&details.GitRepoURL,
+				&details.GitCommitHash,
+				&details.LocalContextPath,
+				&details.Entrypoint,
+				&details.Cmd,
+				&details.CreatedAt,
+			)
+			return &details, err
+		},
+		sm.logger, "database")
 }
 
 // GetDockerServiceDetailsBySource retrieves Docker service details filtered by source type
@@ -159,39 +142,27 @@ func (sm *SQLiteManager) GetDockerServiceDetailsBySource(source string) ([]*Dock
 		ORDER BY created_at DESC
 	`
 
-	rows, err := sm.db.Query(query, source)
-	if err != nil {
-		sm.logger.Error("Failed to get docker service details by source", "database")
-		return nil, err
-	}
-	defer rows.Close()
-
-	var allDetails []*DockerServiceDetails
-	for rows.Next() {
-		var details DockerServiceDetails
-		err := rows.Scan(
-			&details.ID,
-			&details.ServiceID,
-			&details.ImageName,
-			&details.ImageTag,
-			&details.DockerfilePath,
-			&details.ComposePath,
-			&details.Source,
-			&details.GitRepoURL,
-			&details.GitCommitHash,
-			&details.LocalContextPath,
-			&details.Entrypoint,
-			&details.Cmd,
-			&details.CreatedAt,
-		)
-		if err != nil {
-			sm.logger.Error("Failed to scan docker service details", "database")
-			continue
-		}
-		allDetails = append(allDetails, &details)
-	}
-
-	return allDetails, nil
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*DockerServiceDetails, error) {
+			var details DockerServiceDetails
+			err := rows.Scan(
+				&details.ID,
+				&details.ServiceID,
+				&details.ImageName,
+				&details.ImageTag,
+				&details.DockerfilePath,
+				&details.ComposePath,
+				&details.Source,
+				&details.GitRepoURL,
+				&details.GitCommitHash,
+				&details.LocalContextPath,
+				&details.Entrypoint,
+				&details.Cmd,
+				&details.CreatedAt,
+			)
+			return &details, err
+		},
+		sm.logger, "database", source)
 }
 
 // UpdateDockerServiceDetails updates Docker service details
@@ -204,8 +175,11 @@ func (sm *SQLiteManager) UpdateDockerServiceDetails(details *DockerServiceDetail
 		WHERE id = ?
 	`
 
-	result, err := sm.db.Exec(
+	_, err := ExecWithAffectedRowsCheck(
+		sm.db,
 		query,
+		sm.logger,
+		"database",
 		details.ImageName,
 		details.ImageTag,
 		details.DockerfilePath,
@@ -220,17 +194,7 @@ func (sm *SQLiteManager) UpdateDockerServiceDetails(details *DockerServiceDetail
 	)
 
 	if err != nil {
-		sm.logger.Error("Failed to update docker service details", "database")
 		return err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
 	}
 
 	sm.logger.Info("Docker service details updated successfully", "database")
@@ -241,19 +205,16 @@ func (sm *SQLiteManager) UpdateDockerServiceDetails(details *DockerServiceDetail
 func (sm *SQLiteManager) DeleteDockerServiceDetails(serviceID int64) error {
 	query := `DELETE FROM docker_service_details WHERE service_id = ?`
 
-	result, err := sm.db.Exec(query, serviceID)
-	if err != nil {
-		sm.logger.Error("Failed to delete docker service details", "database")
-		return err
-	}
+	_, err := ExecWithAffectedRowsCheck(
+		sm.db,
+		query,
+		sm.logger,
+		"database",
+		serviceID,
+	)
 
-	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
 	}
 
 	sm.logger.Info("Docker service details deleted successfully", "database")

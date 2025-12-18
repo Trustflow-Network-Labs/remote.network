@@ -168,59 +168,63 @@ func (sm *SQLiteManager) CreateJobExecution(job *JobExecution) error {
 
 // GetJobExecution retrieves a job execution by ID
 func (sm *SQLiteManager) GetJobExecution(id int64) (*JobExecution, error) {
-	var job JobExecution
-	var startedAt, endedAt sql.NullTime
-	var errorMsg sql.NullString
-	var remoteJobID sql.NullInt64
-
-	err := sm.db.QueryRow(`
-		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
+	query := `SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
 		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
 		       start_received, started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
-		WHERE id = ?
-	`, id).Scan(
-		&job.ID,
-		&job.WorkflowJobID,
-		&job.ServiceID,
-		&job.ExecutorPeerID,
-		&job.OrderingPeerID,
-		&remoteJobID,
-		&job.Status,
-		&job.Entrypoint,
-		&job.Commands,
-		&job.ExecutionConstraint,
-		&job.ConstraintDetail,
-		&job.StartReceived,
-		&startedAt,
-		&endedAt,
-		&errorMsg,
-		&job.CreatedAt,
-		&job.UpdatedAt,
-	)
+		WHERE id = ?`
 
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("job execution not found")
-	}
+	result, err := QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*JobExecution, error) {
+			var job JobExecution
+			var startedAt, endedAt sql.NullTime
+			var errorMsg sql.NullString
+			var remoteJobID sql.NullInt64
+
+			err := row.Scan(
+				&job.ID,
+				&job.WorkflowJobID,
+				&job.ServiceID,
+				&job.ExecutorPeerID,
+				&job.OrderingPeerID,
+				&remoteJobID,
+				&job.Status,
+				&job.Entrypoint,
+				&job.Commands,
+				&job.ExecutionConstraint,
+				&job.ConstraintDetail,
+				&job.StartReceived,
+				&startedAt,
+				&endedAt,
+				&errorMsg,
+				&job.CreatedAt,
+				&job.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			job.RemoteJobExecutionID = ScanNullableInt64(remoteJobID)
+			if startedAt.Valid {
+				job.StartedAt = startedAt.Time
+			}
+			if endedAt.Valid {
+				job.EndedAt = endedAt.Time
+			}
+			job.ErrorMessage = ScanNullableString(errorMsg)
+
+			return &job, nil
+		},
+		sm.logger, "database", id)
+
 	if err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to get job execution: %v", err), "database")
 		return nil, err
 	}
-
-	if remoteJobID.Valid {
-		job.RemoteJobExecutionID = &remoteJobID.Int64
-	}
-	if startedAt.Valid {
-		job.StartedAt = startedAt.Time
-	}
-	if endedAt.Valid {
-		job.EndedAt = endedAt.Time
-	}
-	if errorMsg.Valid {
-		job.ErrorMessage = errorMsg.String
+	if result == nil {
+		return nil, fmt.Errorf("job execution not found")
 	}
 
-	return &job, nil
+	return result, nil
 }
 
 // UpdateJobStatus updates the status of a job execution
@@ -300,134 +304,108 @@ func (sm *SQLiteManager) MarkJobStartReceived(id int64) error {
 
 // GetReadyJobs retrieves all jobs with READY status
 func (sm *SQLiteManager) GetReadyJobs() ([]*JobExecution, error) {
-	rows, err := sm.db.Query(`
-		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
+	query := `SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
 		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
 		       start_received, started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE status = 'READY'
-		ORDER BY created_at ASC
-	`)
-	if err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to get ready jobs: %v", err), "database")
-		return nil, err
-	}
-	defer rows.Close()
+		ORDER BY created_at ASC`
 
-	var jobs []*JobExecution
-	for rows.Next() {
-		var job JobExecution
-		var startedAt, endedAt sql.NullTime
-		var errorMsg sql.NullString
-		var remoteJobID sql.NullInt64
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*JobExecution, error) {
+			var job JobExecution
+			var startedAt, endedAt sql.NullTime
+			var errorMsg sql.NullString
+			var remoteJobID sql.NullInt64
 
-		err := rows.Scan(
-			&job.ID,
-			&job.WorkflowJobID,
-			&job.ServiceID,
-			&job.ExecutorPeerID,
-			&job.OrderingPeerID,
-			&remoteJobID,
-			&job.Status,
-			&job.Entrypoint,
-			&job.Commands,
-			&job.ExecutionConstraint,
-			&job.ConstraintDetail,
-			&job.StartReceived,
-			&startedAt,
-			&endedAt,
-			&errorMsg,
-			&job.CreatedAt,
-			&job.UpdatedAt,
-		)
-		if err != nil {
-			sm.logger.Error(fmt.Sprintf("Failed to scan job execution: %v", err), "database")
-			continue
-		}
+			err := rows.Scan(
+				&job.ID,
+				&job.WorkflowJobID,
+				&job.ServiceID,
+				&job.ExecutorPeerID,
+				&job.OrderingPeerID,
+				&remoteJobID,
+				&job.Status,
+				&job.Entrypoint,
+				&job.Commands,
+				&job.ExecutionConstraint,
+				&job.ConstraintDetail,
+				&job.StartReceived,
+				&startedAt,
+				&endedAt,
+				&errorMsg,
+				&job.CreatedAt,
+				&job.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
 
-		if remoteJobID.Valid {
-			job.RemoteJobExecutionID = &remoteJobID.Int64
-		}
-		if startedAt.Valid {
-			job.StartedAt = startedAt.Time
-		}
-		if endedAt.Valid {
-			job.EndedAt = endedAt.Time
-		}
-		if errorMsg.Valid {
-			job.ErrorMessage = errorMsg.String
-		}
+			job.RemoteJobExecutionID = ScanNullableInt64(remoteJobID)
+			if startedAt.Valid {
+				job.StartedAt = startedAt.Time
+			}
+			if endedAt.Valid {
+				job.EndedAt = endedAt.Time
+			}
+			job.ErrorMessage = ScanNullableString(errorMsg)
 
-		jobs = append(jobs, &job)
-	}
-
-	return jobs, nil
+			return &job, nil
+		},
+		sm.logger, "database")
 }
 
 // GetJobsByStatus gets all job executions with a specific status
 func (sm *SQLiteManager) GetJobsByStatus(status string) ([]*JobExecution, error) {
-	rows, err := sm.db.Query(`
-		SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
+	query := `SELECT id, workflow_job_id, service_id, executor_peer_id, ordering_peer_id,
 		       remote_job_execution_id, status, entrypoint, commands, execution_constraint, constraint_detail,
 		       start_received, started_at, ended_at, error_message, created_at, updated_at
 		FROM job_executions
 		WHERE status = ?
-		ORDER BY created_at ASC
-	`, status)
-	if err != nil {
-		sm.logger.Error(fmt.Sprintf("Failed to get jobs with status %s: %v", status, err), "database")
-		return nil, err
-	}
-	defer rows.Close()
+		ORDER BY created_at ASC`
 
-	var jobs []*JobExecution
-	for rows.Next() {
-		var job JobExecution
-		var startedAt, endedAt sql.NullTime
-		var errorMsg sql.NullString
-		var remoteJobID sql.NullInt64
+	return QueryRows(sm.db, query,
+		func(rows *sql.Rows) (*JobExecution, error) {
+			var job JobExecution
+			var startedAt, endedAt sql.NullTime
+			var errorMsg sql.NullString
+			var remoteJobID sql.NullInt64
 
-		err := rows.Scan(
-			&job.ID,
-			&job.WorkflowJobID,
-			&job.ServiceID,
-			&job.ExecutorPeerID,
-			&job.OrderingPeerID,
-			&remoteJobID,
-			&job.Status,
-			&job.Entrypoint,
-			&job.Commands,
-			&job.ExecutionConstraint,
-			&job.ConstraintDetail,
-			&job.StartReceived,
-			&startedAt,
-			&endedAt,
-			&errorMsg,
-			&job.CreatedAt,
-			&job.UpdatedAt,
-		)
-		if err != nil {
-			sm.logger.Error(fmt.Sprintf("Failed to scan job execution: %v", err), "database")
-			continue
-		}
+			err := rows.Scan(
+				&job.ID,
+				&job.WorkflowJobID,
+				&job.ServiceID,
+				&job.ExecutorPeerID,
+				&job.OrderingPeerID,
+				&remoteJobID,
+				&job.Status,
+				&job.Entrypoint,
+				&job.Commands,
+				&job.ExecutionConstraint,
+				&job.ConstraintDetail,
+				&job.StartReceived,
+				&startedAt,
+				&endedAt,
+				&errorMsg,
+				&job.CreatedAt,
+				&job.UpdatedAt,
+			)
+			if err != nil {
+				return nil, err
+			}
 
-		if remoteJobID.Valid {
-			job.RemoteJobExecutionID = &remoteJobID.Int64
-		}
-		if startedAt.Valid {
-			job.StartedAt = startedAt.Time
-		}
-		if endedAt.Valid {
-			job.EndedAt = endedAt.Time
-		}
-		if errorMsg.Valid {
-			job.ErrorMessage = errorMsg.String
-		}
+			job.RemoteJobExecutionID = ScanNullableInt64(remoteJobID)
+			if startedAt.Valid {
+				job.StartedAt = startedAt.Time
+			}
+			if endedAt.Valid {
+				job.EndedAt = endedAt.Time
+			}
+			job.ErrorMessage = ScanNullableString(errorMsg)
 
-		jobs = append(jobs, &job)
-	}
-
-	return jobs, nil
+			return &job, nil
+		},
+		sm.logger, "database", status)
 }
 
 // CreateJobInterface creates a new job interface

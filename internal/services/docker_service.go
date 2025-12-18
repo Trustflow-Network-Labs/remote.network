@@ -13,6 +13,7 @@ import (
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/dependencies"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	composetypes "github.com/compose-spec/compose-go/types"
 	"github.com/docker/docker/api/types/image"
@@ -165,7 +166,7 @@ func (ds *DockerService) CreateFromRegistry(
 
 	// Create service record
 	service := &database.OfferedService{
-		ServiceType: "DOCKER",
+		ServiceType: types.ServiceTypeDocker,
 		Type:        "docker",
 		Name:        serviceName,
 		Description: description,
@@ -334,7 +335,7 @@ func (ds *DockerService) CreateFromGitRepo(
 
 	// Create service record
 	service := &database.OfferedService{
-		ServiceType: "DOCKER",
+		ServiceType: types.ServiceTypeDocker,
 		Type:        "docker",
 		Name:        serviceName,
 		Description: description,
@@ -527,7 +528,7 @@ func (ds *DockerService) CreateFromLocalDirectory(
 
 	// Create service record
 	service := &database.OfferedService{
-		ServiceType: "DOCKER",
+		ServiceType: types.ServiceTypeDocker,
 		Type:        "docker",
 		Name:        serviceName,
 		Description: description,

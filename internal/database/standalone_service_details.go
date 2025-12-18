@@ -71,56 +71,42 @@ func (sm *SQLiteManager) GetStandaloneServiceDetails(serviceID int64) (*Standalo
 		WHERE service_id = ?
 	`
 
-	var details StandaloneServiceDetails
-	var arguments, workingDir, envVars, runAsUser, gitRepoURL, gitCommitHash, uploadHash sql.NullString
+	return QueryRowSingle(sm.db, query,
+		func(row *sql.Row) (*StandaloneServiceDetails, error) {
+			var details StandaloneServiceDetails
+			var arguments, workingDir, envVars, runAsUser, gitRepoURL, gitCommitHash, uploadHash sql.NullString
 
-	err := sm.db.QueryRow(query, serviceID).Scan(
-		&details.ID,
-		&details.ServiceID,
-		&details.ExecutablePath,
-		&arguments,
-		&workingDir,
-		&envVars,
-		&details.TimeoutSeconds,
-		&runAsUser,
-		&details.Source,
-		&gitRepoURL,
-		&gitCommitHash,
-		&uploadHash,
-	)
+			err := row.Scan(
+				&details.ID,
+				&details.ServiceID,
+				&details.ExecutablePath,
+				&arguments,
+				&workingDir,
+				&envVars,
+				&details.TimeoutSeconds,
+				&runAsUser,
+				&details.Source,
+				&gitRepoURL,
+				&gitCommitHash,
+				&uploadHash,
+			)
 
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		sm.logger.Error("Failed to get standalone service details", "database")
-		return nil, err
-	}
+			if err != nil {
+				return nil, err
+			}
 
-	// Handle nullable fields
-	if arguments.Valid {
-		details.Arguments = arguments.String
-	}
-	if workingDir.Valid {
-		details.WorkingDirectory = workingDir.String
-	}
-	if envVars.Valid {
-		details.EnvironmentVariables = envVars.String
-	}
-	if runAsUser.Valid {
-		details.RunAsUser = runAsUser.String
-	}
-	if gitRepoURL.Valid {
-		details.GitRepoURL = gitRepoURL.String
-	}
-	if gitCommitHash.Valid {
-		details.GitCommitHash = gitCommitHash.String
-	}
-	if uploadHash.Valid {
-		details.UploadHash = uploadHash.String
-	}
+			// Handle nullable fields
+			details.Arguments = ScanNullableString(arguments)
+			details.WorkingDirectory = ScanNullableString(workingDir)
+			details.EnvironmentVariables = ScanNullableString(envVars)
+			details.RunAsUser = ScanNullableString(runAsUser)
+			details.GitRepoURL = ScanNullableString(gitRepoURL)
+			details.GitCommitHash = ScanNullableString(gitCommitHash)
+			details.UploadHash = ScanNullableString(uploadHash)
 
-	return &details, nil
+			return &details, nil
+		},
+		sm.logger, "database", serviceID)
 }
 
 // UpdateStandaloneServiceDetails updates standalone service details
@@ -133,8 +119,11 @@ func (sm *SQLiteManager) UpdateStandaloneServiceDetails(details *StandaloneServi
 		WHERE service_id = ?
 	`
 
-	result, err := sm.db.Exec(
+	_, err := ExecWithAffectedRowsCheck(
+		sm.db,
 		query,
+		sm.logger,
+		"database",
 		details.ExecutablePath,
 		details.Arguments,
 		details.WorkingDirectory,
@@ -149,17 +138,7 @@ func (sm *SQLiteManager) UpdateStandaloneServiceDetails(details *StandaloneServi
 	)
 
 	if err != nil {
-		sm.logger.Error("Failed to update standalone service details", "database")
 		return err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
 	}
 
 	sm.logger.Info("Standalone service details updated successfully", "database")
@@ -170,19 +149,16 @@ func (sm *SQLiteManager) UpdateStandaloneServiceDetails(details *StandaloneServi
 func (sm *SQLiteManager) DeleteStandaloneServiceDetails(serviceID int64) error {
 	query := `DELETE FROM standalone_service_details WHERE service_id = ?`
 
-	result, err := sm.db.Exec(query, serviceID)
-	if err != nil {
-		sm.logger.Error("Failed to delete standalone service details", "database")
-		return err
-	}
+	_, err := ExecWithAffectedRowsCheck(
+		sm.db,
+		query,
+		sm.logger,
+		"database",
+		serviceID,
+	)
 
-	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
 	}
 
 	sm.logger.Info("Standalone service details deleted successfully", "database")
