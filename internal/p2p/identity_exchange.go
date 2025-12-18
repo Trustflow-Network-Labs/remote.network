@@ -192,6 +192,29 @@ func (ie *IdentityExchanger) exchangeIdentities(stream *quic.Stream, topic strin
 				knownPeer.AppsCount = metadata.AppsCount
 			}
 
+			// Update NAT/relay network info from metadata
+			// A peer is behind NAT if NodeType is "private" OR if it's using a relay
+			isBehindNAT := metadata.NetworkInfo.NodeType == "private" || metadata.NetworkInfo.UsingRelay
+			ie.logger.Debug(fmt.Sprintf("Peer %s network info: node_type=%s, using_relay=%v, behind_nat=%v",
+				remoteIdentity.PeerID[:8], metadata.NetworkInfo.NodeType, metadata.NetworkInfo.UsingRelay, isBehindNAT), "identity-exchange")
+			if err := ie.knownPeers.UpdatePeerNetworkInfo(
+				remoteIdentity.PeerID,
+				topic,
+				isBehindNAT,
+				metadata.NetworkInfo.NATType,
+				metadata.NetworkInfo.UsingRelay,
+				metadata.NetworkInfo.ConnectedRelay,
+			); err != nil {
+				ie.logger.Warn(fmt.Sprintf("Failed to update network info for peer %s: %v",
+					remoteIdentity.PeerID[:8], err), "identity-exchange")
+			} else {
+				// Update the knownPeer struct for return value
+				knownPeer.IsBehindNAT = isBehindNAT
+				knownPeer.NATType = metadata.NetworkInfo.NATType
+				knownPeer.UsingRelay = metadata.NetworkInfo.UsingRelay
+				knownPeer.ConnectedRelayID = metadata.NetworkInfo.ConnectedRelay
+			}
+
 			// Notify relay manager if this is a relay peer with valid metadata
 			if metadata.NetworkInfo.IsRelay && ie.onRelayDiscovered != nil {
 				ie.logger.Info(fmt.Sprintf("Discovered relay peer %s via identity exchange, notifying relay manager",
@@ -383,6 +406,20 @@ func (ie *IdentityExchanger) storeReceivedPeers(peers []*KnownPeerEntry, topic s
 				} else {
 					ie.logger.Debug(fmt.Sprintf("Updated service counts from DHT for peer %s via peer_exchange (files: %d, apps: %d)",
 						entry.PeerID[:8], metadata.FilesCount, metadata.AppsCount), "identity-exchange")
+				}
+
+				// Update NAT/relay network info from metadata
+				isBehindNAT := metadata.NetworkInfo.NodeType == "private" || metadata.NetworkInfo.UsingRelay
+				if err := ie.knownPeers.UpdatePeerNetworkInfo(
+					entry.PeerID,
+					topic,
+					isBehindNAT,
+					metadata.NetworkInfo.NATType,
+					metadata.NetworkInfo.UsingRelay,
+					metadata.NetworkInfo.ConnectedRelay,
+				); err != nil {
+					ie.logger.Debug(fmt.Sprintf("Failed to update network info for peer %s from peer_exchange: %v",
+						entry.PeerID[:8], err), "identity-exchange")
 				}
 			}
 		}

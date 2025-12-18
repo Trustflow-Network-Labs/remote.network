@@ -31,7 +31,9 @@ export default {
       updatedAt: 'Updated At',
       description: 'Description',
       notSet: 'Not set',
-      clear: 'Clear'
+      clear: 'Clear',
+      yes: 'Yes',
+      no: 'No'
     },
     auth: {
       login: 'Login',
@@ -490,7 +492,12 @@ export default {
       viewServices: 'View Services',
       viewCapabilities: 'View Capabilities',
       unblacklist: 'Remove from Blacklist',
-      noPeers: 'No peers found'
+      noPeers: 'No peers found',
+      // NAT and Relay status
+      behindNAT: 'Behind NAT',
+      relayStatus: 'Relay Connection',
+      connected: 'Connected',
+      notConnected: 'Not Connected'
     },
     configuration: {
       title: 'Configuration',

@@ -24,6 +24,12 @@ type KnownPeer struct {
 	Topic      string    // Topic this peer is associated with
 	FirstSeen  time.Time // When we first discovered this peer
 	Source     string    // "bootstrap", "peer_exchange", "dht", etc.
+
+	// NAT and Relay status (from DHT metadata)
+	IsBehindNAT      bool   // Is this peer behind NAT? (NodeType == "private")
+	NATType          string // NAT type: "full_cone", "restricted", "port_restricted", "symmetric", ""
+	UsingRelay       bool   // Is this peer currently using a relay?
+	ConnectedRelayID string // PeerID of the relay this peer is connected to (if using relay)
 }
 
 // KnownPeersManager manages in-memory known peers storage
@@ -74,21 +80,27 @@ func (kpm *KnownPeersManager) StoreKnownPeer(peer *KnownPeer) error {
 		existing.DHTNodeID = peer.DHTNodeID
 		existing.LastSeen = peer.LastSeen
 		existing.IsStore = peer.IsStore
-		// Keep original FirstSeen, Source, and other fields
+		// Note: NAT/Relay fields are NOT updated here to avoid overwriting
+		// correct values with zero values. Use UpdatePeerNetworkInfo() instead.
+		// Keep original FirstSeen, Source, and NAT/Relay fields
 	} else {
 		// Insert new peer (make a copy to avoid external modifications)
 		newPeer := &KnownPeer{
-			PeerID:     peer.PeerID,
-			DHTNodeID:  peer.DHTNodeID,
-			PublicKey:  make([]byte, len(peer.PublicKey)),
-			IsRelay:    peer.IsRelay,
-			IsStore:    peer.IsStore,
-			FilesCount: peer.FilesCount,
-			AppsCount:  peer.AppsCount,
-			LastSeen:   peer.LastSeen,
-			Topic:      peer.Topic,
-			FirstSeen:  peer.FirstSeen,
-			Source:     peer.Source,
+			PeerID:           peer.PeerID,
+			DHTNodeID:        peer.DHTNodeID,
+			PublicKey:        make([]byte, len(peer.PublicKey)),
+			IsRelay:          peer.IsRelay,
+			IsStore:          peer.IsStore,
+			FilesCount:       peer.FilesCount,
+			AppsCount:        peer.AppsCount,
+			LastSeen:         peer.LastSeen,
+			Topic:            peer.Topic,
+			FirstSeen:        peer.FirstSeen,
+			Source:           peer.Source,
+			IsBehindNAT:      peer.IsBehindNAT,
+			NATType:          peer.NATType,
+			UsingRelay:       peer.UsingRelay,
+			ConnectedRelayID: peer.ConnectedRelayID,
 		}
 		copy(newPeer.PublicKey, peer.PublicKey)
 		kpm.peers[key] = newPeer
@@ -134,6 +146,30 @@ func (kpm *KnownPeersManager) UpdatePeerServiceCounts(peerID, topic string, file
 
 	kpm.logger.Debug(fmt.Sprintf("Updated service counts for peer %s (files: %d, apps: %d)",
 		peerID[:8], filesCount, appsCount), "p2p")
+
+	return nil
+}
+
+// UpdatePeerNetworkInfo updates NAT and relay connection status for a peer
+// This should be called when we have network info from DHT metadata
+func (kpm *KnownPeersManager) UpdatePeerNetworkInfo(peerID, topic string, isBehindNAT bool, natType string, usingRelay bool, connectedRelayID string) error {
+	key := makeKnownPeerKey(peerID, topic)
+
+	kpm.mu.Lock()
+	defer kpm.mu.Unlock()
+
+	peer, exists := kpm.peers[key]
+	if !exists {
+		return fmt.Errorf("peer not found: %s (topic: %s)", peerID, topic)
+	}
+
+	peer.IsBehindNAT = isBehindNAT
+	peer.NATType = natType
+	peer.UsingRelay = usingRelay
+	peer.ConnectedRelayID = connectedRelayID
+
+	kpm.logger.Debug(fmt.Sprintf("Updated network info for peer %s (behind_nat: %v, nat_type: %s, using_relay: %v, relay: %s)",
+		peerID[:8], isBehindNAT, natType, usingRelay, connectedRelayID), "p2p")
 
 	return nil
 }
@@ -318,17 +354,21 @@ func (kpm *KnownPeersManager) GetRelayPeers(topic string) ([]*KnownPeer, error) 
 // copyPeer creates a deep copy of a KnownPeer to prevent external modifications
 func (kpm *KnownPeersManager) copyPeer(p *KnownPeer) *KnownPeer {
 	peerCopy := &KnownPeer{
-		PeerID:     p.PeerID,
-		DHTNodeID:  p.DHTNodeID,
-		PublicKey:  make([]byte, len(p.PublicKey)),
-		IsRelay:    p.IsRelay,
-		IsStore:    p.IsStore,
-		FilesCount: p.FilesCount,
-		AppsCount:  p.AppsCount,
-		LastSeen:   p.LastSeen,
-		Topic:      p.Topic,
-		FirstSeen:  p.FirstSeen,
-		Source:     p.Source,
+		PeerID:           p.PeerID,
+		DHTNodeID:        p.DHTNodeID,
+		PublicKey:        make([]byte, len(p.PublicKey)),
+		IsRelay:          p.IsRelay,
+		IsStore:          p.IsStore,
+		FilesCount:       p.FilesCount,
+		AppsCount:        p.AppsCount,
+		LastSeen:         p.LastSeen,
+		Topic:            p.Topic,
+		FirstSeen:        p.FirstSeen,
+		Source:           p.Source,
+		IsBehindNAT:      p.IsBehindNAT,
+		NATType:          p.NATType,
+		UsingRelay:       p.UsingRelay,
+		ConnectedRelayID: p.ConnectedRelayID,
 	}
 	peerCopy.PublicKey = append(peerCopy.PublicKey[:0], p.PublicKey...)
 	return peerCopy

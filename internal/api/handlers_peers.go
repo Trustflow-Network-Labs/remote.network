@@ -21,6 +21,12 @@ type PeerInfo struct {
 	LastSeen   time.Time `json:"last_seen"`
 	Topic      string    `json:"topic"`
 	Source     string    `json:"source"`
+
+	// NAT and Relay status (from DHT metadata)
+	IsBehindNAT      bool   `json:"is_behind_nat"`       // Is this peer behind NAT?
+	NATType          string `json:"nat_type"`            // NAT type: "full_cone", "restricted", etc.
+	UsingRelay       bool   `json:"using_relay"`         // Is this peer currently using a relay?
+	ConnectedRelayID string `json:"connected_relay_id"`  // PeerID of the connected relay
 }
 
 // PeersResponse represents the list of known peers
@@ -51,17 +57,21 @@ func (s *APIServer) handlePeers(w http.ResponseWriter, r *http.Request) {
 	// Convert to response format
 	peers := make([]PeerInfo, len(knownPeers))
 	for i, peer := range knownPeers {
-		s.logger.Debug(fmt.Sprintf("API /peers: Peer %s - files=%d, apps=%d", peer.PeerID[:8], peer.FilesCount, peer.AppsCount), "api")
+		s.logger.Debug(fmt.Sprintf("API /peers: Peer %s - files=%d, apps=%d, behind_nat=%v, using_relay=%v", peer.PeerID[:8], peer.FilesCount, peer.AppsCount, peer.IsBehindNAT, peer.UsingRelay), "api")
 		peers[i] = PeerInfo{
-			PeerID:     peer.PeerID,
-			DHTNodeID:  peer.DHTNodeID,
-			IsRelay:    peer.IsRelay,
-			IsStore:    peer.IsStore,
-			FilesCount: peer.FilesCount,
-			AppsCount:  peer.AppsCount,
-			LastSeen:   peer.LastSeen,
-			Topic:      peer.Topic,
-			Source:     peer.Source,
+			PeerID:           peer.PeerID,
+			DHTNodeID:        peer.DHTNodeID,
+			IsRelay:          peer.IsRelay,
+			IsStore:          peer.IsStore,
+			FilesCount:       peer.FilesCount,
+			AppsCount:        peer.AppsCount,
+			LastSeen:         peer.LastSeen,
+			Topic:            peer.Topic,
+			Source:           peer.Source,
+			IsBehindNAT:      peer.IsBehindNAT,
+			NATType:          peer.NATType,
+			UsingRelay:       peer.UsingRelay,
+			ConnectedRelayID: peer.ConnectedRelayID,
 		}
 	}
 

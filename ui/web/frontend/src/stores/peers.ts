@@ -10,6 +10,11 @@ export interface Peer {
   last_seen: string
   topic: string
   source: string
+  // NAT and Relay status
+  is_behind_nat: boolean
+  nat_type: string
+  using_relay: boolean
+  connected_relay_id: string
 }
 
 export interface PeersState {
@@ -144,13 +149,17 @@ export const usePeersStore = defineStore('peers', {
     handlePeersUpdate(payload: any) {
       if (payload && payload.peers) {
         this.peers = payload.peers.map((peer: any) => ({
-          peer_id: peer.id,
-          dht_node_id: peer.dht_node_id || '',
-          is_relay: peer.is_relay || false,
-          is_store: peer.is_store || false,
+          peer_id: peer.peer_id || peer.id,
+          dht_node_id: peer.dht_node_id ?? '',
+          is_relay: peer.is_relay ?? false,
+          is_store: peer.is_store ?? false,
           last_seen: new Date(peer.last_seen * 1000).toISOString(),
-          topic: peer.topic || '',
-          source: peer.source || ''
+          topic: peer.topic ?? '',
+          source: peer.source ?? '',
+          is_behind_nat: peer.is_behind_nat ?? false,
+          nat_type: peer.nat_type ?? '',
+          using_relay: peer.using_relay ?? false,
+          connected_relay_id: peer.connected_relay_id ?? ''
         }))
         this.loading = false
         this.error = null

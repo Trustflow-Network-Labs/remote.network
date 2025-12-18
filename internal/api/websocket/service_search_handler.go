@@ -399,6 +399,24 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 				continue
 			}
 
+			// Update known_peers with fresh network info from metadata
+			// This ensures relay status changes are reflected when searching for services
+			isBehindNAT := metadata.NetworkInfo.NodeType == "private" || metadata.NetworkInfo.UsingRelay
+			if updateErr := ssh.knownPeers.UpdatePeerNetworkInfo(
+				peerID,
+				"remote-network-mesh",
+				isBehindNAT,
+				metadata.NetworkInfo.NATType,
+				metadata.NetworkInfo.UsingRelay,
+				metadata.NetworkInfo.ConnectedRelay,
+			); updateErr != nil {
+				ssh.logger.WithFields(logrus.Fields{
+					"peer_id": peerID[:8],
+					"error":   updateErr,
+				}).Debug("Failed to update network info from service search metadata")
+				// Non-fatal - continue with query even if update fails
+			}
+
 			// Determine how to connect to this peer based on its metadata
 			if metadata.NetworkInfo.UsingRelay {
 				// NAT peer - needs relay forwarding
@@ -1004,6 +1022,24 @@ func (ssh *ServiceSearchHandler) getPeerRelayInfo(peerID string, topic string) (
 			"error":   err.Error(),
 		}).Warn("Failed to query peer metadata from DHT for relay info")
 		return "", "", fmt.Errorf("failed to query metadata: %v", err)
+	}
+
+	// Update known_peers with fresh network info from metadata
+	// This ensures relay status changes are reflected when falling back to relay
+	isBehindNAT := metadata.NetworkInfo.NodeType == "private" || metadata.NetworkInfo.UsingRelay
+	if updateErr := ssh.knownPeers.UpdatePeerNetworkInfo(
+		peerID,
+		topic,
+		isBehindNAT,
+		metadata.NetworkInfo.NATType,
+		metadata.NetworkInfo.UsingRelay,
+		metadata.NetworkInfo.ConnectedRelay,
+	); updateErr != nil {
+		ssh.logger.WithFields(logrus.Fields{
+			"peer_id": peerID[:8],
+			"error":   updateErr,
+		}).Debug("Failed to update network info during relay fallback")
+		// Non-fatal - continue with relay lookup even if update fails
 	}
 
 	// Check if peer is using a relay

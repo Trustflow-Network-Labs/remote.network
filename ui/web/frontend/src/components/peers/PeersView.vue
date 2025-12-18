@@ -95,9 +95,28 @@
             </template>
           </Column>
 
-          <Column field="last_seen" :header="$t('message.peers.lastSeen')" :sortable="true">
+          <Column field="is_behind_nat" :header="$t('message.peers.behindNAT')" :sortable="true">
             <template #body="slotProps">
-              {{ formatDate(slotProps.data.last_seen) }}
+              <span v-if="slotProps.data.is_behind_nat" class="status-badge nat" :title="slotProps.data.nat_type || 'NAT'">
+                <i class="pi pi-shield"></i> {{ $t('message.common.yes') }}
+              </span>
+              <span v-else class="status-badge public">
+                <i class="pi pi-globe"></i> {{ $t('message.common.no') }}
+              </span>
+            </template>
+          </Column>
+
+          <Column field="using_relay" :header="$t('message.peers.relayStatus')" :sortable="true">
+            <template #body="slotProps">
+              <span v-if="slotProps.data.using_relay" class="status-badge connected" :title="'Connected to: ' + (slotProps.data.connected_relay_id || 'Unknown')">
+                <i class="pi pi-link"></i> {{ slotProps.data.connected_relay_id ? shorten(slotProps.data.connected_relay_id, 6, 6) : $t('message.peers.connected') }}
+              </span>
+              <span v-else-if="slotProps.data.is_behind_nat" class="status-badge disconnected">
+                <i class="pi pi-times"></i> {{ $t('message.peers.notConnected') }}
+              </span>
+              <span v-else class="status-badge na">
+                -
+              </span>
             </template>
           </Column>
 
@@ -367,12 +386,6 @@ function toggleFilter(filter: 'active' | 'blacklisted') {
   }
 }
 
-function formatDate(dateString: string): string {
-  if (!dateString) return 'N/A'
-  const date = new Date(dateString)
-  return date.toLocaleString()
-}
-
 async function copyPeerId(peerId: string) {
   const success = await copyToClipboard(peerId)
   if (success) {
@@ -628,7 +641,13 @@ onMounted(async () => {
   border-radius: 3px;
   font-size: 0.85rem;
   font-weight: 500;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+
+  i {
+    font-size: 0.75rem;
+  }
 
   &.relay {
     background-color: #4caf50;
@@ -638,6 +657,33 @@ onMounted(async () => {
   &.no-relay {
     background-color: #757575;
     color: white;
+  }
+
+  // NAT status badges
+  &.nat {
+    background-color: #ff9800;
+    color: white;
+  }
+
+  &.public {
+    background-color: #2196f3;
+    color: white;
+  }
+
+  // Relay connection status badges
+  &.connected {
+    background-color: #4caf50;
+    color: white;
+  }
+
+  &.disconnected {
+    background-color: #f44336;
+    color: white;
+  }
+
+  &.na {
+    background-color: transparent;
+    color: vars.$color-text-secondary;
   }
 }
 
