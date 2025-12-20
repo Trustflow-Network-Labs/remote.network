@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/system"
 )
 
 // MessageType defines the type of QUIC message
@@ -26,6 +27,10 @@ const (
 	MessageTypeServiceRequest   MessageType = "service_request"
 	MessageTypeServiceResponse  MessageType = "service_response"
 	MessageTypeServiceCatalogue MessageType = "service_catalogue"
+
+	// System capabilities (on-demand fetch for full details beyond DHT summary)
+	MessageTypeCapabilitiesRequest  MessageType = "capabilities_request"
+	MessageTypeCapabilitiesResponse MessageType = "capabilities_response"
 
 	// Relay system
 	MessageTypeRelayRegister           MessageType = "relay_register"
@@ -139,6 +144,20 @@ type ServiceResponseData struct {
 	Error     string                 `json:"error,omitempty"`
 }
 
+// CapabilitiesRequestData contains capabilities request parameters
+// This is used to fetch full SystemCapabilities from a peer when the DHT
+// summary (CapabilitySummary) doesn't contain enough detail.
+type CapabilitiesRequestData struct {
+	// Empty - just requesting the peer's full capabilities
+}
+
+// CapabilitiesResponseData contains full system capabilities in response
+type CapabilitiesResponseData struct {
+	Capabilities *system.SystemCapabilities `json:"capabilities,omitempty"`
+	PeerID       string                     `json:"peer_id"`
+	Error        string                     `json:"error,omitempty"`
+}
+
 // EchoData contains echo message data (legacy)
 type EchoData struct {
 	Message string `json:"message"`
@@ -201,7 +220,7 @@ func (msg *QUICMessage) GetDataAs(target interface{}) error {
 // IsRequest returns true if this message expects a response
 func (msg *QUICMessage) IsRequest() bool {
 	switch msg.Type {
-	case MessageTypeMetadataRequest, MessageTypeServiceRequest, MessageTypePing:
+	case MessageTypeMetadataRequest, MessageTypeServiceRequest, MessageTypeCapabilitiesRequest, MessageTypePing:
 		return true
 	default:
 		return false
@@ -211,7 +230,7 @@ func (msg *QUICMessage) IsRequest() bool {
 // IsResponse returns true if this message is a response to a request
 func (msg *QUICMessage) IsResponse() bool {
 	switch msg.Type {
-	case MessageTypeMetadataResponse, MessageTypeServiceResponse, MessageTypePong:
+	case MessageTypeMetadataResponse, MessageTypeServiceResponse, MessageTypeCapabilitiesResponse, MessageTypePong:
 		return true
 	default:
 		return false
@@ -289,6 +308,20 @@ func CreatePong(pingID string, rtt int64) *QUICMessage {
 func CreateEcho(message string) *QUICMessage {
 	return NewQUICMessage(MessageTypeEcho, &EchoData{
 		Message: message,
+	})
+}
+
+// CreateCapabilitiesRequest creates a request for full system capabilities
+func CreateCapabilitiesRequest() *QUICMessage {
+	return NewQUICMessage(MessageTypeCapabilitiesRequest, &CapabilitiesRequestData{})
+}
+
+// CreateCapabilitiesResponse creates a capabilities response with full system capabilities
+func CreateCapabilitiesResponse(capabilities *system.SystemCapabilities, peerID string, errorMsg string) *QUICMessage {
+	return NewQUICMessage(MessageTypeCapabilitiesResponse, &CapabilitiesResponseData{
+		Capabilities: capabilities,
+		PeerID:       peerID,
+		Error:        errorMsg,
 	})
 }
 

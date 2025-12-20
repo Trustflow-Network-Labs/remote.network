@@ -56,6 +56,8 @@ type QUICPeer struct {
 	identityExchanger *IdentityExchanger
 	// Service query handler for service discovery
 	serviceQueryHandler *ServiceQueryHandler
+	// Capabilities handler for on-demand full capabilities fetch
+	capabilitiesHandler *CapabilitiesHandler
 	// Job message handler for job execution and data transfer
 	jobHandler *JobMessageHandler
 	// Callback for relay peer discovery
@@ -390,6 +392,11 @@ func (q *QUICPeer) SetServiceQueryHandler(handler *ServiceQueryHandler) {
 	q.serviceQueryHandler = handler
 }
 
+// SetCapabilitiesHandler sets the capabilities handler for this QUIC peer
+func (q *QUICPeer) SetCapabilitiesHandler(handler *CapabilitiesHandler) {
+	q.capabilitiesHandler = handler
+}
+
 // SetJobHandler sets the job message handler for this QUIC peer
 func (q *QUICPeer) SetJobHandler(handler *JobMessageHandler) {
 	q.jobHandler = handler
@@ -617,6 +624,14 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		} else {
 			q.logger.Warn(fmt.Sprintf("Received service_request from %s but service query handler not initialized", remoteAddr), "quic")
 			response = CreateServiceSearchResponse(nil, q.peerID, "service discovery not available")
+		}
+	case MessageTypeCapabilitiesRequest:
+		// Full capabilities request (for details beyond DHT summary)
+		if q.capabilitiesHandler != nil {
+			response = q.capabilitiesHandler.HandleCapabilitiesRequest(msg, remoteAddr)
+		} else {
+			q.logger.Warn(fmt.Sprintf("Received capabilities_request from %s but capabilities handler not initialized", remoteAddr), "quic")
+			response = CreateCapabilitiesResponse(nil, q.peerID, "capabilities not available")
 		}
 	case MessageTypePing:
 		response = q.handlePing(msg, remoteAddr)
@@ -1284,6 +1299,14 @@ func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage, sourcePeerID string) *
 		}
 		q.logger.Warn("Received service_request via relay but handler not initialized", "quic")
 		return CreateServiceSearchResponse(nil, q.peerID, "service discovery not available")
+
+	case MessageTypeCapabilitiesRequest:
+		// Capabilities request forwarded via relay
+		if q.capabilitiesHandler != nil {
+			return q.capabilitiesHandler.HandleCapabilitiesRequest(msg, sourcePeerID)
+		}
+		q.logger.Warn("Received capabilities_request via relay but handler not initialized", "quic")
+		return CreateCapabilitiesResponse(nil, q.peerID, "capabilities not available")
 
 	case MessageTypeJobRequest, MessageTypeJobResponse, MessageTypeJobStart, MessageTypeJobStartResponse,
 		MessageTypeJobStatusRequest, MessageTypeJobDataTransferRequest, MessageTypeJobDataTransferResponse,
