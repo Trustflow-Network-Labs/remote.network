@@ -167,15 +167,39 @@ func (s *APIServer) handlePeerCapabilities(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Extract system_capabilities from extensions
+	// Extract capabilities from extensions - check for both new (capability_summary) and legacy (system_capabilities) formats
 	var capabilities *system.SystemCapabilities
+	var isFromSummary bool
 	if metadata.Extensions != nil {
-		if sysCapsRaw, ok := metadata.Extensions["system_capabilities"]; ok {
-			// The extensions field may contain the capabilities as a map
-			// We need to convert it to SystemCapabilities struct
-			if sysCapsMap, ok := sysCapsRaw.(map[string]interface{}); ok {
-				capabilities = parseSystemCapabilities(sysCapsMap)
+		// First check for new compact capability_summary format (BEP44 size-optimized)
+		if capSummaryRaw, ok := metadata.Extensions["capability_summary"]; ok {
+			if capSummaryMap, ok := capSummaryRaw.(map[string]interface{}); ok {
+				capabilities = parseCapabilitySummary(capSummaryMap)
+				isFromSummary = true
 			}
+		}
+		// Fall back to legacy system_capabilities format
+		if capabilities == nil {
+			if sysCapsRaw, ok := metadata.Extensions["system_capabilities"]; ok {
+				if sysCapsMap, ok := sysCapsRaw.(map[string]interface{}); ok {
+					capabilities = parseSystemCapabilities(sysCapsMap)
+				}
+			}
+		}
+	}
+
+	// If we only have a summary, try to fetch full capabilities via QUIC
+	if isFromSummary && capabilities != nil {
+		s.logger.Info(fmt.Sprintf("DHT has only summary for peer %s, attempting QUIC fetch for full capabilities", peerID[:min(8, len(peerID))]), "api")
+
+		fullCaps, err := s.peerManager.FetchPeerCapabilities(peerID)
+		if err != nil {
+			s.logger.Debug(fmt.Sprintf("QUIC fetch failed for peer %s (using DHT summary): %v", peerID[:min(8, len(peerID))], err), "api")
+			// Keep using the DHT summary - it's better than nothing
+		} else {
+			s.logger.Info(fmt.Sprintf("Successfully fetched full capabilities via QUIC for peer %s", peerID[:min(8, len(peerID))]), "api")
+			capabilities = fullCaps
+			isFromSummary = false
 		}
 	}
 
@@ -186,12 +210,92 @@ func (s *APIServer) handlePeerCapabilities(w http.ResponseWriter, r *http.Reques
 
 	if capabilities == nil {
 		response.Error = "No system capabilities found in peer metadata"
+	} else if isFromSummary {
+		// Indicate that some fields may be missing since we only have the DHT summary
+		s.logger.Debug(fmt.Sprintf("Returning DHT summary for peer %s (some fields may be incomplete)", peerID[:min(8, len(peerID))]), "api")
 	}
 
 	s.logger.Info(fmt.Sprintf("API /peers/%s/capabilities: Successfully retrieved capabilities", peerID[:min(8, len(peerID))]), "api")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// parseCapabilitySummary converts a compact capability_summary map to SystemCapabilities struct
+// The summary uses short bencode keys (p, a, c, m, d, g, gm, gv, dk, py) and GB instead of MB
+// Some fields will be partial (e.g., no GPU names/UUIDs, no kernel version)
+func parseCapabilitySummary(m map[string]interface{}) *system.SystemCapabilities {
+	caps := &system.SystemCapabilities{}
+
+	// Map short bencode keys to SystemCapabilities fields
+	caps.Platform = toString(m["p"])
+	if caps.Platform == "" {
+		caps.Platform = toString(m["platform"]) // JSON fallback
+	}
+	caps.Architecture = toString(m["a"])
+	if caps.Architecture == "" {
+		caps.Architecture = toString(m["arch"]) // JSON fallback
+	}
+	caps.CPUCores = toInt(m["c"])
+	if caps.CPUCores == 0 {
+		caps.CPUCores = toInt(m["cpu_cores"]) // JSON fallback
+	}
+
+	// Memory in GB (convert back to MB for compatibility)
+	memGB := toInt(m["m"])
+	if memGB == 0 {
+		memGB = toInt(m["memory_gb"]) // JSON fallback
+	}
+	caps.TotalMemoryMB = int64(memGB) * 1024
+
+	// Disk in GB (convert back to MB for compatibility)
+	diskGB := toInt(m["d"])
+	if diskGB == 0 {
+		diskGB = toInt(m["disk_gb"]) // JSON fallback
+	}
+	caps.AvailableDiskMB = int64(diskGB) * 1024
+
+	// Docker availability
+	caps.HasDocker = toBool(m["dk"])
+	if !caps.HasDocker {
+		caps.HasDocker = toBool(m["has_docker"]) // JSON fallback
+	}
+
+	// Python availability
+	caps.HasPython = toBool(m["py"])
+	if !caps.HasPython {
+		caps.HasPython = toBool(m["has_python"]) // JSON fallback
+	}
+
+	// GPU information (partial - only count, total memory, and vendor)
+	gpuCount := toInt(m["g"])
+	if gpuCount == 0 {
+		gpuCount = toInt(m["gpu_count"]) // JSON fallback
+	}
+	gpuMemGB := toInt(m["gm"])
+	if gpuMemGB == 0 {
+		gpuMemGB = toInt(m["gpu_memory_gb"]) // JSON fallback
+	}
+	gpuVendor := toString(m["gv"])
+	if gpuVendor == "" {
+		gpuVendor = toString(m["gpu_vendor"]) // JSON fallback
+	}
+
+	// Create placeholder GPUs based on summary info
+	if gpuCount > 0 {
+		// Distribute total memory across GPUs (approximate)
+		memPerGPU := int64(gpuMemGB) * 1024 / int64(gpuCount)
+		for i := 0; i < gpuCount; i++ {
+			caps.GPUs = append(caps.GPUs, system.GPUInfo{
+				Index:    i,
+				Vendor:   gpuVendor,
+				MemoryMB: memPerGPU,
+				// Name, UUID, DriverVersion not available in summary
+			})
+		}
+	}
+
+	return caps
 }
 
 // parseSystemCapabilities converts a map to SystemCapabilities struct

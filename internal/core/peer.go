@@ -61,6 +61,8 @@ type PeerManager struct {
 	running               bool
 	startTime             time.Time
 	maintenanceTicker     *time.Ticker
+	// Cached system capabilities for on-demand QUIC queries
+	systemCapabilities    *system.SystemCapabilities
 }
 
 func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyPair *crypto.KeyPair) (*PeerManager, error) {
@@ -135,6 +137,21 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 	quic.SetServiceQueryHandler(serviceQueryHandler)
 	logger.Info("Service query handler initialized for service discovery", "core")
 
+	// Gather system capabilities early for both QUIC handler and metadata publishing
+	systemCaps, err := system.GatherSystemCapabilities(paths.DataDir)
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Failed to gather system capabilities: %v", err), "core")
+	} else {
+		logger.Info(fmt.Sprintf("Gathered system capabilities: platform=%s, arch=%s, cpu_cores=%d, memory=%dMB, gpus=%d",
+			systemCaps.Platform, systemCaps.Architecture, systemCaps.CPUCores, systemCaps.TotalMemoryMB, len(systemCaps.GPUs)), "core")
+	}
+
+	// Initialize capabilities handler for on-demand full capabilities fetch via QUIC
+	// (DHT only stores compact CapabilitySummary due to BEP44 1000-byte limit)
+	capabilitiesHandler := p2p.NewCapabilitiesHandler(systemCaps, logger, keyPair.PeerID())
+	quic.SetCapabilitiesHandler(capabilitiesHandler)
+	logger.Info("Capabilities handler initialized for on-demand QUIC queries", "core")
+
 	// Initialize metadata fetcher for DHT-only metadata retrieval with priority routing
 	metadataFetcher := p2p.NewMetadataFetcher(bep44Manager, logger)
 	logger.Info("Metadata fetcher initialized (DHT priority queries)", "core")
@@ -204,6 +221,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 		topics:                  make(map[string]*TopicState),
 		ctx:                     ctx,
 		cancel:                  cancel,
+		systemCapabilities:      systemCaps,
 	}
 
 	// Set dependencies on QUIC peer
@@ -1273,20 +1291,12 @@ func (pm *PeerManager) publishInitialMetadata() error {
 	}
 	pm.logger.Info(fmt.Sprintf("Counted local services for metadata: files=%d, apps=%d", serviceCounts.FilesCount, serviceCounts.AppsCount), "core")
 
-	// Gather system capabilities for standalone service compatibility
-	paths := utils.GetAppPaths("")
-	systemCaps, err := system.GatherSystemCapabilities(paths.DataDir)
-	if err != nil {
-		pm.logger.Warn(fmt.Sprintf("Failed to gather system capabilities: %v", err), "core")
-	} else {
-		pm.logger.Info(fmt.Sprintf("Gathered system capabilities: platform=%s, arch=%s, cpu_cores=%d, memory=%dMB, gpus=%d",
-			systemCaps.Platform, systemCaps.Architecture, systemCaps.CPUCores, systemCaps.TotalMemoryMB, len(systemCaps.GPUs)), "core")
-	}
-
-	// Build extensions map with system capabilities
+	// Build extensions map with compact capability summary for DHT storage
+	// (BEP44 limits DHT values to 1000 bytes, so we use ToSummary() instead of full capabilities)
+	// Full capabilities can be fetched via QUIC using MessageTypeCapabilitiesRequest
 	extensions := make(map[string]interface{})
-	if systemCaps != nil {
-		extensions["system_capabilities"] = systemCaps
+	if pm.systemCapabilities != nil {
+		extensions["capability_summary"] = pm.systemCapabilities.ToSummary()
 	}
 
 	metadata := &database.PeerMetadata{
@@ -1654,4 +1664,53 @@ func (pm *PeerManager) GetMetadataQuery() *p2p.MetadataQueryService {
 // GetPeerID returns the persistent Ed25519-based peer ID
 func (pm *PeerManager) GetPeerID() string {
 	return pm.keyPair.PeerID()
+}
+
+// FetchPeerCapabilities fetches full system capabilities from a peer via QUIC.
+// This is used when DHT only contains a compact CapabilitySummary and full details are needed.
+// Returns error if peer is not directly connected (NAT peers behind relay not supported yet).
+func (pm *PeerManager) FetchPeerCapabilities(peerID string) (*system.SystemCapabilities, error) {
+	pm.logger.Info(fmt.Sprintf("Fetching full capabilities from peer %s via QUIC", peerID[:min(8, len(peerID))]), "core")
+
+	// Create capabilities request message
+	requestMsg := p2p.CreateCapabilitiesRequest()
+	msgBytes, err := requestMsg.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal capabilities request: %v", err)
+	}
+
+	// Try direct QUIC connection
+	responseBytes, err := pm.quic.SendMessageWithResponse(peerID, msgBytes)
+	if err != nil {
+		return nil, fmt.Errorf("QUIC request failed (peer may not be directly connected): %v", err)
+	}
+
+	// Parse response
+	responseMsg, err := p2p.UnmarshalQUICMessage(responseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal capabilities response: %v", err)
+	}
+
+	if responseMsg.Type != p2p.MessageTypeCapabilitiesResponse {
+		return nil, fmt.Errorf("unexpected response type: %s", responseMsg.Type)
+	}
+
+	// Extract capabilities from response
+	var response p2p.CapabilitiesResponseData
+	if err := responseMsg.GetDataAs(&response); err != nil {
+		return nil, fmt.Errorf("failed to parse capabilities response data: %v", err)
+	}
+
+	if response.Error != "" {
+		return nil, fmt.Errorf("peer returned error: %s", response.Error)
+	}
+
+	if response.Capabilities == nil {
+		return nil, fmt.Errorf("peer returned no capabilities")
+	}
+
+	pm.logger.Info(fmt.Sprintf("Successfully fetched capabilities from peer %s: platform=%s, gpus=%d",
+		peerID[:min(8, len(peerID))], response.Capabilities.Platform, len(response.Capabilities.GPUs)), "core")
+
+	return response.Capabilities, nil
 }

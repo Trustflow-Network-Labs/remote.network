@@ -38,6 +38,63 @@ type GPUInfo struct {
 	DriverVersion string `json:"driver_version,omitempty" bencode:"driver_version,omitempty"`
 }
 
+// CapabilitySummary is a compact representation of SystemCapabilities for DHT storage.
+// BEP44 limits DHT values to 1000 bytes, so we use short bencode keys and GB instead of MB.
+// Full capabilities can be fetched via QUIC using the capabilities request message.
+type CapabilitySummary struct {
+	Platform    string `json:"platform" bencode:"p"`       // "linux", "darwin", "windows"
+	Arch        string `json:"arch" bencode:"a"`           // "amd64", "arm64"
+	CPUCores    int    `json:"cpu_cores" bencode:"c"`      // CPU core count
+	MemoryGB    int    `json:"memory_gb" bencode:"m"`      // Total RAM in GB
+	DiskGB      int    `json:"disk_gb" bencode:"d"`        // Available disk in GB
+	GPUCount    int    `json:"gpu_count" bencode:"g"`      // Number of GPUs
+	GPUMemoryGB int    `json:"gpu_memory_gb" bencode:"gm"` // Total GPU memory in GB
+	GPUVendor   string `json:"gpu_vendor" bencode:"gv"`    // "nvidia", "amd", "intel", "mixed", ""
+	HasDocker   bool   `json:"has_docker" bencode:"dk"`    // Docker available
+	HasPython   bool   `json:"has_python" bencode:"py"`    // Python available
+}
+
+// ToSummary creates a compact CapabilitySummary from full SystemCapabilities.
+// This is used for DHT storage to stay under the BEP44 1000-byte limit.
+func (sc *SystemCapabilities) ToSummary() *CapabilitySummary {
+	summary := &CapabilitySummary{
+		Platform:  sc.Platform,
+		Arch:      sc.Architecture,
+		CPUCores:  sc.CPUCores,
+		MemoryGB:  int(sc.TotalMemoryMB / 1024),   // Convert MB to GB
+		DiskGB:    int(sc.AvailableDiskMB / 1024), // Convert MB to GB
+		GPUCount:  len(sc.GPUs),
+		HasDocker: sc.HasDocker,
+		HasPython: sc.HasPython,
+	}
+
+	// Calculate total GPU memory and determine vendor
+	if len(sc.GPUs) > 0 {
+		var totalGPUMemoryMB int64
+		vendors := make(map[string]bool)
+
+		for _, gpu := range sc.GPUs {
+			totalGPUMemoryMB += gpu.MemoryMB
+			if gpu.Vendor != "" {
+				vendors[gpu.Vendor] = true
+			}
+		}
+
+		summary.GPUMemoryGB = int(totalGPUMemoryMB / 1024) // Convert MB to GB
+
+		// Determine GPU vendor string
+		if len(vendors) == 1 {
+			for vendor := range vendors {
+				summary.GPUVendor = vendor
+			}
+		} else if len(vendors) > 1 {
+			summary.GPUVendor = "mixed"
+		}
+	}
+
+	return summary
+}
+
 // ServiceCapabilities represents the requirements of a service
 type ServiceCapabilities struct {
 	Platform         string   `json:"platform"`           // "linux", "windows", "darwin", "any"

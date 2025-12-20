@@ -190,13 +190,13 @@
             <div class="capabilities-grid">
               <div class="cap-item">
                 <span class="cap-label">Platform</span>
-                <span class="cap-value">{{ peerCapabilities.platform }}</span>
+                <span class="cap-value">{{ peerCapabilities.platform || 'N/A' }}</span>
               </div>
               <div class="cap-item">
                 <span class="cap-label">Architecture</span>
-                <span class="cap-value">{{ peerCapabilities.architecture }}</span>
+                <span class="cap-value">{{ peerCapabilities.architecture || 'N/A' }}</span>
               </div>
-              <div class="cap-item">
+              <div class="cap-item" v-if="peerCapabilities.kernel_version">
                 <span class="cap-label">Kernel</span>
                 <span class="cap-value">{{ peerCapabilities.kernel_version }}</span>
               </div>
@@ -207,15 +207,15 @@
           <div class="capabilities-section">
             <h4><i class="pi pi-microchip-ai"></i> CPU</h4>
             <div class="capabilities-grid">
-              <div class="cap-item full-width">
+              <div class="cap-item full-width" v-if="peerCapabilities.cpu_model">
                 <span class="cap-label">Model</span>
                 <span class="cap-value">{{ peerCapabilities.cpu_model }}</span>
               </div>
               <div class="cap-item">
                 <span class="cap-label">Cores</span>
-                <span class="cap-value">{{ peerCapabilities.cpu_cores }}</span>
+                <span class="cap-value">{{ peerCapabilities.cpu_cores || 'N/A' }}</span>
               </div>
-              <div class="cap-item">
+              <div class="cap-item" v-if="peerCapabilities.cpu_threads">
                 <span class="cap-label">Threads</span>
                 <span class="cap-value">{{ peerCapabilities.cpu_threads }}</span>
               </div>
@@ -257,8 +257,8 @@
             <h4><i class="pi pi-bolt"></i> GPU(s)</h4>
             <div v-for="(gpu, index) in peerCapabilities.gpus" :key="index" class="gpu-card">
               <div class="gpu-header">
-                <span class="gpu-vendor-badge" :class="gpu.vendor">{{ gpu.vendor.toUpperCase() }}</span>
-                <span class="gpu-name">{{ gpu.name }}</span>
+                <span class="gpu-vendor-badge" :class="gpu.vendor">{{ (gpu.vendor || 'unknown').toUpperCase() }}</span>
+                <span class="gpu-name">{{ gpu.name || 'GPU ' + (index + 1) }}</span>
               </div>
               <div class="capabilities-grid">
                 <div class="cap-item">

@@ -1527,9 +1527,13 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 		// Note: receiver_job_id = 0 as a special marker for "Local Peer" final destination
 
 		// Get workflow context to get the workflow_execution_id
+		// Note: GetWorkflowJobByID returns (nil, nil) if row not found
 		workflowJob, err := dsw.db.GetWorkflowJobByID(job.WorkflowJobID)
 		if err != nil {
 			return fmt.Errorf("failed to get workflow job %d: %v", job.WorkflowJobID, err)
+		}
+		if workflowJob == nil {
+			return fmt.Errorf("workflow job %d not found", job.WorkflowJobID)
 		}
 
 		// Build path with sender (this job) and receiver (orchestrator/"Local Peer")

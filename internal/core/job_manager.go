@@ -1876,8 +1876,9 @@ func (jm *JobManager) sendStatusUpdate(jobExecutionID int64, workflowJobID int64
 	// Broadcast job status update via WebSocket for real-time UI updates
 	if jm.eventEmitter != nil {
 		// Get workflow job to get execution ID and job name
+		// Note: workflowJob may be nil if this is an executor peer (workflow_jobs only exist on initiator)
 		workflowJob, err := jm.db.GetWorkflowJobByID(workflowJobID)
-		if err == nil {
+		if err == nil && workflowJob != nil {
 			jm.eventEmitter.BroadcastJobStatusUpdate(
 				jobExecutionID,
 				workflowJobID,
@@ -1981,11 +1982,16 @@ func (jm *JobManager) SubmitJobWithOptions(request *types.JobExecutionRequest, n
 
 	if isLocalWorkflow {
 		// Validate workflow_job exists for local workflows
-		_, err := jm.db.GetWorkflowJobByID(request.WorkflowJobID)
+		// Note: GetWorkflowJobByID returns (nil, nil) if row not found
+		workflowJob, err := jm.db.GetWorkflowJobByID(request.WorkflowJobID)
 		if err != nil {
-			jm.logger.Error(fmt.Sprintf("Workflow job %d not found for local workflow: %v",
+			jm.logger.Error(fmt.Sprintf("Workflow job %d lookup error for local workflow: %v",
 				request.WorkflowJobID, err), "job_manager")
-			return nil, fmt.Errorf("workflow job not found: %v", err)
+			return nil, fmt.Errorf("workflow job lookup error: %v", err)
+		}
+		if workflowJob == nil {
+			jm.logger.Error(fmt.Sprintf("Workflow job %d not found for local workflow", request.WorkflowJobID), "job_manager")
+			return nil, fmt.Errorf("workflow job %d not found", request.WorkflowJobID)
 		}
 		jm.logger.Debug(fmt.Sprintf("Validated workflow job %d exists locally", request.WorkflowJobID), "job_manager")
 	} else {
@@ -2157,9 +2163,10 @@ func (jm *JobManager) checkOutputDestinationsReady(job *database.JobExecution) (
 			// Check if peer has a job_execution_id or workflow_job with remote_job_execution_id
 			if peer.PeerJobExecutionID == nil && peer.PeerWorkflowJobID != nil {
 				// Check if the workflow_job has a remote_job_execution_id
+				// Note: GetWorkflowJobByID returns (nil, nil) if row not found
 				workflowJob, err := jm.db.GetWorkflowJobByID(*peer.PeerWorkflowJobID)
-				if err != nil || workflowJob.RemoteJobExecutionID == nil {
-					// Destination peer hasn't responded yet
+				if err != nil || workflowJob == nil || workflowJob.RemoteJobExecutionID == nil {
+					// Destination peer hasn't responded yet or workflow_job not found
 					jm.logger.Debug(fmt.Sprintf("Job %d waiting for peer %s (workflow_job %d) to accept job",
 						job.ID, formatPeerID(peer.PeerID), *peer.PeerWorkflowJobID), "job_manager")
 					return false, nil
@@ -2547,14 +2554,23 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 		// Orchestrator peer - look up workflow_job (for Local Peer delivery)
 		jm.logger.Info(fmt.Sprintf("Receiver is orchestrator - looking up workflow_job %d for Local Peer", request.WorkflowJobID), "job_manager")
 
+		// Note: GetWorkflowJobByID returns (nil, nil) if row not found
 		workflowJob, err := jm.db.GetWorkflowJobByID(request.WorkflowJobID)
 		if err != nil {
 			jm.logger.Error(fmt.Sprintf("Failed to get workflow_job %d: %v", request.WorkflowJobID, err), "job_manager")
 			return &types.JobDataTransferResponse{
 				WorkflowJobID: request.WorkflowJobID,
 				Accepted:      false,
-				Message:       fmt.Sprintf("Workflow job not found: %v", err),
+				Message:       fmt.Sprintf("Workflow job lookup error: %v", err),
 			}, err
+		}
+		if workflowJob == nil {
+			jm.logger.Error(fmt.Sprintf("Workflow job %d not found", request.WorkflowJobID), "job_manager")
+			return &types.JobDataTransferResponse{
+				WorkflowJobID: request.WorkflowJobID,
+				Accepted:      false,
+				Message:       fmt.Sprintf("Workflow job %d not found", request.WorkflowJobID),
+			}, fmt.Errorf("workflow job %d not found", request.WorkflowJobID)
 		}
 
 		// Check for sender job execution ID (needed for path construction)
