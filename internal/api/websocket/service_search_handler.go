@@ -837,6 +837,23 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 		return nil, fmt.Errorf("invalid connection type: expected *quic.Conn, got %T", conn)
 	}
 
+	// Verify peer ID after connection to detect NAT collisions
+	// When multiple peers share the same public IP (behind same NAT), connecting to
+	// an IP:port may reach a different peer than expected. Identity exchange reveals
+	// the actual peer ID, which must match our expected target.
+	if peerID != "" {
+		connInfo := ssh.quicPeer.GetConnectionInfo(peerAddr)
+		if connInfo != nil && connInfo.PeerID != "" && connInfo.PeerID != peerID {
+			ssh.logger.WithFields(logrus.Fields{
+				"peer_address":     peerAddr,
+				"expected_peer_id": peerID[:8],
+				"actual_peer_id":   connInfo.PeerID[:8],
+			}).Warn("Peer ID mismatch after connection - NAT collision detected (multiple peers behind same public IP)")
+			return nil, fmt.Errorf("peer ID mismatch: expected %s but connected to %s (NAT collision - both peers share public IP %s)",
+				peerID[:8], connInfo.PeerID[:8], peerAddr)
+		}
+	}
+
 	// Open stream for service search with the parent context
 	ssh.logger.WithFields(logrus.Fields{
 		"peer_address": peerAddr,
