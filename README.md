@@ -107,7 +107,7 @@ git clone https://github.com/Trustflow-Network-Labs/remote-network-node.git
 cd remote-network-node
 
 # Build
-go build -o remote-network ./cmd/main.go
+go build -o remote-network ./
 ```
 
 ### Running
@@ -116,8 +116,13 @@ go build -o remote-network ./cmd/main.go
 # Start the node
 ./remote-network start
 
-# Access Web UI
-open http://localhost:30069
+# Start node as a relay (for public IP nodes that can relay traffic for NAT-ed peers)
+./remote-network start -r
+
+# Access Web UI (HTTPS on port 30069, HTTP fallback on port 36900)
+open https://localhost:30069
+# or use HTTP fallback (localhost only)
+open http://localhost:36900
 ```
 
 ### Key Management
