@@ -209,67 +209,6 @@ func (ntm *NATTopologyManager) IsPeerOnSameSubnet(peerMetadata *database.PeerMet
 	return localNet.Contains(peerIP)
 }
 
-// GetConnectionStrategy determines the best connection strategy for a peer
-func (ntm *NATTopologyManager) GetConnectionStrategy(peerID string, peerMetadata *database.PeerMetadata, localNATType, peerNATType NATType) ConnectionStrategy {
-	// Strategy priority:
-	// 1. Direct connection if on same LAN
-	// 2. Direct connection if both have public IPs
-	// 3. Hole punching if feasible based on NAT types
-	// 4. Relay as fallback
-
-	// Check if on same subnet (local network)
-	if ntm.IsPeerOnSameSubnet(peerMetadata) {
-		ntm.logger.Debug(fmt.Sprintf("Peer %s on same subnet - using direct local connection", peerID), "nat-topology")
-		return StrategyDirectLocal
-	}
-
-	// Check if both have public IPs (no NAT)
-	if localNATType == NATTypeNone && peerNATType == NATTypeNone {
-		ntm.logger.Debug("Both peers have public IPs - using direct connection", "nat-topology")
-		return StrategyDirectPublic
-	}
-
-	// One peer is public - can connect directly
-	if localNATType == NATTypeNone || peerNATType == NATTypeNone {
-		ntm.logger.Debug("One peer is public - using direct connection", "nat-topology")
-		return StrategyDirectPublic
-	}
-
-	// Both peers behind NAT - check if hole punching is feasible
-	if ntm.canHolePunch(localNATType, peerNATType) {
-		ntm.logger.Debug(fmt.Sprintf("Peers behind NAT (%s <-> %s) - using hole punching",
-			localNATType.String(), peerNATType.String()), "nat-topology")
-		return StrategyHolePunch
-	}
-
-	// Hole punching not feasible - use relay
-	ntm.logger.Debug(fmt.Sprintf("Hole punching not feasible (%s <-> %s) - using relay",
-		localNATType.String(), peerNATType.String()), "nat-topology")
-	return StrategyRelay
-}
-
-// canHolePunch determines if hole punching is feasible between two NAT types
-func (ntm *NATTopologyManager) canHolePunch(localNAT, peerNAT NATType) bool {
-	// Hole punching success matrix:
-	// Full Cone <-> Any Cone: High success
-	// Restricted Cone <-> Restricted Cone: Moderate success
-	// Port Restricted <-> Port Restricted: Moderate success
-	// Symmetric <-> Any: Low success (requires relay)
-
-	// If either side is symmetric NAT, hole punching is difficult
-	if localNAT == NATTypeSymmetric || peerNAT == NATTypeSymmetric {
-		return false
-	}
-
-	// If either side is unknown, assume we can't hole punch
-	if localNAT == NATTypeUnknown || peerNAT == NATTypeUnknown {
-		return false
-	}
-
-	// Cone NAT types can generally hole punch
-	return true
-}
-
 // GetLocalTopology returns the local network topology
 func (ntm *NATTopologyManager) GetLocalTopology() *NetworkTopology {
 	ntm.topologyMutex.RLock()
