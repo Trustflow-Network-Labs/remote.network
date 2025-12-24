@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -26,9 +27,11 @@ import (
 
 // ConnectionInfo stores metadata about a QUIC connection
 type ConnectionInfo struct {
-	Conn       *quic.Conn
-	PeerID     string // Authenticated peer ID from identity exchange
-	RemoteAddr string // Remote address (IP:Port)
+	Conn          *quic.Conn
+	PeerID        string    // Authenticated peer ID from identity exchange
+	RemoteAddr    string    // Remote address (IP:Port)
+	LastUsed      time.Time // Last time this connection was used (for cleanup)
+	ActiveStreams int32     // Atomic counter - tracks active streams
 }
 
 type QUICPeer struct {
@@ -379,6 +382,9 @@ func (q *QUICPeer) Start() error {
 	// Accept incoming connections
 	go q.acceptConnections()
 
+	// Start background cleanup goroutine for stale connections
+	go q.cleanupIdleConnections()
+
 	return nil
 }
 
@@ -440,9 +446,11 @@ func (q *QUICPeer) acceptConnections() {
 			q.connMutex.Lock()
 			// Store connection temporarily without peer ID (will be updated after identity exchange)
 			q.connections[remoteAddr] = &ConnectionInfo{
-				Conn:       conn,
-				PeerID:     "", // Will be set during identity exchange
-				RemoteAddr: remoteAddr,
+				Conn:          conn,
+				PeerID:        "", // Will be set during identity exchange
+				RemoteAddr:    remoteAddr,
+				LastUsed:      time.Now(),
+				ActiveStreams: 0,
 			}
 			q.connMutex.Unlock()
 
@@ -759,13 +767,27 @@ func (q *QUICPeer) handleEcho(msg *QUICMessage, remoteAddr string) *QUICMessage 
 func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 	q.logger.Info(fmt.Sprintf("Connecting to peer %s", addr), "quic")
 
-	// Check if already connected
+	// Check if already connected and validate connection is still alive
 	q.connMutex.RLock()
 	if connInfo, exists := q.connections[addr]; exists {
+		conn := connInfo.Conn
 		q.connMutex.RUnlock()
-		return connInfo.Conn, nil
+
+		// Validate connection is still alive
+		select {
+		case <-conn.Context().Done():
+			// Connection dead, remove from cache and reconnect
+			q.logger.Debug(fmt.Sprintf("Cached connection to %s is dead, reconnecting", addr), "quic")
+			q.DisconnectFromPeer(addr)
+			// Fall through to create new connection
+		default:
+			// Connection still alive, return cached
+			q.logger.Debug(fmt.Sprintf("Reusing cached connection to %s", addr), "quic")
+			return conn, nil
+		}
+	} else {
+		q.connMutex.RUnlock()
 	}
-	q.connMutex.RUnlock()
 
 	// Create TLS config for client with custom peer verification
 	// InsecureSkipVerify skips hostname/IP verification (not applicable to P2P),
@@ -836,9 +858,11 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 		// Store authenticated connection with peer ID
 		q.connMutex.Lock()
 		q.connections[addr] = &ConnectionInfo{
-			Conn:       conn,
-			PeerID:     remotePeer.PeerID,
-			RemoteAddr: addr,
+			Conn:          conn,
+			PeerID:        remotePeer.PeerID,
+			RemoteAddr:    addr,
+			LastUsed:      time.Now(),
+			ActiveStreams: 0,
 		}
 		q.peerConnections[remotePeer.PeerID] = addr
 		q.connMutex.Unlock()
@@ -853,9 +877,11 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 		// Store connection without peer ID (not authenticated)
 		q.connMutex.Lock()
 		q.connections[addr] = &ConnectionInfo{
-			Conn:       conn,
-			PeerID:     "",
-			RemoteAddr: addr,
+			Conn:          conn,
+			PeerID:        "",
+			RemoteAddr:    addr,
+			LastUsed:      time.Now(),
+			ActiveStreams: 0,
 		}
 		q.connMutex.Unlock()
 	}
@@ -1332,13 +1358,106 @@ func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage, sourcePeerID string) *
 	}
 }
 
+// updateStreamCount atomically updates the active stream counter for a connection
+func (q *QUICPeer) updateStreamCount(conn *quic.Conn, delta int32) {
+	q.connMutex.Lock()
+	defer q.connMutex.Unlock()
+
+	for _, connInfo := range q.connections {
+		if connInfo.Conn == conn {
+			atomic.AddInt32(&connInfo.ActiveStreams, delta)
+			break
+		}
+	}
+}
+
+// updateLastUsed updates the LastUsed timestamp for a connection
+func (q *QUICPeer) updateLastUsed(conn *quic.Conn) {
+	q.connMutex.Lock()
+	defer q.connMutex.Unlock()
+
+	for _, connInfo := range q.connections {
+		if connInfo.Conn == conn {
+			connInfo.LastUsed = time.Now()
+			break
+		}
+	}
+}
+
 // openStreamWithTimeout opens a QUIC stream with configurable timeout to prevent blocking
+// Now includes stream tracking for proactive connection cleanup
 func (q *QUICPeer) openStreamWithTimeout(conn *quic.Conn) (*quic.Stream, error) {
+	// Update connection usage tracking - update LastUsed
+	q.updateLastUsed(conn)
+
 	streamOpenTimeout := q.config.GetConfigDuration("quic_stream_open_timeout", 5*time.Second)
 	streamCtx, cancel := context.WithTimeout(q.ctx, streamOpenTimeout)
 	defer cancel()
 
-	return conn.OpenStreamSync(streamCtx)
+	stream, err := conn.OpenStreamSync(streamCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	return stream, nil
+}
+
+// cleanupIdleConnections runs periodically to remove stale idle connections
+func (q *QUICPeer) cleanupIdleConnections() {
+	// Cleanup interval: check every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	// Idle timeout: remove connections unused for 15 minutes
+	// (Half of QUIC's 30-minute idle timeout to catch stale connections early)
+	idleTimeout := 15 * time.Minute
+
+	q.logger.Debug(fmt.Sprintf("Starting idle connection cleanup (interval=5m, timeout=15m)"), "quic")
+
+	for {
+		select {
+		case <-q.ctx.Done():
+			q.logger.Debug("Stopping idle connection cleanup", "quic")
+			return
+		case <-ticker.C:
+			q.performCleanup(idleTimeout)
+		}
+	}
+}
+
+// performCleanup removes idle connections that haven't been used recently
+func (q *QUICPeer) performCleanup(idleTimeout time.Duration) {
+	q.connMutex.Lock()
+	defer q.connMutex.Unlock()
+
+	now := time.Now()
+	cleaned := 0
+
+	for addr, connInfo := range q.connections {
+		// Check if connection is idle (not recently used)
+		activeStreams := atomic.LoadInt32(&connInfo.ActiveStreams)
+		timeSinceLastUse := now.Sub(connInfo.LastUsed)
+
+		// Only cleanup if no active streams and hasn't been used recently
+		if activeStreams == 0 && timeSinceLastUse > idleTimeout {
+			q.logger.Debug(fmt.Sprintf("Cleaning up idle connection to %s (idle for %v)",
+				addr, timeSinceLastUse), "quic")
+
+			// Close connection and remove from cache
+			connInfo.Conn.CloseWithError(0, "idle timeout")
+
+			// Remove from maps
+			if connInfo.PeerID != "" {
+				delete(q.peerConnections, connInfo.PeerID)
+			}
+			delete(q.connections, addr)
+			cleaned++
+		}
+	}
+
+	if cleaned > 0 {
+		q.logger.Debug(fmt.Sprintf("Cleaned up %d idle connections", cleaned), "quic")
+	}
 }
 
 func (q *QUICPeer) Stop() error {

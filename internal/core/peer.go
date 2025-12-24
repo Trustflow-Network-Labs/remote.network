@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -1668,9 +1669,70 @@ func (pm *PeerManager) GetPeerID() string {
 
 // FetchPeerCapabilities fetches full system capabilities from a peer via QUIC.
 // This is used when DHT only contains a compact CapabilitySummary and full details are needed.
-// Returns error if peer is not directly connected (NAT peers behind relay not supported yet).
+// This method proactively establishes a connection if one doesn't exist, similar to remote search.
 func (pm *PeerManager) FetchPeerCapabilities(peerID string) (*system.SystemCapabilities, error) {
 	pm.logger.Info(fmt.Sprintf("Fetching full capabilities from peer %s via QUIC", peerID[:min(8, len(peerID))]), "core")
+
+	// Check if connection already exists
+	_, err := pm.quic.GetConnectionByPeerID(peerID)
+	if err != nil {
+		// No existing connection - need to establish one
+		pm.logger.Debug(fmt.Sprintf("No existing connection to peer %s, establishing connection", peerID[:min(8, len(peerID))]), "core")
+
+		// Get peer's metadata to determine endpoint
+		if pm.metadataQuery == nil {
+			return nil, fmt.Errorf("metadata query service not available")
+		}
+
+		// Get topic
+		topics := pm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+		topic := "remote-network-mesh"
+		if len(topics) > 0 {
+			topic = topics[0]
+		}
+
+		// Get known peer to retrieve public key
+		knownPeer, err := pm.knownPeers.GetKnownPeer(peerID, topic)
+		if err != nil || knownPeer == nil {
+			return nil, fmt.Errorf("peer %s not found in known peers", peerID[:min(8, len(peerID))])
+		}
+
+		// Query DHT for peer metadata to get endpoint
+		metadata, err := pm.metadataQuery.QueryMetadata(peerID, knownPeer.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query metadata for peer %s: %v", peerID[:min(8, len(peerID))], err)
+		}
+
+		// Determine how to connect based on metadata
+		if metadata.NetworkInfo.UsingRelay {
+			// Peer is behind NAT and using relay - use relay forwarding
+			pm.logger.Debug(fmt.Sprintf("Peer %s is using relay %s, using relay forwarding", peerID[:min(8, len(peerID))], metadata.NetworkInfo.ConnectedRelay[:min(8, len(metadata.NetworkInfo.ConnectedRelay))]), "core")
+
+			// Validate relay info
+			if metadata.NetworkInfo.RelayAddress == "" || metadata.NetworkInfo.RelaySessionID == "" {
+				return nil, fmt.Errorf("peer %s metadata missing relay connection details", peerID[:min(8, len(peerID))])
+			}
+
+			// Fetch via relay
+			return pm.fetchPeerCapabilitiesViaRelay(peerID, metadata.NetworkInfo.RelayAddress, metadata.NetworkInfo.RelaySessionID)
+		}
+
+		// For public peers, connect directly
+		if metadata.NetworkInfo.PublicIP == "" {
+			return nil, fmt.Errorf("peer %s has no public IP in metadata", peerID[:min(8, len(peerID))])
+		}
+
+		peerAddr := fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, metadata.NetworkInfo.PublicPort)
+		pm.logger.Info(fmt.Sprintf("Establishing connection to peer %s at %s", peerID[:min(8, len(peerID))], peerAddr), "core")
+
+		// Establish QUIC connection (includes identity exchange)
+		_, err = pm.quic.ConnectToPeer(peerAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to peer %s at %s: %v", peerID[:min(8, len(peerID))], peerAddr, err)
+		}
+
+		pm.logger.Info(fmt.Sprintf("Successfully connected to peer %s", peerID[:min(8, len(peerID))]), "core")
+	}
 
 	// Create capabilities request message
 	requestMsg := p2p.CreateCapabilitiesRequest()
@@ -1679,10 +1741,10 @@ func (pm *PeerManager) FetchPeerCapabilities(peerID string) (*system.SystemCapab
 		return nil, fmt.Errorf("failed to marshal capabilities request: %v", err)
 	}
 
-	// Try direct QUIC connection
+	// Send QUIC request (connection should now exist)
 	responseBytes, err := pm.quic.SendMessageWithResponse(peerID, msgBytes)
 	if err != nil {
-		return nil, fmt.Errorf("QUIC request failed (peer may not be directly connected): %v", err)
+		return nil, fmt.Errorf("QUIC request failed: %v", err)
 	}
 
 	// Parse response
@@ -1711,6 +1773,98 @@ func (pm *PeerManager) FetchPeerCapabilities(peerID string) (*system.SystemCapab
 
 	pm.logger.Info(fmt.Sprintf("Successfully fetched capabilities from peer %s: platform=%s, gpus=%d",
 		peerID[:min(8, len(peerID))], response.Capabilities.Platform, len(response.Capabilities.GPUs)), "core")
+
+	return response.Capabilities, nil
+}
+
+// fetchPeerCapabilitiesViaRelay fetches capabilities from a peer behind NAT through a relay
+func (pm *PeerManager) fetchPeerCapabilitiesViaRelay(targetPeerID string, relayAddr string, sessionID string) (*system.SystemCapabilities, error) {
+	pm.logger.Info(fmt.Sprintf("Fetching capabilities from peer %s via relay %s", targetPeerID[:min(8, len(targetPeerID))], relayAddr), "core")
+
+	// Create capabilities request message
+	capabilitiesMsg := p2p.CreateCapabilitiesRequest()
+	capabilitiesMsgBytes, err := capabilitiesMsg.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal capabilities request: %v", err)
+	}
+
+	// Create relay forward message wrapping the capabilities request
+	forwardMsg := p2p.NewQUICMessage(p2p.MessageTypeRelayForward, &p2p.RelayForwardData{
+		SessionID:    sessionID,
+		SourcePeerID: pm.keyPair.PeerID(),
+		TargetPeerID: targetPeerID,
+		MessageType:  "capabilities_request",
+		Payload:      capabilitiesMsgBytes,
+		PayloadSize:  int64(len(capabilitiesMsgBytes)),
+	})
+	forwardMsgBytes, err := forwardMsg.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal relay forward: %v", err)
+	}
+
+	// Connect to relay
+	pm.logger.Debug(fmt.Sprintf("Connecting to relay %s", relayAddr), "core")
+	conn, err := pm.quic.ConnectToPeer(relayAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to relay: %v", err)
+	}
+
+	// Open stream to relay
+	stream, err := conn.OpenStreamSync(pm.ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stream to relay: %v", err)
+	}
+	defer stream.Close()
+
+	// Send relay forward message
+	_, err = stream.Write(forwardMsgBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send relay forward message: %v", err)
+	}
+
+	pm.logger.Debug(fmt.Sprintf("Sent relay forward message to %s, waiting for response", relayAddr), "core")
+
+	// Set read deadline to prevent hanging indefinitely
+	readTimeout := pm.config.GetConfigDuration("relay_response_timeout", 10*time.Second)
+	stream.SetReadDeadline(time.Now().Add(readTimeout))
+
+	// Read response from relay
+	buffer := make([]byte, pm.config.GetConfigInt("buffer_size", 65536, 1024, 1048576))
+	n, err := stream.Read(buffer)
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("failed to read response from relay (timeout after %v): %v", readTimeout, err)
+	}
+
+	if n == 0 {
+		return nil, fmt.Errorf("received empty response from relay")
+	}
+
+	// Parse response
+	responseMsg, err := p2p.UnmarshalQUICMessage(buffer[:n])
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %v", err)
+	}
+
+	if responseMsg.Type != p2p.MessageTypeCapabilitiesResponse {
+		return nil, fmt.Errorf("unexpected response type: %s", responseMsg.Type)
+	}
+
+	// Extract capabilities from response
+	var response p2p.CapabilitiesResponseData
+	if err := responseMsg.GetDataAs(&response); err != nil {
+		return nil, fmt.Errorf("failed to parse capabilities response data: %v", err)
+	}
+
+	if response.Error != "" {
+		return nil, fmt.Errorf("peer returned error: %s", response.Error)
+	}
+
+	if response.Capabilities == nil {
+		return nil, fmt.Errorf("peer returned no capabilities")
+	}
+
+	pm.logger.Info(fmt.Sprintf("Successfully fetched capabilities from peer %s via relay: platform=%s, gpus=%d",
+		targetPeerID[:min(8, len(targetPeerID))], response.Capabilities.Platform, len(response.Capabilities.GPUs)), "core")
 
 	return response.Capabilities, nil
 }

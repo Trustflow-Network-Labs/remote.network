@@ -173,17 +173,17 @@
         :modal="true"
         :closable="true"
       >
-        <div v-if="capabilitiesLoading" class="capabilities-loading">
-          <ProgressSpinner style="width:40px;height:40px" strokeWidth="4" />
-          <p>Loading capabilities from DHT...</p>
-        </div>
-
-        <div v-else-if="capabilitiesError" class="capabilities-error">
+        <div v-if="capabilitiesError" class="capabilities-error">
           <i class="pi pi-exclamation-triangle"></i>
           <p>{{ capabilitiesError }}</p>
         </div>
 
         <div v-else-if="peerCapabilities" class="capabilities-content">
+          <!-- Loading indicator for background fetch -->
+          <div v-if="capabilitiesLoading" class="capabilities-loading-subtle">
+            <ProgressSpinner style="width:20px;height:20px" strokeWidth="6" />
+            <span>Loading full details...</span>
+          </div>
           <!-- System Info -->
           <div class="capabilities-section">
             <h4><i class="pi pi-desktop"></i> System</h4>
@@ -306,7 +306,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useConfirm } from 'primevue/useconfirm'
@@ -326,7 +326,8 @@ import AppLayout from '../layout/AppLayout.vue'
 import { usePeersStore } from '../../stores/peers'
 import { useClipboard } from '../../composables/useClipboard'
 import { useTextUtils } from '../../composables/useTextUtils'
-import { api, type SystemCapabilities } from '../../services/api'
+import { useWebSocket } from '../../composables/useWebSocket'
+import { api, type SystemCapabilities, type PeerCapabilitiesResponse } from '../../services/api'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -335,6 +336,7 @@ const toast = useToast()
 const peersStore = usePeersStore()
 const { copyToClipboard } = useClipboard()
 const { shorten } = useTextUtils()
+const { subscribe, MessageType } = useWebSocket()
 
 // Filter state
 const activeFilter = ref<'all' | 'active' | 'blacklisted'>('all')
@@ -416,25 +418,59 @@ function viewPeerServices(peer: any) {
 async function viewPeerCapabilities(peer: any) {
   selectedPeerId.value = peer.peer_id
   capabilitiesDialogVisible.value = true
-  capabilitiesLoading.value = true
+  capabilitiesLoading.value = true // Will show subtle indicator for background fetch
   capabilitiesError.value = null
   peerCapabilities.value = null
 
   try {
+    // Fetch DHT summary - returns immediately with basic info
     const response = await api.getPeerCapabilities(peer.peer_id)
     if (response.error) {
       capabilitiesError.value = response.error
+      capabilitiesLoading.value = false
     } else if (response.capabilities) {
+      // Show DHT summary immediately
       peerCapabilities.value = response.capabilities
+      // Keep capabilitiesLoading true - background fetch in progress
+      // Will be updated via WebSocket when full capabilities arrive
     } else {
       capabilitiesError.value = 'No capabilities data available'
+      capabilitiesLoading.value = false
     }
   } catch (error: any) {
     capabilitiesError.value = error.message || 'Failed to fetch capabilities'
-  } finally {
     capabilitiesLoading.value = false
   }
 }
+
+// Handle WebSocket capability updates
+function handleCapabilitiesUpdate(payload: PeerCapabilitiesResponse) {
+  // Only update if this is the currently viewed peer
+  if (payload.peer_id === selectedPeerId.value && capabilitiesDialogVisible.value) {
+    if (payload.capabilities) {
+      peerCapabilities.value = payload.capabilities
+      capabilitiesLoading.value = false // Full details loaded
+
+      // Show success toast
+      toast.add({
+        severity: 'success',
+        summary: 'Capabilities Updated',
+        detail: 'Full peer capabilities loaded',
+        life: 2000
+      })
+    }
+  }
+}
+
+// Subscribe to WebSocket capabilities updates
+onMounted(() => {
+  const unsubscribe = subscribe(MessageType.PEER_CAPABILITIES_UPDATED, handleCapabilitiesUpdate)
+
+  // Cleanup on unmount
+  onUnmounted(() => {
+    unsubscribe()
+  })
+})
 
 function formatMemory(mb: number): string {
   if (!mb) return 'N/A'
@@ -706,6 +742,22 @@ onMounted(async () => {
   p {
     color: vars.$color-text-secondary;
     margin: 0.5rem 0 0 0;
+  }
+}
+
+.capabilities-loading-subtle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  margin-bottom: 1rem;
+  background-color: rgba(33, 150, 243, 0.1);
+  border-radius: 4px;
+  font-size: 0.875rem;
+  color: #2196f3;
+
+  span {
+    color: #2196f3;
   }
 }
 

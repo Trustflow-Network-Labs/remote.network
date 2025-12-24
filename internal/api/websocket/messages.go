@@ -47,6 +47,9 @@ const (
 	MessageTypeServiceSearchRequest  MessageType = "service.search.request"
 	MessageTypeServiceSearchResponse MessageType = "service.search.response"
 
+	// Peer capabilities message types
+	MessageTypePeerCapabilitiesUpdated MessageType = "peer.capabilities.updated"
+
 	// Control message types
 	MessageTypePing            MessageType = "ping"
 	MessageTypePong            MessageType = "pong"

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	ws "github.com/Trustflow-Network-Labs/remote-network-node/internal/api/websocket"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/system"
 )
 
@@ -188,21 +189,7 @@ func (s *APIServer) handlePeerCapabilities(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// If we only have a summary, try to fetch full capabilities via QUIC
-	if isFromSummary && capabilities != nil {
-		s.logger.Info(fmt.Sprintf("DHT has only summary for peer %s, attempting QUIC fetch for full capabilities", peerID[:min(8, len(peerID))]), "api")
-
-		fullCaps, err := s.peerManager.FetchPeerCapabilities(peerID)
-		if err != nil {
-			s.logger.Debug(fmt.Sprintf("QUIC fetch failed for peer %s (using DHT summary): %v", peerID[:min(8, len(peerID))], err), "api")
-			// Keep using the DHT summary - it's better than nothing
-		} else {
-			s.logger.Info(fmt.Sprintf("Successfully fetched full capabilities via QUIC for peer %s", peerID[:min(8, len(peerID))]), "api")
-			capabilities = fullCaps
-			isFromSummary = false
-		}
-	}
-
+	// Return DHT summary immediately for fast UI response
 	response := PeerCapabilitiesResponse{
 		PeerID:       peerID,
 		Capabilities: capabilities,
@@ -212,13 +199,40 @@ func (s *APIServer) handlePeerCapabilities(w http.ResponseWriter, r *http.Reques
 		response.Error = "No system capabilities found in peer metadata"
 	} else if isFromSummary {
 		// Indicate that some fields may be missing since we only have the DHT summary
-		s.logger.Debug(fmt.Sprintf("Returning DHT summary for peer %s (some fields may be incomplete)", peerID[:min(8, len(peerID))]), "api")
+		s.logger.Debug(fmt.Sprintf("Returning DHT summary for peer %s, fetching full capabilities in background", peerID[:min(8, len(peerID))]), "api")
 	}
 
-	s.logger.Info(fmt.Sprintf("API /peers/%s/capabilities: Successfully retrieved capabilities", peerID[:min(8, len(peerID))]), "api")
+	s.logger.Info(fmt.Sprintf("API /peers/%s/capabilities: Returning DHT summary immediately", peerID[:min(8, len(peerID))]), "api")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+
+	// If we only have a summary, fetch full capabilities in background and push via WebSocket
+	if isFromSummary && capabilities != nil {
+		go func() {
+			s.logger.Info(fmt.Sprintf("Background: Fetching full capabilities for peer %s via QUIC", peerID[:min(8, len(peerID))]), "api")
+
+			fullCaps, err := s.peerManager.FetchPeerCapabilities(peerID)
+			if err != nil {
+				s.logger.Debug(fmt.Sprintf("Background: QUIC fetch failed for peer %s: %v", peerID[:min(8, len(peerID))], err), "api")
+				// Failed to fetch - client will keep using DHT summary
+				return
+			}
+
+			s.logger.Info(fmt.Sprintf("Background: Successfully fetched full capabilities for peer %s, broadcasting update", peerID[:min(8, len(peerID))]), "api")
+
+			// Broadcast capabilities update via WebSocket
+			if s.wsHub != nil {
+				updatePayload := PeerCapabilitiesResponse{
+					PeerID:       peerID,
+					Capabilities: fullCaps,
+				}
+				if err := s.wsHub.BroadcastPayload(ws.MessageTypePeerCapabilitiesUpdated, updatePayload); err != nil {
+					s.logger.Error(fmt.Sprintf("Failed to broadcast capabilities update for peer %s: %v", peerID[:min(8, len(peerID))], err), "api")
+				}
+			}
+		}()
+	}
 }
 
 // parseCapabilitySummary converts a compact capability_summary map to SystemCapabilities struct

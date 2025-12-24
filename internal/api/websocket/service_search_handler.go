@@ -1085,8 +1085,26 @@ func (ssh *ServiceSearchHandler) getPeerRelayInfo(peerID string, topic string) (
 	return metadata.NetworkInfo.RelayAddress, metadata.NetworkInfo.RelaySessionID, nil
 }
 
+// isDeadlineError checks if an error is a deadline/timeout error
+func isDeadlineError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for common timeout error strings
+	errStr := err.Error()
+	return strings.Contains(errStr, "deadline exceeded") ||
+		strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "timeout")
+}
+
 // queryPeerViaRelay queries a peer's services through a relay
+// Automatically retries once if the first attempt times out (indicating stale connection)
 func (ssh *ServiceSearchHandler) queryPeerViaRelay(ctx context.Context, targetPeerID string, relayAddr string, sessionID string, query string, serviceType string, activeOnly bool) ([]RemoteServiceInfo, error) {
+	return ssh.queryPeerViaRelayInternal(ctx, targetPeerID, relayAddr, sessionID, query, serviceType, activeOnly, false)
+}
+
+// queryPeerViaRelayInternal is the internal implementation with retry support
+func (ssh *ServiceSearchHandler) queryPeerViaRelayInternal(ctx context.Context, targetPeerID string, relayAddr string, sessionID string, query string, serviceType string, activeOnly bool, isRetry bool) ([]RemoteServiceInfo, error) {
 	ssh.logger.WithFields(logrus.Fields{
 		"target_peer_id": targetPeerID[:8],
 		"relay_address":  relayAddr,
@@ -1208,6 +1226,19 @@ func (ssh *ServiceSearchHandler) queryPeerViaRelay(ctx context.Context, targetPe
 	buffer := make([]byte, 1024*1024) // 1MB buffer
 	n, err := stream.Read(buffer)
 	if err != nil && err != io.EOF {
+		// Check if this is a timeout on potentially stale connection
+		if isDeadlineError(err) && !isRetry {
+			ssh.logger.WithFields(logrus.Fields{
+				"relay_addr": relayAddr,
+				"target_id":  targetPeerID[:8],
+			}).Debug("Read timeout - cleaning up stale connection and retrying")
+
+			// Clean up stale connection
+			ssh.quicPeer.DisconnectFromPeer(relayAddr)
+
+			// Retry once with fresh connection
+			return ssh.queryPeerViaRelayInternal(ctx, targetPeerID, relayAddr, sessionID, query, serviceType, activeOnly, true)
+		}
 		// Real error (not just stream closure)
 		return nil, fmt.Errorf("failed to read relay response: %v", err)
 	}

@@ -35,6 +35,9 @@ export enum MessageType {
   SERVICE_SEARCH_REQUEST = 'service.search.request',
   SERVICE_SEARCH_RESPONSE = 'service.search.response',
 
+  // Peer capabilities messages
+  PEER_CAPABILITIES_UPDATED = 'peer.capabilities.updated',
+
   // Docker operation messages
   DOCKER_PULL_PROGRESS = 'docker.pull.progress',
   DOCKER_BUILD_OUTPUT = 'docker.build.output',
