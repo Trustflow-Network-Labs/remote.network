@@ -168,6 +168,20 @@ Upload an executable file to the peer.
 
 The uploaded file is stored at: `{dataDir}/standalone_services/{service_name}/myapp`
 
+**Implementation Details:**
+- **Handler**: `internal/api/websocket/file_upload_handler.go`
+- **Temp Directory**: OS-specific temp dir + `/remote-network-uploads`
+- **Session Management**: Active sessions tracked with unique session IDs
+- **Chunk Processing**: Chunks written sequentially to temp file
+- **File Permissions**: Uploaded executables set to `0755` (executable)
+- **Upload Completion**: Callback triggers service finalization
+- **Error Handling**: Session cleanup on errors, partial upload recovery
+
+**Configuration:**
+- `upload_temp_dir`: Override default temp directory location (optional)
+- Default chunk size: 1MB (1048576 bytes)
+- Maximum file size: Configurable (no hardcoded limit)
+
 ---
 
 ### 3. From Git Repository

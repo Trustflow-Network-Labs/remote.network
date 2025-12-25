@@ -319,6 +319,62 @@ For automated testing/deployment:
 
 ## Architecture Notes
 
+### DependencyManager Implementation
+
+**File:** `internal/dependencies/dependencies.go`
+
+The dependency management system is implemented through the `DependencyManager` struct:
+
+```go
+DependencyManager
+├─ Platform Detection
+│   ├─ Detects OS (Linux, macOS, Windows)
+│   ├─ Identifies distribution (Debian/Ubuntu, Fedora/RHEL, etc.)
+│   └─ Determines package manager (apt, dnf, brew, choco)
+│
+├─ Dependency Checking
+│   ├─ Docker CLI existence (`docker version`)
+│   ├─ Docker Compose subcommand (`docker compose version`)
+│   ├─ Docker Buildx subcommand (`docker buildx version`)
+│   ├─ Colima (macOS) - (`colima version`)
+│   └─ Service running status (Docker daemon/Colima)
+│
+├─ Installation Management
+│   ├─ Platform-specific installation commands
+│   ├─ User prompts and confirmation
+│   ├─ Execution and progress tracking
+│   └─ Post-install verification
+│
+└─ Service Startup
+    ├─ Docker daemon start (Linux)
+    ├─ Colima start (macOS)
+    └─ Docker Desktop detection (all platforms)
+```
+
+**Initialization** (server.go:138):
+```go
+depManager := dependencies.NewDependencyManager(config, logger)
+```
+
+**Key Methods:**
+- `CheckDependencies()` - Verify all required dependencies
+- `InstallMissingDependencies()` - Platform-specific installation
+- `StartDockerServices()` - Start Docker/Colima if not running
+- `dockerSubcommandExists(cmd)` - Check for Docker subcommands
+- Platform-specific installers: `installLinux()`, `installDarwin()`, `installWindows()`
+
+**Platform-Specific Files:**
+- `dependencies/linux.go` - apt/dnf package installation
+- `dependencies/darwin.go` - Homebrew/Colima installation
+- `dependencies/windows.go` - Chocolatey/scoop installation
+
+**Configuration Storage:**
+```ini
+[dependencies]
+dependencies_checked = true
+docker_dependencies_available = true
+```
+
 ### Dependency Flow
 
 **First Startup:**

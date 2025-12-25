@@ -7,9 +7,7 @@
 
 ---
 
-**Remote Network Node** is an open-source, decentralized framework for orchestrating distributed workflows across a peer-to-peer network. It enables secure data exchange and computation using Docker containers, with cryptographic identity verification and NAT-friendly connectivity.
-
-This project is the successor to [trustflow-node](https://github.com/Trustflow-Network-Labs/trustflow-node), rebuilt with a custom P2P stack using Mainline DHT and manual implementation of gossip protocol, hole punching, and relaying.
+**Remote Network Node** is an open-source, decentralized framework for orchestrating distributed workflows across a peer-to-peer network. It enables secure data exchange and computation using Docker containers and standalone executables, with cryptographic identity verification and NAT-friendly connectivity.
 
 ---
 
@@ -100,6 +98,13 @@ The web-based workflow designer provides an intuitive drag-and-drop interface fo
 - Go 1.24+
 - Docker (automatically installed if missing)
 
+### Supported Platforms
+
+The following platforms are supported and tested:
+- **Linux**: Debian, Ubuntu
+- **Windows**: Windows 10/11
+- **macOS**: Darwin (Mac OS X)
+
 ### Installation
 
 ```bash
@@ -158,12 +163,37 @@ open http://localhost:36900
 
 ## Documentation
 
-- [Architecture Overview](docs/ARCHITECTURE.md)
-- [Docker Service Quickstart](docs/DOCKER_SERVICE_QUICKSTART.md)
-- [Docker Dependencies](docs/DOCKER_DEPENDENCIES.md)
-- [Hole Punching Protocol](docs/hole-punching-protocol.md)
-- [Keystore Setup](docs/KEYSTORE_SETUP.md)
-- [Network State Monitoring](docs/NETWORK_STATE_MONITORING.md)
+### API Documentation
+
+- [REST API Reference](docs/API_REFERENCE.md) - Complete REST API documentation for all endpoints
+- [WebSocket API Reference](docs/WEBSOCKET_API.md) - Real-time WebSocket API with message formats and examples
+
+### Getting Started
+
+- [Docker Service Quickstart](docs/DOCKER_SERVICE_QUICKSTART.md) - Quick guide to deploying Docker services
+- [Keystore Setup](docs/KEYSTORE_SETUP.md) - Ed25519 keystore configuration and management
+
+### Architecture & Design
+
+- [Architecture Overview](docs/ARCHITECTURE.md) - Complete system architecture, components, and data flow
+- [Relay Connection Architecture](docs/relay-connection-architecture.md) - Relay server design and connection management
+- [Verifiable Compute Design](docs/VERIFIABLE_COMPUTE_DESIGN.md) - Trustless job execution verification approaches
+
+### Service Management
+
+- [Standalone Services API](docs/STANDALONE_SERVICES_API.md) - Binary/executable service deployment and execution
+- [Docker Dependencies](docs/DOCKER_DEPENDENCIES.md) - Docker dependency management and platform setup
+- [Workflow Creation and Execution](docs/workflow-creation-and-execution.md) - Multi-job workflow orchestration
+
+### Networking & P2P
+
+- [Hole Punching Protocol](docs/hole-punching-protocol.md) - NAT traversal and direct peer connections
+- [DHT Metadata and Capabilities](docs/dht-metadata-and-capabilities.md) - Peer discovery and capability matching
+- [Network State Monitoring](docs/NETWORK_STATE_MONITORING.md) - Network change detection and connection recovery
+
+### Diagrams
+
+- [Protocol Diagrams](docs/diagrams/README.md) - PlantUML diagrams for protocols and flows
 
 ---
 
@@ -194,23 +224,26 @@ Encrypted Input → Secure Compute → Encrypted Output
 
 ### Completed
 - **P2P Layer**: Mainline DHT, BEP_44 metadata, QUIC transport
-- **NAT Traversal**: Relay servers, hole punching
+- **NAT Traversal**: Relay servers, hole punching, STUN-like NAT detection
 - **Service Registry**: Docker service creation and discovery
 - **Workflow Engine**: Visual designer, job orchestration
-- **Interface System**: STDIN, STDOUT, STDERR, LOGS, MOUNT
+- **Interface System**: STDIN, STDOUT, STDERR, LOGS, MOUNT, PACKAGE
 - **Data Transfer**: Local and remote job output routing
 - **Web UI**: Service management, workflow designer, job monitoring
-
-### In Progress
-- Remote peer job execution and verification
-- Encrypted data transfer between peers
-- Service marketplace and discovery
+- **Remote Peer Execution**: Job execution across peers
+- **Encrypted Data Transfer**: AES-256-GCM encrypted transfers between peers
+- **Service Marketplace**: Discovery, capabilities matching, peer metadata storage
+- **Standalone Runtime**: Binary/executable service execution (local, Git, upload)
+- **Security & Authentication**: Ed25519 signatures, JWT, challenge-response, TLS 1.2+
+- **Monitoring & Metrics**: Health endpoints, Prometheus metrics, resource tracking, pprof
+- **Git Integration**: Deploy services directly from Git repositories
+- **System Capabilities**: Auto-detection and matching of CPU, memory, GPU, Docker, platform
 
 ### Planned
-- WASM runtime support
+- Trustless job execution verification
 - Reputation and trust scoring
-- Payment integration for compute services
-- Mobile node support
+- Payment integration for all services (using x402)
+- Conditional service replication
 
 ---
 

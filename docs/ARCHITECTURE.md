@@ -688,6 +688,222 @@ quic_idle_timeout = 300  # 5 minutes
 - Service discovery protocol for application-level capabilities
 - Geographic relay selection based on IP geolocation
 
+---
+
+## Event-Driven Architecture
+
+### Overview
+
+Remote Network uses an event-driven architecture to provide real-time updates to clients and coordinate between system components. The EventEmitter acts as a central message bus for all runtime events.
+
+**Files**: `internal/api/server.go`, `internal/api/websocket/hub.go`
+
+### EventEmitter System
+
+**Implementation:**
+```go
+EventEmitter connects:
+├─ JobManager → WorkflowManager
+│   ├─ Job state changes
+│   ├─ Execution progress
+│   └─ Error events
+│
+├─ WorkflowManager → WebSocket Hub
+│   ├─ Workflow execution events
+│   ├─ Job completion notifications
+│   └─ Error notifications
+│
+└─ DockerService → WebSocket Hub
+    ├─ Image pull progress
+    ├─ Build progress
+    └─ Execution logs
+```
+
+**Event Types:**
+- `job.status.changed` - Job state transitions
+- `job.output.ready` - Job produced output
+- `workflow.started` - Workflow execution began
+- `workflow.completed` - Workflow finished
+- `workflow.failed` - Workflow encountered error
+- `docker.pull.progress` - Image download progress
+- `docker.build.progress` - Image build progress
+- `docker.execution.log` - Container log output
+
+### WebSocket Hub
+
+**Purpose**: Real-time bidirectional communication between server and web UI
+
+**File**: `internal/api/websocket/hub.go`
+
+**Architecture:**
+```
+WebSocket Hub
+├─ Manages client connections
+├─ Routes events from EventEmitter to subscribed clients
+├─ Handles client subscriptions and filters
+└─ Runs in dedicated goroutine (started at server.go:279)
+
+Client Types:
+├─ UI Clients: Dashboard, workflow designer
+├─ Service Search: Real-time service discovery
+└─ File Upload: Chunked file transfer
+```
+
+**Message Flow:**
+```
+System Event → EventEmitter → WebSocket Hub → Subscribed Clients
+                     ↑                              ↓
+                     └────── Client Actions ────────┘
+```
+
+**Connection Management:**
+- Automatic connection cleanup on client disconnect
+- Heartbeat/ping-pong for connection health
+- Message queuing for slow clients
+- Broadcast and targeted message delivery
+
+### Real-Time Features
+
+**1. Workflow Execution Monitoring**
+```
+User starts workflow in UI
+  ↓
+API: POST /api/workflows/:id/execute
+  ↓
+WorkflowManager executes jobs
+  ↓
+EventEmitter broadcasts:
+  - workflow.started
+  - job.status.changed (for each job)
+  - workflow.completed
+  ↓
+WebSocket Hub pushes to UI
+  ↓
+UI updates in real-time (no polling)
+```
+
+**2. Docker Operations**
+```
+User creates Docker service
+  ↓
+DockerService pulls image
+  ↓
+EventEmitter broadcasts:
+  - docker.pull.progress (%, layers, etc.)
+  ↓
+WebSocket pushes to UI
+  ↓
+UI shows progress bar in real-time
+```
+
+**3. Service Discovery**
+```
+User searches for services
+  ↓
+WebSocket: service_search message
+  ↓
+ServiceSearchHandler queries DHT/peers
+  ↓
+As peers respond:
+  - WebSocket pushes each result
+  ↓
+UI updates service list incrementally
+```
+
+**Integration Points:**
+- **Server Initialization** (server.go:114-125): EventEmitter connected to all managers
+- **WebSocket Hub Startup** (server.go:279): Hub runs in background goroutine
+- **API Handlers**: Trigger events for client notifications
+- **Background Workers**: Data transfer events, peer discovery events
+
+---
+
+## Connection Lifecycle Management
+
+### Overview
+
+Connection lifecycle management ensures proper cleanup of stale connections, detection of NAT collisions, and efficient resource usage.
+
+**Files**: `internal/p2p/quic.go`, `internal/core/peer.go`
+
+### Active Streams Tracking
+
+**Implementation:**
+```go
+ConnectionInfo struct:
+├─ ActiveStreams (atomic int32)
+│   ├─ Incremented when stream created
+│   ├─ Decremented when stream closed
+│   └─ Used for stale detection
+│
+├─ LastActivity (time.Time)
+│   └─ Updated on any stream activity
+│
+└─ Connection (quic.Connection)
+    └─ Underlying QUIC connection
+```
+
+### Stale Connection Cleanup
+
+**Process** (quic.go):
+```
+cleanupStaleConnections() - Periodic background task (1 min interval)
+├─ Enumerate all QUIC connections
+├─ For each connection:
+│   ├─ Check ActiveStreams == 0?
+│   ├─ Check idle time > threshold (default: 5 min)?
+│   ├─ If both true:
+│   │   ├─ Log: "Cleaning up stale connection"
+│   │   ├─ CloseWithError(0x100, "idle timeout")
+│   │   └─ Remove from connection cache
+│   └─ Else: Keep connection
+└─ Notify PeerManager of cleanup events
+```
+
+**Benefits:**
+- Prevents resource leaks
+- Frees memory and file descriptors
+- Maintains connection cache hygiene
+- Enables connection pool optimization
+
+### NAT Collision Detection
+
+**Problem**: NAT can occasionally map different peers to same external IP:port
+
+**Solution** (service_search_handler.go:commit 5875c98):
+```
+After QUIC connection established:
+├─ Extract peer ID from connection
+├─ Compare with expected peer ID
+├─ If mismatch:
+│   ├─ Log error
+│   ├─ Close connection immediately
+│   └─ Prevent data exchange with wrong peer
+└─ If match: Proceed normally
+```
+
+**Security Impact:**
+- Prevents accidental data leakage to wrong peer
+- Essential for correctness in distributed workflows
+- Protects against NAT-induced peer confusion
+
+### Connection Health Monitoring
+
+**Integration with PeerManager** (peer.go):
+- 160 lines of connection lifecycle tracking
+- Coordinated cleanup across relay and direct connections
+- WebSocket notifications for UI updates
+- Automatic re-discovery on connection loss
+
+**Connection States:**
+- `CONNECTING` - Connection in progress
+- `CONNECTED` - Active connection with streams
+- `IDLE` - Connected but no active streams
+- `STALE` - Idle beyond threshold, marked for cleanup
+- `CLOSED` - Connection terminated
+
+---
+
 **Under Consideration:**
 - DHT query batching for bulk metadata retrieval
 - Bloom filters to avoid redundant peer exchange

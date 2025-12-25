@@ -276,6 +276,172 @@ The system provides comprehensive logging at each stage:
 [network-monitor] Successfully reconnected to relay and published updated metadata
 ```
 
+## Connection Cleanup Integration
+
+### Overview
+
+Network state changes trigger comprehensive connection cleanup to ensure stale connections don't persist after network topology changes.
+
+**Files:** `internal/p2p/quic.go`, `internal/core/peer.go`
+
+### Connection Cleanup on Network Changes
+
+When network state changes are detected, the following cleanup processes are triggered:
+
+```
+Network State Change Detected
+├─ NAT Nodes:
+│   ├─ Disconnect from current relay (explicit)
+│   ├─ Close all relay-associated QUIC connections
+│   ├─ Trigger stale connection cleanup
+│   └─ Clear relay candidate cache
+│
+└─ Public Nodes:
+    ├─ Close connections bound to old IP
+    ├─ Trigger stale connection cleanup
+    └─ Re-establish listening on new IP
+```
+
+### Stale Connection Detection (Post-Network Change)
+
+**Enhanced Cleanup** (Commit a6ba0ce):
+
+After network changes, the system actively cleans up stale connections:
+
+```go
+cleanupStaleConnections() triggered by network change:
+├─ Enumerate all QUIC connections
+├─ Check each connection:
+│   ├─ ActiveStreams == 0?
+│   ├─ Connection bound to old IP?
+│   ├─ Idle time > threshold?
+│   └─ Peer ID verification passed?
+├─ For stale connections:
+│   ├─ Log: "Cleaning up stale connection after network change"
+│   ├─ CloseWithError(0x100, "network topology changed")
+│   ├─ Remove from connection cache
+│   └─ Notify PeerManager
+└─ Update connection statistics
+```
+
+**Benefits:**
+- Prevents zombie connections on old IP addresses
+- Frees resources (file descriptors, memory)
+- Ensures fresh connections use new network configuration
+- Maintains accurate connection state in PeerManager
+
+### Integration with PeerManager
+
+The PeerManager coordinates between network monitoring and connection lifecycle:
+
+```
+Network Monitor → PeerManager → Connection Cleanup
+       ↓                ↓              ↓
+  IP Change     Update peer      Clean stale
+  Detected       state map        connections
+       ↓                ↓              ↓
+  NAT Change    Disconnect       Update UI via
+  Detected      old relays        WebSocket
+       ↓                ↓              ↓
+  Topology      Trigger          Emit connection
+  Change        cleanup           state events
+```
+
+**PeerManager Responsibilities:**
+- Track connection state per peer
+- Coordinate cleanup across relay and direct connections
+- Emit WebSocket events for UI updates
+- Maintain peer reachability information
+- Handle automatic peer re-discovery
+
+### WebSocket Notifications
+
+When network changes trigger connection cleanup, the UI is notified:
+
+```json
+{
+  "type": "connection_state_changed",
+  "payload": {
+    "peer_id": "abc123",
+    "old_state": "CONNECTED",
+    "new_state": "DISCONNECTED",
+    "reason": "network_topology_changed",
+    "timestamp": "2025-01-15T10:35:00Z"
+  }
+}
+```
+
+### Example: Complete Network Change Flow
+
+```
+1. WiFi → 4G Network Switch on Mobile Device
+   ├─ Local IP: 192.168.1.100 → 10.0.0.50
+   ├─ External IP: 203.0.113.45 → 198.51.100.20
+   └─ NAT Type: Cone NAT → Symmetric NAT
+
+2. NetworkStateMonitor Detects Change
+   └─ Triggers handleNATNodeChanges()
+
+3. Connection Cleanup Phase
+   ├─ Disconnect from current relay (explicit)
+   ├─ Close all QUIC connections on old IP
+   ├─ cleanupStaleConnections() removes orphaned connections
+   ├─ Clear relay candidate cache
+   └─ Notify PeerManager of cleanup
+
+4. Reconnection Phase
+   ├─ Rediscover relay candidates (new network)
+   ├─ Select optimal relay for Symmetric NAT + 4G
+   ├─ Establish new QUIC connection on new IP
+   ├─ Create relay session
+   └─ Verify connection with peer ID check
+
+5. Metadata Update Phase
+   ├─ Update metadata with new relay info
+   ├─ Update metadata with new IP addresses
+   ├─ Increment sequence number
+   ├─ Publish to DHT
+   └─ Verify DHT retrieval
+
+6. Verification Phase
+   ├─ Confirm no stale connections remain
+   ├─ Verify ActiveStreams counters accurate
+   ├─ Check peer reachability
+   └─ Emit WebSocket event: connection_restored
+```
+
+### Logs During Cleanup
+
+```
+[network-monitor] Network state change detected
+[peer-manager] Initiating connection cleanup for network change
+[quic] Cleaning up stale connections (trigger: network_change)
+[quic] Stale connection detected: connection_id=conn-123, idle=0s, streams=0
+[quic] Closing connection: reason=network_topology_changed
+[peer-manager] Connection closed: peer_id=abc123, reason=network_change
+[websocket] Broadcasting connection_state_changed event
+[network-monitor] Connection cleanup complete, 3 connections closed
+[network-monitor] Proceeding with relay reconnection...
+```
+
+### Configuration
+
+Connection cleanup behavior is configurable:
+
+```ini
+[connection_cleanup]
+# Idle timeout before connection cleanup (seconds)
+idle_connection_timeout = 300  # 5 minutes
+
+# Cleanup check interval (seconds)
+cleanup_interval = 60  # 1 minute
+
+# Force cleanup on network change
+force_cleanup_on_network_change = true
+```
+
+---
+
 ## Error Handling
 
 ### Consecutive Failure Detection

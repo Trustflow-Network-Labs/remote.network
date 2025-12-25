@@ -551,6 +551,103 @@ RelayPeer.forwardDataToTarget()
 
 ---
 
+### Recent Improvements (December 2024)
+
+#### Enhanced Stale Connection Detection (Commit 30b1fce)
+**File:** `internal/p2p/relay.go`
+
+**Improvements:**
+- Streamlined stale connection detection logic in relay sessions
+- Reduced code complexity while maintaining reliability
+- Improved session monitoring efficiency (-13 lines, +9 lines refactored)
+
+**Impact:**
+- More robust relay session management
+- Cleaner termination of stale sessions
+- Better resource cleanup
+
+#### Comprehensive Connection Cleanup (Commit a6ba0ce)
+**Files:** `internal/p2p/quic.go`, `internal/core/peer.go`, `internal/api/handlers_peers.go`, `internal/api/websocket/service_search_handler.go`
+
+**Major Additions:**
+- **QUIC Layer Cleanup** (`cleanupStaleConnections()` in `quic.go`):
+  - Automatic detection of connections with zero active streams
+  - Idle timeout tracking per connection
+  - Graceful connection termination with proper resource release
+  - Connection verification and health checks
+
+- **Peer Manager Integration** (`peer.go`):
+  - 160 new lines of connection lifecycle management
+  - Enhanced peer connection tracking
+  - Coordinated cleanup across relay and direct connections
+  - WebSocket event notifications for connection state changes
+
+- **API Layer Updates** (`handlers_peers.go`):
+  - Improved peer information retrieval
+  - Better connection status reporting
+  - Enhanced error handling for stale connections
+
+- **Service Discovery Integration** (`service_search_handler.go`):
+  - Connection health checks during service discovery
+  - Automatic cleanup of failed connection attempts
+  - Peer ID verification integration
+
+**Implementation Details:**
+```
+cleanupStaleConnections() Flow:
+├─ File: quic.go (151 new lines)
+├─ Triggered: Periodic background task
+│
+└─ Process:
+    ├─ Enumerate all QUIC connections
+    ├─ Check ActiveStreams counter (atomic int32)
+    ├─ If ActiveStreams == 0:
+    │   ├─ Check idle duration
+    │   ├─ If > threshold: mark for cleanup
+    │   └─ CloseWithError() with proper error code
+    ├─ Remove from connection cache
+    └─ Notify peer manager of cleanup
+```
+
+**Configuration:**
+- Idle connection timeout: Configurable (default: 5 minutes)
+- Cleanup check interval: 1 minute
+- Active streams tracking: Real-time atomic counter
+
+#### NAT Collision Detection (Commit 5875c98)
+**File:** `internal/api/websocket/service_search_handler.go`
+
+**Critical Enhancement:**
+- **Peer ID Verification After QUIC Connection**: After establishing a QUIC connection, verify that the connected peer's ID matches the expected ID
+- **Prevents NAT Collision Issues**: Detects when NAT assigns same external port to different peers
+- **Immediate Failure Detection**: Connection is closed immediately if peer ID mismatch detected
+
+**Implementation:**
+```go
+After QUIC connection established:
+├─ Extract peer ID from QUIC connection
+├─ Compare with expected peer ID
+├─ If mismatch:
+│   ├─ Log: "Peer ID mismatch after connection"
+│   ├─ Close connection
+│   └─ Return error to caller
+└─ If match: Proceed with service discovery
+```
+
+**Why This Matters:**
+- NAT can occasionally map different internal addresses to the same external port
+- Without verification, you might connect to the wrong peer
+- Critical for security and correctness in service discovery
+- Prevents data being sent to unintended peers
+
+**Logs to check:**
+- "Peer ID mismatch: expected=X, got=Y"
+- "Closing connection due to peer ID verification failure"
+- "Stale connection cleanup: connection_id=X, idle_duration=Y"
+- "Active streams dropped to zero: connection_id=X"
+
+---
+
 ### Reconnection Strategy
 
 **Files:** `internal/p2p/relay_manager.go`

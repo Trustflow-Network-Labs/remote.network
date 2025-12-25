@@ -235,7 +235,30 @@ The protocol tracks:
 - Fallback to relay frequency
 - LAN peer detection rate
 
-## References
+## Related Documentation
+
+### Internal Documentation
+
+- **[relay-connection-architecture.md](relay-connection-architecture.md)** - Complete relay connection architecture, session management, and fallback strategies. When hole punching fails, connections fallback to relay mode as described in this document.
+
+- **[NETWORK_STATE_MONITORING.md](NETWORK_STATE_MONITORING.md)** - Network state changes that may require re-attempting hole punching or falling back to relay
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Overall system architecture including connection lifecycle management
+
+**Connection Strategy Flow:**
+```
+Hole Punching Attempt
+        ↓
+   [Success?] ───Yes──→ Direct P2P Connection
+        │
+        No
+        ↓
+  [Relay Fallback]
+        ↓
+   (See relay-connection-architecture.md)
+```
+
+### External References
 
 - [libp2p DCUtR Specification](https://github.com/libp2p/specs/blob/master/relay/DCUtR.md)
 - [RFC 5389 - STUN](https://datatracker.ietf.org/doc/html/rfc5389)

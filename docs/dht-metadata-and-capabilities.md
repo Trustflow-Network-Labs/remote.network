@@ -45,6 +45,56 @@ The Remote Network uses a hybrid approach for peer discovery and capability exch
 - **MetadataFetcher** - Prioritized metadata retrieval
 - **CapabilitiesHandler** - QUIC-based capabilities request handler
 - **SystemCapabilities** - Hardware/software capability gathering
+- **QUICPeer** - QUIC connection manager with relay discovery callbacks
+
+### Relay Discovery Callback Mechanism
+
+**File:** `internal/p2p/quic.go:66`
+
+The QUICPeer includes a relay discovery callback system that automatically notifies the relay manager when relay nodes are discovered:
+
+```go
+type QUICPeer struct {
+    ...
+    onRelayDiscovered func(*database.PeerMetadata) // Callback for relay discovery
+    ...
+}
+```
+
+**Purpose:**
+- Automatically notify RelayManager when relay candidates are discovered
+- Enable dynamic relay pool building
+- Support network changes and relay failover
+
+**Flow:**
+```
+Metadata Discovery → Check IsRelay=true → Trigger onRelayDiscovered()
+                                               ↓
+                                        RelayManager.AddCandidate()
+                                               ↓
+                                        Update relay pool for selection
+```
+
+**Integration Points:**
+- **MetadataQueryService** - Triggers callback on relay peer discovery
+- **PeerDiscovery** - Calls callback when discovering relay nodes via DHT
+- **RelayManager** - Receives notifications and updates relay candidate pool
+
+**Usage Example:**
+```go
+// QUICPeer initialization with relay discovery callback
+quicPeer := NewQUICPeer(...)
+quicPeer.onRelayDiscovered = func(metadata *database.PeerMetadata) {
+    relayManager.AddRelayCandidate(metadata)
+    logger.Info("Discovered relay: " + metadata.PeerID)
+}
+```
+
+**Benefits:**
+- Automatic relay pool maintenance
+- Real-time relay discovery
+- Decoupled architecture (QUICPeer doesn't need direct RelayManager reference)
+- Supports asynchronous discovery patterns
 
 ---
 
