@@ -157,7 +157,7 @@ func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remo
 
 	// Create new session
 	sessionID := uuid.New().String()
-	keepaliveInterval := rp.config.GetConfigInt("relay_connection_keepalive", 30, 10, 300)
+	keepaliveInterval := rp.config.GetConfigDuration("relay_connection_keepalive", 30*time.Second)
 
 	session := &RelaySession{
 		SessionID:         sessionID,
@@ -168,7 +168,7 @@ func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remo
 		Connection:        conn,
 		StartTime:         time.Now(),
 		LastKeepalive:     time.Now(),
-		KeepaliveInterval: time.Duration(keepaliveInterval) * time.Second,
+		KeepaliveInterval: keepaliveInterval,
 		IngressBytes:      0,
 		EgressBytes:       0,
 	}
@@ -191,7 +191,7 @@ func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remo
 	// Start keepalive monitor
 	go rp.monitorSession(session)
 
-	return CreateRelayAccept("", data.NodeID, sessionID, keepaliveInterval, rp.pricingPerGB)
+	return CreateRelayAccept("", data.NodeID, sessionID, int(keepaliveInterval.Seconds()), rp.pricingPerGB)
 }
 
 // HandleRelayReceiveStreamReady processes receive stream ready notification from NAT peers
@@ -340,7 +340,8 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 	// For job status requests and updates, inject source peer ID so target knows who to respond to
 	// This is critical for relay forwarding where the connection context is lost
 	if data.MessageType == "job_status_request" || data.MessageType == "job_request" ||
-	   data.MessageType == "job_status_update" || data.MessageType == "job_data_transfer_request" {
+	   data.MessageType == "job_status_update" || data.MessageType == "job_data_transfer_request" ||
+	   data.MessageType == "capabilities_request" {
 		msg, err := UnmarshalQUICMessage(data.Payload)
 		if err == nil {
 			// Inject source peer ID into message envelope
@@ -387,15 +388,10 @@ func (rp *RelayPeer) handleRelayResponse(data *RelayForwardData, responseStream 
 
 	rp.logger.Debug(fmt.Sprintf("Found pending request %s, routing response back to requester", correlationID), "relay")
 
-	// Wrap the response in a RelayForward message to send back to requester
-	forwardMsg := NewQUICMessage(MessageTypeRelayForward, data)
-	forwardBytes, err := forwardMsg.Marshal()
-	if err != nil {
-		return fmt.Errorf("failed to marshal response forward: %v", err)
-	}
-
-	// Write response to the original requester's stream
-	if _, err := (*pending.Stream).Write(forwardBytes); err != nil {
+	// Send the raw payload (unwrapped) back to the requester
+	// The requester expects the actual response message (e.g., capabilities_response),
+	// not another relay_forward wrapper
+	if _, err := (*pending.Stream).Write(data.Payload); err != nil {
 		rp.logger.Error(fmt.Sprintf("Failed to write response to requester stream: %v", err), "relay")
 		return fmt.Errorf("failed to write response to requester: %v", err)
 	}
