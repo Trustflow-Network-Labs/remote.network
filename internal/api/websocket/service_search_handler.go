@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 
@@ -24,7 +25,8 @@ type ServiceSearchHandler struct {
 	metadataQuery *p2p.MetadataQueryService
 	dhtPeer       *p2p.DHTPeer
 	relayPeer     *p2p.RelayPeer
-	ourPeerID     string // Our persistent Ed25519-based peer ID
+	walletManager interface{} // WalletManager for payment compatibility checks
+	ourPeerID     string       // Our persistent Ed25519-based peer ID
 }
 
 // NewServiceSearchHandler creates a new service search handler
@@ -36,6 +38,7 @@ func NewServiceSearchHandler(
 	metadataQuery *p2p.MetadataQueryService,
 	dhtPeer *p2p.DHTPeer,
 	relayPeer *p2p.RelayPeer,
+	walletManager interface{},
 	ourPeerID string,
 ) *ServiceSearchHandler {
 	return &ServiceSearchHandler{
@@ -46,6 +49,7 @@ func NewServiceSearchHandler(
 		metadataQuery: metadataQuery,
 		dhtPeer:       dhtPeer,
 		relayPeer:     relayPeer,
+		walletManager: walletManager,
 		ourPeerID:     ourPeerID,
 	}
 }
@@ -147,19 +151,21 @@ func (ssh *ServiceSearchHandler) HandleServiceSearchRequest(client *Client, payl
 
 				// Convert to RemoteServiceInfo (local service but same format)
 				remoteService := RemoteServiceInfo{
-					ID:              service.ID,
-					Name:            service.Name,
-					Description:     service.Description,
-					ServiceType:     service.ServiceType,
-					Type:            service.Type,
-					Status:          service.Status,
-					PricingAmount:   service.PricingAmount,
-					PricingType:     service.PricingType,
-					PricingInterval: service.PricingInterval,
-					PricingUnit:     service.PricingUnit,
-					Capabilities:    service.Capabilities,
-					PeerID:          ssh.ourPeerID, // Mark as local service
-					Interfaces:      remoteInterfaces,
+					ID:                      service.ID,
+					Name:                    service.Name,
+					Description:             service.Description,
+					ServiceType:             service.ServiceType,
+					Type:                    service.Type,
+					Status:                  service.Status,
+					PricingAmount:           service.PricingAmount,
+					PricingType:             service.PricingType,
+					PricingInterval:         service.PricingInterval,
+					PricingUnit:             service.PricingUnit,
+					Capabilities:            service.Capabilities,
+					PeerID:                  ssh.ourPeerID, // Mark as local service
+					Interfaces:              remoteInterfaces,
+					AcceptedPaymentNetworks: service.AcceptedPaymentNetworks,
+					PaymentCompatible:       true, // Local services are always compatible
 				}
 
 				// Add data-specific fields for DATA services
@@ -968,23 +974,25 @@ func (ssh *ServiceSearchHandler) queryPeerServices(ctx context.Context, peerAddr
 		}
 
 		services = append(services, RemoteServiceInfo{
-			ID:              svc.ID,
-			Name:            svc.Name,
-			Description:     svc.Description,
-			ServiceType:     svc.ServiceType,
-			Type:            svc.Type,
-			Status:          svc.Status,
-			PricingAmount:   svc.PricingAmount,
-			PricingType:     svc.PricingType,
-			PricingInterval: svc.PricingInterval,
-			PricingUnit:     svc.PricingUnit,
-			Capabilities:    svc.Capabilities,
-			Hash:            svc.Hash,
-			SizeBytes:       svc.SizeBytes,
-			Entrypoint:      svc.Entrypoint,
-			Cmd:             svc.Cmd,
-			PeerID:          servicePeerID,
-			Interfaces:      interfaces,
+			ID:                      svc.ID,
+			Name:                    svc.Name,
+			Description:             svc.Description,
+			ServiceType:             svc.ServiceType,
+			Type:                    svc.Type,
+			Status:                  svc.Status,
+			PricingAmount:           svc.PricingAmount,
+			PricingType:             svc.PricingType,
+			PricingInterval:         svc.PricingInterval,
+			PricingUnit:             svc.PricingUnit,
+			Capabilities:            svc.Capabilities,
+			Hash:                    svc.Hash,
+			SizeBytes:               svc.SizeBytes,
+			Entrypoint:              svc.Entrypoint,
+			Cmd:                     svc.Cmd,
+			PeerID:                  servicePeerID,
+			Interfaces:              interfaces,
+			AcceptedPaymentNetworks: svc.AcceptedPaymentNetworks,
+			PaymentCompatible:       ssh.checkPaymentCompatibility(svc.AcceptedPaymentNetworks),
 		})
 	}
 
@@ -1293,23 +1301,25 @@ func (ssh *ServiceSearchHandler) queryPeerViaRelayInternal(ctx context.Context, 
 		}
 
 		services = append(services, RemoteServiceInfo{
-			ID:              svc.ID,
-			Name:            svc.Name,
-			Description:     svc.Description,
-			ServiceType:     svc.ServiceType,
-			Type:            svc.Type,
-			Status:          svc.Status,
-			PricingAmount:   svc.PricingAmount,
-			PricingType:     svc.PricingType,
-			PricingInterval: svc.PricingInterval,
-			PricingUnit:     svc.PricingUnit,
-			Capabilities:    svc.Capabilities,
-			Hash:            svc.Hash,
-			SizeBytes:       svc.SizeBytes,
-			Entrypoint:      svc.Entrypoint,
-			Cmd:             svc.Cmd,
-			PeerID:          targetPeerID,
-			Interfaces:      interfaces,
+			ID:                      svc.ID,
+			Name:                    svc.Name,
+			Description:             svc.Description,
+			ServiceType:             svc.ServiceType,
+			Type:                    svc.Type,
+			Status:                  svc.Status,
+			PricingAmount:           svc.PricingAmount,
+			PricingType:             svc.PricingType,
+			PricingInterval:         svc.PricingInterval,
+			PricingUnit:             svc.PricingUnit,
+			Capabilities:            svc.Capabilities,
+			Hash:                    svc.Hash,
+			SizeBytes:               svc.SizeBytes,
+			Entrypoint:              svc.Entrypoint,
+			Cmd:                     svc.Cmd,
+			PeerID:                  targetPeerID,
+			Interfaces:              interfaces,
+			AcceptedPaymentNetworks: svc.AcceptedPaymentNetworks,
+			PaymentCompatible:       ssh.checkPaymentCompatibility(svc.AcceptedPaymentNetworks),
 		})
 	}
 
@@ -1472,23 +1482,25 @@ func (ssh *ServiceSearchHandler) queryPeerViaConnection(ctx context.Context, qui
 		}
 
 		services = append(services, RemoteServiceInfo{
-			ID:              svc.ID,
-			Name:            svc.Name,
-			Description:     svc.Description,
-			ServiceType:     svc.ServiceType,
-			Type:            svc.Type,
-			Status:          svc.Status,
-			PricingAmount:   svc.PricingAmount,
-			PricingType:     svc.PricingType,
-			PricingInterval: svc.PricingInterval,
-			PricingUnit:     svc.PricingUnit,
-			Capabilities:    svc.Capabilities,
-			Hash:            svc.Hash,
-			SizeBytes:       svc.SizeBytes,
-			Entrypoint:      svc.Entrypoint,
-			Cmd:             svc.Cmd,
-			PeerID:          peerID, // Use peer ID for relay session queries
-			Interfaces:      interfaces,
+			ID:                      svc.ID,
+			Name:                    svc.Name,
+			Description:             svc.Description,
+			ServiceType:             svc.ServiceType,
+			Type:                    svc.Type,
+			Status:                  svc.Status,
+			PricingAmount:           svc.PricingAmount,
+			PricingType:             svc.PricingType,
+			PricingInterval:         svc.PricingInterval,
+			PricingUnit:             svc.PricingUnit,
+			Capabilities:            svc.Capabilities,
+			Hash:                    svc.Hash,
+			SizeBytes:               svc.SizeBytes,
+			Entrypoint:              svc.Entrypoint,
+			Cmd:                     svc.Cmd,
+			PeerID:                  peerID, // Use peer ID for relay session queries
+			Interfaces:              interfaces,
+			AcceptedPaymentNetworks: svc.AcceptedPaymentNetworks,
+			PaymentCompatible:       ssh.checkPaymentCompatibility(svc.AcceptedPaymentNetworks),
 		})
 	}
 
@@ -1589,4 +1601,86 @@ func (ssh *ServiceSearchHandler) isInboundOnlyConnection(addr string) bool {
 	}
 
 	return false
+}
+
+// checkPaymentCompatibility checks if the user has a wallet compatible with the service's accepted payment networks
+func (ssh *ServiceSearchHandler) checkPaymentCompatibility(acceptedNetworks []string) bool {
+	// If no networks specified or no wallet manager, assume compatible
+	if len(acceptedNetworks) == 0 || ssh.walletManager == nil {
+		return true
+	}
+
+	// Type assert walletManager to access ListWallets method
+	// We expect a method signature: ListWallets() []*Wallet where Wallet has a Network field
+	type WalletLister interface {
+		ListWallets() interface{}
+	}
+
+	wm, ok := ssh.walletManager.(WalletLister)
+	if !ok {
+		// Can't check, assume compatible to not block users
+		return true
+	}
+
+	// Get user's wallets - returns []*Wallet
+	walletsInterface := wm.ListWallets()
+
+	// Use reflection to extract wallet networks safely
+	walletNetworks := ssh.extractWalletNetworks(walletsInterface)
+
+	// Check if user has a wallet on any of the accepted networks
+	for _, walletNetwork := range walletNetworks {
+		for _, acceptedNetwork := range acceptedNetworks {
+			if walletNetwork == acceptedNetwork {
+				return true
+			}
+		}
+	}
+
+	// No compatible wallet found
+	return false
+}
+
+// extractWalletNetworks extracts Network field from wallet slice using reflection
+func (ssh *ServiceSearchHandler) extractWalletNetworks(wallets interface{}) []string {
+	var networks []string
+
+	// Try to type assert to common wallet structure
+	type WalletWithNetwork interface {
+		GetNetwork() string
+	}
+
+	// Handle []*Wallet type from payment.WalletManager
+	switch v := wallets.(type) {
+	case []interface{}:
+		for _, w := range v {
+			if wallet, ok := w.(map[string]interface{}); ok {
+				if network, ok := wallet["network"].(string); ok {
+					networks = append(networks, network)
+				}
+			}
+		}
+	default:
+		// Use reflection as fallback
+		// Expected structure: []*struct{Network string, ...}
+		val := reflect.ValueOf(wallets)
+		if val.Kind() == reflect.Slice {
+			for i := 0; i < val.Len(); i++ {
+				wallet := val.Index(i)
+				// Handle pointer to struct
+				if wallet.Kind() == reflect.Ptr {
+					wallet = wallet.Elem()
+				}
+				// Extract Network field
+				if wallet.Kind() == reflect.Struct {
+					networkField := wallet.FieldByName("Network")
+					if networkField.IsValid() && networkField.Kind() == reflect.String {
+						networks = append(networks, networkField.String())
+					}
+				}
+			}
+		}
+	}
+
+	return networks
 }

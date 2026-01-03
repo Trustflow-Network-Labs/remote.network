@@ -11,6 +11,7 @@ import (
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -27,6 +28,7 @@ type RelayManager struct {
 	metadataPublisher *MetadataPublisher
 	metadataFetcher   *MetadataFetcher
 	metadataQuery     *MetadataQueryService // For subscribing to relay discoveries
+	walletManager     *payment.WalletManager // x402 wallet manager for relay payment signing
 
 	// Relay selection
 	selector *RelaySelector
@@ -63,6 +65,12 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 	// Pass our peer ID to selector so it can check for preferred relay
 	selector := NewRelaySelector(config, logger, dbManager, quicPeer, keyPair.PeerID())
 
+	// Initialize wallet manager for x402 relay payments (optional)
+	walletManager, err := payment.NewWalletManager(config)
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Failed to initialize wallet manager: %v (relay payments disabled)", err), "relay_manager")
+	}
+
 	return &RelayManager{
 		config:            config,
 		logger:            logger,
@@ -74,6 +82,7 @@ func NewRelayManager(config *utils.ConfigManager, logger *utils.LogsManager, dbM
 		metadataPublisher: metadataPublisher,
 		metadataFetcher:   metadataFetcher,
 		metadataQuery:     metadataQuery,
+		walletManager:     walletManager,
 		selector:          selector,
 		ctx:               ctx,
 		cancel:            cancel,
@@ -346,6 +355,68 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 	publicEndpoint := fmt.Sprintf("%s:%d", publicIP, rm.config.GetConfigInt("quic_port", 30906, 1024, 65535))
 	privateEndpoint := fmt.Sprintf("%s:%d", privateIP, rm.config.GetConfigInt("quic_port", 30906, 1024, 65535))
 
+	// GENERATE PAYMENT SIGNATURE for relay (x402 protocol)
+	// Note: Payment is mandatory if relay has pricing > 0
+	var estimatedBytes int64 = 0
+	var paymentSig interface{} = nil
+
+	// Generate payment signature if wallet manager is available
+	if rm.walletManager != nil {
+		// Get estimated bytes from config (optional)
+		estimatedBytes = int64(rm.config.GetConfigInt("relay_estimated_bytes", 0, 0, 1000000000000))
+
+		if estimatedBytes > 0 {
+			// Calculate required payment based on relay pricing
+			pricingPerGB := relay.PricingPerGB
+			if pricingPerGB == 0 {
+				pricingPerGB = rm.config.GetConfigFloat64("relay_pricing_per_gb", 0.001, 0.0, 1000000.0)
+			}
+
+			billableGB := float64(estimatedBytes) / (1024 * 1024 * 1024)
+			requiredAmount := billableGB * pricingPerGB
+
+			// Get wallet
+			walletID := rm.config.GetConfigWithDefault("x402_default_wallet_id", "")
+			if walletID == "" {
+				wallets := rm.walletManager.ListWallets()
+				if len(wallets) > 0 {
+					walletID = wallets[0].ID
+				} else {
+					rm.logger.Warn("Relay payment required but no wallet configured", "relay_manager")
+				}
+			}
+
+			if walletID != "" && requiredAmount > 0 {
+				// Get passphrase and chain ID
+				passphrase := rm.config.GetConfigWithDefault("x402_wallet_passphrase", "")
+				chainID := rm.config.GetConfigWithDefault("x402_chain_id", "eip155:84532")
+
+				// Sign payment
+				paymentData := &payment.PaymentData{
+					Amount:      requiredAmount,
+					Currency:    "USDC",
+					Network:     chainID,
+					Recipient:   relay.NodeID,
+					Description: fmt.Sprintf("Relay service prepayment (estimated: %d bytes)", estimatedBytes),
+					Metadata: map[string]interface{}{
+						"relay_node_id":    relay.NodeID,
+						"estimated_bytes":  estimatedBytes,
+						"pricing_per_gb":   pricingPerGB,
+					},
+				}
+
+				sig, err := rm.walletManager.SignPayment(walletID, paymentData, passphrase)
+				if err != nil {
+					rm.logger.Warn(fmt.Sprintf("Failed to sign relay payment: %v", err), "relay_manager")
+				} else {
+					paymentSig = sig
+					rm.logger.Info(fmt.Sprintf("Relay payment signature generated (amount: %.6f %s, wallet: %s)",
+						sig.Amount, sig.Currency, walletID), "relay_manager")
+				}
+			}
+		}
+	}
+
 	registerMsg := CreateRelayRegister(
 		rm.keyPair.PeerID(), // Persistent Ed25519-based peer ID
 		rm.dhtPeer.NodeID(), // DHT node ID
@@ -354,6 +425,8 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 		publicEndpoint,
 		privateEndpoint,
 		true, // requiresRelay
+		estimatedBytes,
+		paymentSig,
 	)
 	msgBytes, err := registerMsg.Marshal()
 	if err != nil {

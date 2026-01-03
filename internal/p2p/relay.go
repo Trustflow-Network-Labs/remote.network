@@ -10,6 +10,7 @@ import (
 	"github.com/quic-go/quic-go"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -27,6 +28,8 @@ type RelaySession struct {
 	KeepaliveInterval time.Duration
 	IngressBytes      int64
 	EgressBytes       int64
+	PaymentID         int64  // x402 payment escrow ID (0 if no payment)
+	EstimatedBytes    int64  // Estimated data transfer for payment calculation
 	mutex             sync.RWMutex
 }
 
@@ -43,6 +46,7 @@ type RelayPeer struct {
 	config          *utils.ConfigManager
 	logger          *utils.LogsManager
 	dbManager       *database.SQLiteManager
+	escrowManager   *payment.EscrowManager // x402 payment escrow manager
 	ctx             context.Context
 	cancel          context.CancelFunc
 
@@ -98,10 +102,15 @@ func NewRelayPeer(config *utils.ConfigManager, logger *utils.LogsManager, dbMana
 		logger.Debug(fmt.Sprintf("No relay service found, using config pricing: %.4f/GB", pricingPerGB), "relay")
 	}
 
+	// Initialize x402 payment infrastructure for relay
+	x402Client := payment.NewX402Client(config, logger)
+	escrowManager := payment.NewEscrowManager(dbManager, x402Client, config, logger)
+
 	rp := &RelayPeer{
 		config:            config,
 		logger:            logger,
 		dbManager:         dbManager,
+		escrowManager:     escrowManager,
 		ctx:               ctx,
 		cancel:            cancel,
 		isRelayMode:       isRelayMode,
@@ -155,6 +164,75 @@ func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remo
 		return CreateRelayReject("", data.NodeID, "relay at maximum capacity")
 	}
 
+	// PAYMENT VERIFICATION (x402 protocol)
+	// Calculate required payment based on estimated data size and relay pricing
+	// Note: If pricingPerGB = 0, relay is free and doesn't require payment
+	var paymentID int64
+	billableGB := float64(data.EstimatedBytes) / (1024 * 1024 * 1024)
+	requiredAmount := billableGB * rp.pricingPerGB
+
+	// Payment is mandatory for paid relays (requiredAmount > 0)
+	if requiredAmount > 0 {
+		// Payment signature is mandatory
+		if data.PaymentSignature == nil {
+			rp.logger.Warn(fmt.Sprintf("Relay registration from %s rejected: payment required (estimated: %d bytes, %.6f USDC)",
+				data.NodeID, data.EstimatedBytes, requiredAmount), "relay")
+			return CreateRelayReject("", data.NodeID, fmt.Sprintf("Payment signature required (%.6f USDC)", requiredAmount))
+		}
+
+		// Convert payment signature from interface{} to *payment.PaymentSignature
+		paymentSig, ok := data.PaymentSignature.(*payment.PaymentSignature)
+		if !ok {
+			// Try to unmarshal if it's a map
+			if sigMap, isMap := data.PaymentSignature.(map[string]interface{}); isMap {
+				paymentSig = &payment.PaymentSignature{}
+				if network, ok := sigMap["network"].(string); ok {
+					paymentSig.Network = network
+				}
+				if sender, ok := sigMap["sender"].(string); ok {
+					paymentSig.Sender = sender
+				}
+				if recipient, ok := sigMap["recipient"].(string); ok {
+					paymentSig.Recipient = recipient
+				}
+				if amount, ok := sigMap["amount"].(float64); ok {
+					paymentSig.Amount = amount
+				}
+				if currency, ok := sigMap["currency"].(string); ok {
+					paymentSig.Currency = currency
+				}
+				if nonce, ok := sigMap["nonce"].(string); ok {
+					paymentSig.Nonce = nonce
+				}
+				if signature, ok := sigMap["signature"].(string); ok {
+					paymentSig.Signature = signature
+				}
+				if timestamp, ok := sigMap["timestamp"].(float64); ok {
+					paymentSig.Timestamp = int64(timestamp)
+				}
+				if metadata, ok := sigMap["metadata"].(map[string]interface{}); ok {
+					paymentSig.Metadata = metadata
+				}
+			} else {
+				rp.logger.Error(fmt.Sprintf("Invalid payment signature type from %s", data.NodeID), "relay")
+				return CreateRelayReject("", data.NodeID, "Invalid payment signature format")
+			}
+		}
+
+		// Create escrow (verifies payment with facilitator)
+		// Use temporary job ID of 0 (relay doesn't use job_executions table)
+		tempJobID := int64(0)
+		var err error
+		paymentID, err = rp.escrowManager.CreateEscrow(tempJobID, paymentSig, requiredAmount)
+		if err != nil {
+			rp.logger.Error(fmt.Sprintf("Relay payment verification failed for %s: %v", data.NodeID, err), "relay")
+			return CreateRelayReject("", data.NodeID, fmt.Sprintf("Payment verification failed: %v", err))
+		}
+
+		rp.logger.Info(fmt.Sprintf("Relay payment verified (ID: %d) for client %s (amount: %.6f %s, estimated: %d bytes)",
+			paymentID, data.NodeID, paymentSig.Amount, paymentSig.Currency, data.EstimatedBytes), "relay")
+	}
+
 	// Create new session
 	sessionID := uuid.New().String()
 	keepaliveInterval := rp.config.GetConfigDuration("relay_connection_keepalive", 30*time.Second)
@@ -171,6 +249,8 @@ func (rp *RelayPeer) HandleRelayRegister(msg *QUICMessage, conn *quic.Conn, remo
 		KeepaliveInterval: keepaliveInterval,
 		IngressBytes:      0,
 		EgressBytes:       0,
+		PaymentID:         paymentID,         // Store payment ID for settlement/refund
+		EstimatedBytes:    data.EstimatedBytes, // Store estimated bytes
 	}
 
 	// Store session
@@ -337,11 +417,12 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 		}
 	}
 
-	// For job status requests and updates, inject source peer ID so target knows who to respond to
+	// For job status requests and updates, and invoice messages, inject source peer ID so target knows who to respond to
 	// This is critical for relay forwarding where the connection context is lost
 	if data.MessageType == "job_status_request" || data.MessageType == "job_request" ||
 	   data.MessageType == "job_status_update" || data.MessageType == "job_data_transfer_request" ||
-	   data.MessageType == "capabilities_request" {
+	   data.MessageType == "capabilities_request" || data.MessageType == "invoice_request" ||
+	   data.MessageType == "invoice_response" || data.MessageType == "invoice_notify" {
 		msg, err := UnmarshalQUICMessage(data.Payload)
 		if err == nil {
 			// Inject source peer ID into message envelope
@@ -535,6 +616,37 @@ func (rp *RelayPeer) HandleRelayDisconnect(msg *QUICMessage, remoteAddr string) 
 			session.StartTime,
 			time.Now(),
 		)
+	}
+
+	// SETTLE OR REFUND RELAY PAYMENT (x402 protocol)
+	if exists && session.PaymentID > 0 {
+		// Calculate actual data transferred
+		actualBytes := data.BytesIngress + data.BytesEgress
+		actualGB := float64(actualBytes) / (1024 * 1024 * 1024)
+		actualAmount := actualGB * rp.pricingPerGB
+
+		// Determine if transfer was successful or failed
+		// For relay, we consider it successful if any data was transferred
+		// or if disconnection was graceful (not due to error)
+		transferSuccess := actualBytes > 0 || data.Reason == "client_disconnect" || data.Reason == "graceful"
+
+		if transferSuccess {
+			// Settle payment for actual usage
+			if err := rp.escrowManager.SettleEscrow(session.PaymentID, actualAmount); err != nil {
+				rp.logger.Error(fmt.Sprintf("Failed to settle relay payment %d: %v", session.PaymentID, err), "relay")
+			} else {
+				rp.logger.Info(fmt.Sprintf("Relay payment %d settled (actual: %.2f MB, amount: %.6f USDC)",
+					session.PaymentID, float64(actualBytes)/(1024*1024), actualAmount), "relay")
+			}
+		} else {
+			// Refund payment on failure
+			reason := fmt.Sprintf("Relay transfer failed: %s", data.Reason)
+			if err := rp.escrowManager.RefundEscrow(session.PaymentID, reason); err != nil {
+				rp.logger.Error(fmt.Sprintf("Failed to refund relay payment %d: %v", session.PaymentID, err), "relay")
+			} else {
+				rp.logger.Info(fmt.Sprintf("Relay payment %d refunded (reason: %s)", session.PaymentID, reason), "relay")
+			}
+		}
 	}
 
 	return nil

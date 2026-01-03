@@ -402,6 +402,73 @@ func (s *APIServer) handleUpdateServiceStatus(w http.ResponseWriter, r *http.Req
 	})
 }
 
+// handleUpdateServicePricing updates service pricing and payment networks
+func (s *APIServer) handleUpdateServicePricing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract ID from path (format: /api/services/{id}/pricing)
+	path := strings.TrimPrefix(r.URL.Path, "/api/services/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	// Parse request body
+	var requestBody struct {
+		PricingAmount            float64  `json:"pricing_amount"`
+		PricingType              string   `json:"pricing_type"`
+		PricingInterval          int      `json:"pricing_interval"`
+		PricingUnit              string   `json:"pricing_unit"`
+		AcceptedPaymentNetworks  []string `json:"accepted_payment_networks"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate pricing
+	if requestBody.PricingAmount < 0 {
+		http.Error(w, "Pricing amount cannot be negative", http.StatusBadRequest)
+		return
+	}
+
+	if requestBody.PricingType != "ONE_TIME" && requestBody.PricingType != "RECURRING" {
+		http.Error(w, "Invalid pricing type. Must be ONE_TIME or RECURRING", http.StatusBadRequest)
+		return
+	}
+
+	if len(requestBody.AcceptedPaymentNetworks) == 0 {
+		http.Error(w, "At least one payment network is required", http.StatusBadRequest)
+		return
+	}
+
+	// Update pricing in database
+	err = s.dbManager.UpdateServicePricing(id, requestBody.PricingAmount, requestBody.PricingType, requestBody.PricingInterval, requestBody.PricingUnit, requestBody.AcceptedPaymentNetworks)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to update service pricing: %v", err), "api")
+		http.Error(w, "Failed to update service pricing", http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast service update via WebSocket
+	s.eventEmitter.BroadcastServiceUpdate()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Service pricing updated successfully",
+	})
+}
+
 // handleGetServicePassphrase retrieves the passphrase for a data service
 func (s *APIServer) handleGetServicePassphrase(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -556,4 +623,224 @@ func (s *APIServer) createDefaultServiceInterfaces(service *database.OfferedServ
 
 	s.logger.Info(fmt.Sprintf("Created STDOUT interface for DATA service %d", service.ID), "api")
 	return nil
+}
+
+// ==================== Payment Network Management ====================
+
+// handleGetServicePaymentNetworks returns the accepted payment networks for a service
+func (s *APIServer) handleGetServicePaymentNetworks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract service ID from path (e.g., /api/services/123/payment-networks)
+	pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/services/"), "/")
+	if len(pathParts) < 2 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	serviceID, err := strconv.ParseInt(pathParts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	service, err := s.dbManager.GetService(serviceID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get service %d: %v", serviceID, err), "api")
+		http.Error(w, "Failed to retrieve service", http.StatusInternalServerError)
+		return
+	}
+
+	if service == nil {
+		http.Error(w, "Service not found", http.StatusNotFound)
+		return
+	}
+
+	// Auto-detect supported networks if not explicitly set
+	networks := service.AcceptedPaymentNetworks
+	explicit := len(networks) > 0
+	autoDetected := !explicit
+
+	// Note: Auto-detection from wallets not currently available via API
+	// Networks must be explicitly configured via PUT endpoint
+	if !explicit {
+		networks = []string{} // Empty = accepts all networks
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"service_id":    serviceID,
+		"networks":      networks,
+		"explicit":      explicit,
+		"auto_detected": autoDetected,
+	})
+}
+
+// handleSetServicePaymentNetworks sets the accepted payment networks for a service
+func (s *APIServer) handleSetServicePaymentNetworks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract service ID from path
+	pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/services/"), "/")
+	if len(pathParts) < 2 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	serviceID, err := strconv.ParseInt(pathParts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		Networks []string `json:"networks"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate networks
+	for _, network := range req.Networks {
+		if !isValidPaymentNetwork(network) {
+			http.Error(w, fmt.Sprintf("Invalid network: %s", network), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Get service
+	service, err := s.dbManager.GetService(serviceID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get service %d: %v", serviceID, err), "api")
+		http.Error(w, "Failed to retrieve service", http.StatusInternalServerError)
+		return
+	}
+
+	if service == nil {
+		http.Error(w, "Service not found", http.StatusNotFound)
+		return
+	}
+
+	// Update service
+	service.AcceptedPaymentNetworks = req.Networks
+	if err := s.dbManager.UpdateService(service); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to update service %d: %v", serviceID, err), "api")
+		http.Error(w, "Failed to update service", http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Updated payment networks for service %d: %v", serviceID, req.Networks), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"service_id": serviceID,
+		"networks":   req.Networks,
+	})
+}
+
+// handleClearServicePaymentNetworks clears payment network restrictions (accept all)
+func (s *APIServer) handleClearServicePaymentNetworks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract service ID from path
+	pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/services/"), "/")
+	if len(pathParts) < 2 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	serviceID, err := strconv.ParseInt(pathParts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+
+	// Get service
+	service, err := s.dbManager.GetService(serviceID)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get service %d: %v", serviceID, err), "api")
+		http.Error(w, "Failed to retrieve service", http.StatusInternalServerError)
+		return
+	}
+
+	if service == nil {
+		http.Error(w, "Service not found", http.StatusNotFound)
+		return
+	}
+
+	// Clear payment networks (nil = accept all)
+	service.AcceptedPaymentNetworks = nil
+	if err := s.dbManager.UpdateService(service); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to update service %d: %v", serviceID, err), "api")
+		http.Error(w, "Failed to update service", http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Cleared payment network restrictions for service %d (now accepts all)", serviceID), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"service_id": serviceID,
+		"message":    "Service now accepts all supported networks",
+	})
+}
+
+// isValidPaymentNetwork validates a payment network identifier
+func isValidPaymentNetwork(network string) bool {
+	// Must be in format "namespace:reference" (CAIP-2)
+	parts := strings.Split(network, ":")
+	if len(parts) != 2 {
+		return false
+	}
+
+	namespace := parts[0]
+	reference := parts[1]
+
+	// Namespace and reference must be non-empty
+	if namespace == "" || reference == "" {
+		return false
+	}
+
+	// Valid namespaces
+	validNamespaces := map[string]bool{
+		"eip155": true, // EVM chains
+		"solana": true, // Solana
+	}
+
+	if !validNamespaces[namespace] {
+		return false
+	}
+
+	// Reference can be wildcard or specific chain/cluster
+	if reference == "*" {
+		return true
+	}
+
+	// For EVM (eip155), reference should be numeric chain ID
+	if namespace == "eip155" {
+		_, err := strconv.ParseInt(reference, 10, 64)
+		return err == nil
+	}
+
+	// For Solana, reference can be mainnet-beta, devnet, testnet, or custom
+	if namespace == "solana" {
+		// Any non-empty string is valid for Solana
+		return true
+	}
+
+	return true
 }

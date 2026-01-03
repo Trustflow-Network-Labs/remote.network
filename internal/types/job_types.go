@@ -94,6 +94,8 @@ type JobExecutionRequest struct {
 	DataServiceHash          string `json:"data_service_hash,omitempty"`
 	DataServiceSizeBytes     int64  `json:"data_service_size_bytes,omitempty"`
 	DataServiceEncrypted     bool   `json:"data_service_encrypted,omitempty"`
+	// Payment signature (x402 protocol) - required for services with pricing
+	PaymentSignature interface{} `json:"payment_signature,omitempty"` // Will be *payment.PaymentSignature
 }
 
 // JobExecutionResponse represents a response to a job execution request

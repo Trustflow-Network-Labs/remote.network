@@ -20,6 +20,7 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/dependencies"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/gorilla/websocket"
@@ -57,6 +58,9 @@ type APIServer struct {
 	gitService         *services.GitService
 	dockerService      *services.DockerService
 	standaloneService  *services.StandaloneService
+	walletManager      *payment.WalletManager
+	invoiceManager     *payment.InvoiceManager
+	localPeerID        string
 	startTime          time.Time
 }
 
@@ -173,10 +177,43 @@ func NewAPIServer(
 		}
 	})
 
-	// Initialize service search handler for remote service discovery
-	serviceSearchHandler := ws.NewServiceSearchHandler(wsLogger, dbManager, peerManager.GetKnownPeers(), peerManager.GetQUIC(), peerManager.GetMetadataQuery(), peerManager.GetDHT(), peerManager.GetRelayPeer(), peerManager.GetPeerID())
+	// Initialize wallet manager (needed for service search payment compatibility checks)
+	walletManager, err := payment.NewWalletManager(config)
+	if err != nil {
+		logger.Warn(fmt.Sprintf("Failed to initialize wallet manager: %v", err), "api_server")
+	} else {
+		logger.Info("Wallet manager initialized", "api")
+	}
+
+	// Initialize service search handler for remote service discovery (with wallet manager for payment compatibility)
+	serviceSearchHandler := ws.NewServiceSearchHandler(wsLogger, dbManager, peerManager.GetKnownPeers(), peerManager.GetQUIC(), peerManager.GetMetadataQuery(), peerManager.GetDHT(), peerManager.GetRelayPeer(), walletManager, peerManager.GetPeerID())
 	wsHub.SetServiceSearchHandler(serviceSearchHandler)
 	logger.Info("Service search handler initialized for remote service discovery", "api")
+
+	// Initialize X402 client for escrow payments
+	x402Client := payment.NewX402Client(config, logger)
+	logger.Info("X402 client initialized", "api")
+
+	// Initialize escrow manager (required for invoice manager)
+	escrowManager := payment.NewEscrowManager(dbManager, x402Client, config, logger)
+	logger.Info("Escrow manager initialized", "api")
+
+	// Initialize invoice manager
+	invoiceManager := payment.NewInvoiceManager(
+		dbManager,
+		walletManager,
+		escrowManager,
+		logger,
+		config,
+	)
+	logger.Info("Invoice manager initialized", "api")
+
+	// Setup invoice handler and connect to QUIC peer
+	if err := peerManager.SetupInvoiceHandler(invoiceManager, eventEmitter); err != nil {
+		logger.Error(fmt.Sprintf("Failed to setup invoice handler: %v", err), "api")
+	} else {
+		logger.Info("Invoice handler setup complete", "api")
+	}
 
 	return &APIServer{
 		ctx:               ctx,
@@ -197,6 +234,9 @@ func NewAPIServer(
 		gitService:        gitService,
 		dockerService:     dockerService,
 		standaloneService: standaloneService,
+		walletManager:     walletManager,
+		invoiceManager:    invoiceManager,
+		localPeerID:       keyPair.PeerID(),
 		startTime:         time.Now(),
 	}
 }
@@ -381,11 +421,12 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 
 	// Services routes (protected with JWT authentication)
 	mux.Handle("/api/services", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			s.handleGetServices(w, r)
-		} else if r.Method == http.MethodPost {
+		case http.MethodPost:
 			s.handleAddService(w, r)
-		} else {
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
@@ -393,6 +434,10 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		// Check for special endpoints
 		if strings.HasSuffix(r.URL.Path, "/status") {
 			s.handleUpdateServiceStatus(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/pricing") {
+			s.handleUpdateServicePricing(w, r)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/passphrase") {
@@ -403,15 +448,30 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			s.handleGetServiceInterfaces(w, r)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/payment-networks") {
+			// Payment network management endpoints
+			switch r.Method {
+			case http.MethodGet:
+				s.handleGetServicePaymentNetworks(w, r)
+			case http.MethodPut:
+				s.handleSetServicePaymentNetworks(w, r)
+			case http.MethodDelete:
+				s.handleClearServicePaymentNetworks(w, r)
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
 
 		// Default service CRUD operations
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			s.handleGetService(w, r)
-		} else if r.Method == http.MethodPut {
+		case http.MethodPut:
 			s.handleUpdateService(w, r)
-		} else if r.Method == http.MethodDelete {
+		case http.MethodDelete:
 			s.handleDeleteService(w, r)
-		} else {
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
@@ -468,11 +528,12 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 
 	// Blacklist routes (protected with JWT authentication)
 	mux.Handle("/api/blacklist", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			s.handleGetBlacklist(w, r)
-		} else if r.Method == http.MethodPost {
+		case http.MethodPost:
 			s.handleAddToBlacklist(w, r)
-		} else {
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
@@ -504,11 +565,12 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 
 	// Workflows routes (protected with JWT authentication)
 	mux.Handle("/api/workflows", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			s.handleGetWorkflows(w, r)
-		} else if r.Method == http.MethodPost {
+		case http.MethodPost:
 			s.handleCreateWorkflow(w, r)
-		} else {
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
@@ -555,42 +617,48 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		if strings.Contains(r.URL.Path, "/connections") {
 			if strings.Contains(r.URL.Path, "/connections/") {
 				// DELETE or PUT /api/workflows/:id/connections/:connectionId
-				if r.Method == http.MethodDelete {
+				switch r.Method {
+				case http.MethodDelete:
 					s.handleDeleteWorkflowConnection(w, r)
-				} else if r.Method == http.MethodPut {
+				case http.MethodPut:
 					s.handleUpdateWorkflowConnection(w, r)
-				} else {
+				default:
 					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				}
-			} else if r.Method == http.MethodGet {
-				s.handleGetWorkflowConnections(w, r)
-			} else if r.Method == http.MethodPost {
-				s.handleAddWorkflowConnection(w, r)
 			} else {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				switch r.Method {
+				case http.MethodGet:
+					s.handleGetWorkflowConnections(w, r)
+				case http.MethodPost:
+					s.handleAddWorkflowConnection(w, r)
+				default:
+					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				}
 			}
 			return
 		}
 		// Check if it's a UI state request
 		if strings.HasSuffix(r.URL.Path, "/ui-state") {
-			if r.Method == http.MethodGet {
+			switch r.Method {
+			case http.MethodGet:
 				s.handleGetWorkflowUIState(w, r)
-			} else if r.Method == http.MethodPut {
+			case http.MethodPut:
 				s.handleUpdateWorkflowUIState(w, r)
-			} else {
+			default:
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
 			return
 		}
 
 		// Otherwise, handle as CRUD operations
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			s.handleGetWorkflow(w, r)
-		} else if r.Method == http.MethodPut {
+		case http.MethodPut:
 			s.handleUpdateWorkflow(w, r)
-		} else if r.Method == http.MethodDelete {
+		case http.MethodDelete:
 			s.handleDeleteWorkflow(w, r)
-		} else {
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
@@ -618,6 +686,59 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			return
 		}
 		http.Error(w, "Not found", http.StatusNotFound)
+	})))
+
+	// Wallet management routes (protected with JWT authentication)
+	mux.Handle("/api/wallets", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleListWallets(w, r)
+		case http.MethodPost:
+			s.handleCreateWallet(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/wallets/import", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.handleImportWallet(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/wallets/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.Count(r.URL.Path, "/") == 3 {
+			s.handleDeleteWallet(w, r)
+		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/balance") {
+			s.handleGetWalletBalance(w, r)
+		} else if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/export") {
+			s.handleExportWallet(w, r)
+		} else {
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
+	})))
+
+	// Invoice management routes (protected with JWT authentication)
+	mux.Handle("/api/invoices", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			s.handleCreateInvoice(w, r)
+		case http.MethodGet:
+			s.handleListInvoices(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/invoices/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Count(r.URL.Path, "/") == 3 {
+			s.handleGetInvoice(w, r)
+		} else if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/accept") {
+			s.handleAcceptInvoice(w, r)
+		} else if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reject") {
+			s.handleRejectInvoice(w, r)
+		} else {
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
 	})))
 
 	// WebSocket endpoint

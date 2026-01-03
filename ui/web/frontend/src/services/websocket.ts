@@ -22,6 +22,21 @@ export enum MessageType {
   JOB_STATUS_UPDATED = 'job.status.updated',
   BLACKLIST_UPDATED = 'blacklist.updated',
 
+  // Wallet messages
+  WALLET_CREATED = 'wallet.created',
+  WALLET_DELETED = 'wallet.deleted',
+  WALLET_BALANCE_UPDATE = 'wallet.balance.update',
+  WALLETS_UPDATED = 'wallets.updated',
+
+  // Invoice messages
+  INVOICE_CREATED = 'invoice.created',
+  INVOICE_RECEIVED = 'invoice.received',
+  INVOICE_ACCEPTED = 'invoice.accepted',
+  INVOICE_REJECTED = 'invoice.rejected',
+  INVOICE_SETTLED = 'invoice.settled',
+  INVOICE_EXPIRED = 'invoice.expired',
+  INVOICES_UPDATED = 'invoices.updated',
+
   // File upload messages
   FILE_UPLOAD_START = 'file.upload.start',
   FILE_UPLOAD_CHUNK = 'file.upload.chunk',

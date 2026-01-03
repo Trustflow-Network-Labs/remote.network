@@ -103,7 +103,8 @@ relay_traffic_batch_size = 100
 relay_capacity = 1000
 
 # Relay Selection (for NAT peers)
-relay_max_latency = 500ms
+# Max latency set to 5s to match ping timeout (allows relays that respond within timeout window)
+relay_max_latency = 5s
 relay_min_reputation = 0.3
 relay_max_pricing = 0.01
 relay_switch_threshold = 0.2
@@ -144,3 +145,120 @@ metadata_fetch_max_age = 3600
 periodic_discovery_interval_hours = 3
 # Periodic bootstrap re-query interval: 3 hours (how often to re-query bootstrap peers for updated peer lists)
 periodic_bootstrap_requery_interval_hours = 3
+
+[tokens]
+# Token Contract Addresses and Program IDs
+# EVM Token Contracts (USDC ERC-3009 compliant)
+token_usdc_base_sepolia = 0x036CbD53842c5426634e7929541eC2318f3dCF7e
+token_usdc_base = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+token_usdc_ethereum_sepolia = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+token_usdc_ethereum = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+
+# Solana Token Mints (USDC SPL)
+token_usdc_solana = EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+token_usdc_solana_devnet = 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
+
+# Solana Program IDs
+solana_associated_token_program = ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL
+solana_token_program = TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+solana_system_program = 11111111111111111111111111111111
+
+# Token EIP-712 Domain Parameters (for ERC-3009 signing)
+# Format: token_{currency}_{network}_name and token_{currency}_{network}_version
+# NOTE: Use official EIP-712 domain name from Circle (must be "USDC" not "USD Coin")
+token_usdc_base_sepolia_name = USDC
+token_usdc_base_sepolia_version = 2
+token_usdc_base_name = USDC
+token_usdc_base_version = 2
+token_usdc_ethereum_sepolia_name = USDC
+token_usdc_ethereum_sepolia_version = 2
+token_usdc_ethereum_name = USDC
+token_usdc_ethereum_version = 2
+
+[x402]
+# x402 Payment Protocol Configuration
+# Payment is MANDATORY for all services with price > 0
+# To offer free services, set pricing to 0 USDC
+# - Service pricing: Set in service configuration (0 = free, >0 = requires payment)
+# - Relay pricing: Set via relay_pricing_per_gb (0 = free, >0 = requires payment)
+
+# Facilitator Configuration
+# ==================== X402 Facilitator Configuration ====================
+#
+# The application automatically detects the signature format based on facilitator:
+# - PayAI: Uses EIP-191 personal message signing
+# - x402.org, x402.rs, and standard x402: Uses EIP-712 typed structured data signing
+#
+# Simply change the x402_facilitator_url to switch between facilitators.
+# No code changes required - signature format is automatically selected.
+#
+# ==========================================================================
+
+# PayAI facilitator: Free, no API key required, 100K settlements/month
+# Supports: Base Sepolia, Base Mainnet, Solana Devnet, Solana Mainnet
+# Signature Format: EIP-191 (auto-detected)
+# x402_facilitator_url = https://facilitator.payai.network
+# x402_verify_endpoint = /verify
+# x402_settle_endpoint = /settle
+# x402_refund_endpoint = /refund
+# x402_version = v2  # X402 protocol version (included in payment payload)
+
+# Alternative facilitators (comment out PayAI above to use these):
+
+# x402.org facilitator: Standard x402 protocol implementation
+# Supports: Base Sepolia, Base Mainnet, and other EVM chains
+# Signature Format: EIP-712 (auto-detected)
+#x402_facilitator_url = https://www.x402.org/facilitator
+x402_facilitator_url = http://filmski-grad.ddns.net:34022
+x402_verify_endpoint = /verify
+x402_settle_endpoint = /settle
+x402_refund_endpoint = /refund
+x402_version = v2
+
+# x402.rs facilitator (PLANNED - not yet available):
+# Rust implementation of x402 protocol
+# Signature Format: EIP-712 (will be auto-detected)
+# x402_facilitator_url = https://facilitator.x402.rs
+# x402_verify_endpoint = /verify
+# x402_settle_endpoint = /settle
+# x402_refund_endpoint = /refund
+# x402_version = v2
+
+# Coinbase CDP facilitator (requires API keys, mainnet only):
+# Supports: Base mainnet (eip155:8453), Solana mainnet (solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp)
+# Note: "/v2/" in URL is CDP API version (different from x402 protocol version below)
+# x402_facilitator_url = https://api.cdp.coinbase.com/platform/v2/x402
+# x402_verify_endpoint = /verify
+# x402_settle_endpoint = /settle
+# x402_refund_endpoint = /refund
+# x402_version = v2  # X402 protocol version (included in payment payload, same for both testnet and mainnet)
+
+# Network Configuration
+x402_network = testnet
+
+# Default payment network (must match your default wallet type)
+# For EVM wallets (Base, Ethereum, etc.)
+x402_chain_id = eip155:84532
+# Mainnet: eip155:8453
+
+# For Solana wallets (uncomment to use Solana as default)
+# x402_chain_id = solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1  # Solana Devnet (x402 supported)
+# x402_chain_id = solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp  # Solana Mainnet (x402 supported)
+# NOTE: Solana Testnet (solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z) is NOT supported by x402 facilitator
+
+# IMPORTANT: Payment network (x402_chain_id) MUST match your default wallet's network
+# - If using EVM wallet → set x402_chain_id to eip155:*
+# - If using Solana wallet → set x402_chain_id to solana:*
+# Mismatch will cause "network mismatch" errors when signing payments
+
+# Timeouts and Limits
+x402_timeout_seconds = 10
+x402_max_retries = 3
+x402_retry_backoff_ms = 1000
+
+# Minimum payment amount in USDC (not ETH)
+# Services with price > 0 but < minimum will be rejected
+x402_min_payment_amount = 0.01
+
+# Fail Mode (if facilitator unavailable)
+x402_fail_mode = closed

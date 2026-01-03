@@ -10,22 +10,23 @@ import (
 
 // OfferedService represents a service offered by this node (stored in database)
 type OfferedService struct {
-	ID              int64                  `json:"id"`
-	ServiceType     string                 `json:"service_type"`     // "DATA", "DOCKER", "STANDALONE"
-	Type            string                 `json:"type"`             // Legacy: "storage", "docker", "standalone", "relay"
-	Name            string                 `json:"name"`
-	Description     string                 `json:"description"`
-	Endpoint        string                 `json:"endpoint"`
-	Capabilities    map[string]interface{} `json:"capabilities"`
-	Status          string                 `json:"status"`           // "ACTIVE", "INACTIVE"
-	PricingAmount   float64                `json:"pricing_amount"`
-	PricingType     string                 `json:"pricing_type"`     // "ONE_TIME", "RECURRING"
-	PricingInterval int                    `json:"pricing_interval"` // number of units
-	PricingUnit     string                 `json:"pricing_unit"`     // "SECONDS", "MINUTES", "HOURS", "DAYS", "WEEKS", "MONTHS", "YEARS"
-	Pricing         float64                 `json:"pricing"`          // Legacy field for backwards compatibility
-	CreatedAt       time.Time               `json:"created_at"`
-	UpdatedAt       time.Time               `json:"updated_at"`
-	Interfaces      []*ServiceInterface     `json:"interfaces,omitempty" db:"-"` // Service interfaces (populated on demand, not stored in services table)
+	ID                      int64                  `json:"id"`
+	ServiceType             string                 `json:"service_type"`     // "DATA", "DOCKER", "STANDALONE"
+	Type                    string                 `json:"type"`             // Legacy: "storage", "docker", "standalone", "relay"
+	Name                    string                 `json:"name"`
+	Description             string                 `json:"description"`
+	Endpoint                string                 `json:"endpoint"`
+	Capabilities            map[string]interface{} `json:"capabilities"`
+	Status                  string                 `json:"status"`                        // "ACTIVE", "INACTIVE"
+	PricingAmount           float64                `json:"pricing_amount"`
+	PricingType             string                 `json:"pricing_type"`                  // "ONE_TIME", "RECURRING"
+	PricingInterval         int                    `json:"pricing_interval"`              // number of units
+	PricingUnit             string                 `json:"pricing_unit"`                  // "SECONDS", "MINUTES", "HOURS", "DAYS", "WEEKS", "MONTHS", "YEARS"
+	Pricing                 float64                `json:"pricing"`                       // Legacy field for backwards compatibility
+	AcceptedPaymentNetworks []string               `json:"accepted_payment_networks,omitempty"` // Payment networks accepted for this service (e.g. ["eip155:84532", "solana:devnet"])
+	CreatedAt               time.Time              `json:"created_at"`
+	UpdatedAt               time.Time              `json:"updated_at"`
+	Interfaces              []*ServiceInterface    `json:"interfaces,omitempty" db:"-"` // Service interfaces (populated on demand, not stored in services table)
 }
 
 // ServiceInterface represents an available interface (STDIN, STDOUT, MOUNT) for a service
@@ -57,6 +58,7 @@ func (sm *SQLiteManager) InitServicesTable() error {
 		pricing_interval INTEGER DEFAULT 1,
 		pricing_unit TEXT CHECK(pricing_unit IN ('SECONDS', 'MINUTES', 'HOURS', 'DAYS', 'WEEKS', 'MONTHS', 'YEARS')) DEFAULT 'MONTHS',
 		pricing REAL DEFAULT 0.0,
+		accepted_payment_networks TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
@@ -65,6 +67,7 @@ func (sm *SQLiteManager) InitServicesTable() error {
 	CREATE INDEX IF NOT EXISTS idx_services_type ON services(type);
 	CREATE INDEX IF NOT EXISTS idx_services_status ON services(status);
 	CREATE INDEX IF NOT EXISTS idx_services_name ON services(name);
+	CREATE INDEX IF NOT EXISTS idx_services_payment_networks ON services(accepted_payment_networks);
 
 	-- Data service details table
 	CREATE TABLE IF NOT EXISTS data_service_details (
@@ -199,6 +202,15 @@ func (sm *SQLiteManager) AddService(service *OfferedService) error {
 		return err
 	}
 
+	// Serialize accepted payment networks to JSON
+	var acceptedPaymentNetworksJSON []byte
+	if len(service.AcceptedPaymentNetworks) > 0 {
+		acceptedPaymentNetworksJSON, err = json.Marshal(service.AcceptedPaymentNetworks)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Set defaults if not provided
 	if service.ServiceType == "" {
 		service.ServiceType = "DATA"
@@ -219,10 +231,18 @@ func (sm *SQLiteManager) AddService(service *OfferedService) error {
 	query := `
 		INSERT INTO services (
 			service_type, type, name, description, endpoint, capabilities, status,
-			pricing_amount, pricing_type, pricing_interval, pricing_unit, pricing
+			pricing_amount, pricing_type, pricing_interval, pricing_unit, pricing, accepted_payment_networks
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
+
+	// Prepare accepted_payment_networks value - NULL if empty
+	var acceptedPaymentNetworksValue interface{}
+	if len(acceptedPaymentNetworksJSON) > 0 {
+		acceptedPaymentNetworksValue = string(acceptedPaymentNetworksJSON)
+	} else {
+		acceptedPaymentNetworksValue = nil
+	}
 
 	result, err := sm.db.Exec(
 		query,
@@ -238,6 +258,7 @@ func (sm *SQLiteManager) AddService(service *OfferedService) error {
 		service.PricingInterval,
 		service.PricingUnit,
 		service.Pricing,
+		acceptedPaymentNetworksValue,
 	)
 
 	if err != nil {
@@ -263,7 +284,7 @@ func (sm *SQLiteManager) GetService(id int64) (*OfferedService, error) {
 	query := `
 		SELECT id, service_type, type, name, description, endpoint, capabilities, status,
 		       pricing_amount, pricing_type, pricing_interval, pricing_unit, pricing,
-		       created_at, updated_at
+		       accepted_payment_networks, created_at, updated_at
 		FROM services
 		WHERE id = ?
 	`
@@ -272,6 +293,7 @@ func (sm *SQLiteManager) GetService(id int64) (*OfferedService, error) {
 		func(row *sql.Row) (*OfferedService, error) {
 			var service OfferedService
 			var capabilitiesJSON string
+			var acceptedPaymentNetworksJSON sql.NullString
 
 			err := row.Scan(
 				&service.ID,
@@ -287,6 +309,7 @@ func (sm *SQLiteManager) GetService(id int64) (*OfferedService, error) {
 				&service.PricingInterval,
 				&service.PricingUnit,
 				&service.Pricing,
+				&acceptedPaymentNetworksJSON,
 				&service.CreatedAt,
 				&service.UpdatedAt,
 			)
@@ -304,6 +327,15 @@ func (sm *SQLiteManager) GetService(id int64) (*OfferedService, error) {
 				}
 			}
 
+			// Parse accepted payment networks JSON
+			if acceptedPaymentNetworksJSON.Valid && acceptedPaymentNetworksJSON.String != "" {
+				err = json.Unmarshal([]byte(acceptedPaymentNetworksJSON.String), &service.AcceptedPaymentNetworks)
+				if err != nil {
+					sm.logger.Error("Failed to parse service accepted payment networks", "database")
+					return nil, err
+				}
+			}
+
 			return &service, nil
 		},
 		sm.logger, "database", id)
@@ -314,7 +346,7 @@ func (sm *SQLiteManager) GetAllServices() ([]*OfferedService, error) {
 	query := `
 		SELECT id, service_type, type, name, description, endpoint, capabilities, status,
 		       pricing_amount, pricing_type, pricing_interval, pricing_unit, pricing,
-		       created_at, updated_at
+		       accepted_payment_networks, created_at, updated_at
 		FROM services
 		ORDER BY created_at DESC
 	`
@@ -323,6 +355,7 @@ func (sm *SQLiteManager) GetAllServices() ([]*OfferedService, error) {
 		func(rows *sql.Rows) (*OfferedService, error) {
 			var service OfferedService
 			var capabilitiesJSON string
+			var acceptedPaymentNetworksJSON sql.NullString
 
 			err := rows.Scan(
 				&service.ID,
@@ -338,6 +371,7 @@ func (sm *SQLiteManager) GetAllServices() ([]*OfferedService, error) {
 				&service.PricingInterval,
 				&service.PricingUnit,
 				&service.Pricing,
+				&acceptedPaymentNetworksJSON,
 				&service.CreatedAt,
 				&service.UpdatedAt,
 			)
@@ -351,6 +385,15 @@ func (sm *SQLiteManager) GetAllServices() ([]*OfferedService, error) {
 				err = json.Unmarshal([]byte(capabilitiesJSON), &service.Capabilities)
 				if err != nil {
 					sm.logger.Error("Failed to parse service capabilities", "database")
+					return nil, err
+				}
+			}
+
+			// Parse accepted payment networks JSON
+			if acceptedPaymentNetworksJSON.Valid && acceptedPaymentNetworksJSON.String != "" {
+				err = json.Unmarshal([]byte(acceptedPaymentNetworksJSON.String), &service.AcceptedPaymentNetworks)
+				if err != nil {
+					sm.logger.Error("Failed to parse service accepted payment networks", "database")
 					return nil, err
 				}
 			}
@@ -367,13 +410,30 @@ func (sm *SQLiteManager) UpdateService(service *OfferedService) error {
 		return err
 	}
 
+	// Serialize accepted payment networks to JSON
+	var acceptedPaymentNetworksJSON []byte
+	if len(service.AcceptedPaymentNetworks) > 0 {
+		acceptedPaymentNetworksJSON, err = json.Marshal(service.AcceptedPaymentNetworks)
+		if err != nil {
+			return err
+		}
+	}
+
 	query := `
 		UPDATE services
 		SET service_type = ?, type = ?, name = ?, description = ?, endpoint = ?, capabilities = ?,
 		    status = ?, pricing_amount = ?, pricing_type = ?, pricing_interval = ?, pricing_unit = ?,
-		    pricing = ?, updated_at = CURRENT_TIMESTAMP
+		    pricing = ?, accepted_payment_networks = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`
+
+	// Prepare accepted_payment_networks value - NULL if empty
+	var acceptedPaymentNetworksValue interface{}
+	if len(acceptedPaymentNetworksJSON) > 0 {
+		acceptedPaymentNetworksValue = string(acceptedPaymentNetworksJSON)
+	} else {
+		acceptedPaymentNetworksValue = nil
+	}
 
 	_, err = ExecWithAffectedRowsCheck(
 		sm.db,
@@ -392,6 +452,7 @@ func (sm *SQLiteManager) UpdateService(service *OfferedService) error {
 		service.PricingInterval,
 		service.PricingUnit,
 		service.Pricing,
+		acceptedPaymentNetworksValue,
 		service.ID,
 	)
 
@@ -465,6 +526,43 @@ func (sm *SQLiteManager) UpdateServiceStatus(id int64, status string) error {
 	}
 
 	sm.logger.Info("Service status updated successfully", "database")
+	return nil
+}
+
+// UpdateServicePricing updates the pricing information and accepted payment networks for a service
+func (sm *SQLiteManager) UpdateServicePricing(id int64, pricingAmount float64, pricingType string, pricingInterval int, pricingUnit string, acceptedPaymentNetworks []string) error {
+	// Convert payment networks array to JSON
+	networksJSON, err := json.Marshal(acceptedPaymentNetworks)
+	if err != nil {
+		sm.logger.Error("Failed to marshal payment networks", "database")
+		return err
+	}
+
+	query := `UPDATE services
+	          SET pricing_amount = ?,
+	              pricing_type = ?,
+	              pricing_interval = ?,
+	              pricing_unit = ?,
+	              accepted_payment_networks = ?,
+	              updated_at = CURRENT_TIMESTAMP
+	          WHERE id = ?`
+
+	result, err := sm.db.Exec(query, pricingAmount, pricingType, pricingInterval, pricingUnit, string(networksJSON), id)
+	if err != nil {
+		sm.logger.Error("Failed to update service pricing", "database")
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+
+	sm.logger.Info("Service pricing updated successfully", "database")
 	return nil
 }
 

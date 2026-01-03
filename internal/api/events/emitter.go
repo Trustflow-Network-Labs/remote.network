@@ -13,12 +13,14 @@ import (
 
 // Emitter broadcasts real-time events to WebSocket clients
 type Emitter struct {
-	hub         *ws.Hub
-	peerManager *core.PeerManager
-	dbManager   *database.SQLiteManager
-	logger      *logrus.Logger
-	ctx         context.Context
-	cancel      context.CancelFunc
+	hub            *ws.Hub
+	peerManager    *core.PeerManager
+	dbManager      *database.SQLiteManager
+	walletManager  interface{}
+	invoiceManager interface{}
+	logger         *logrus.Logger
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 // NewEmitter creates a new event emitter
@@ -325,14 +327,15 @@ func (e *Emitter) broadcastServices() {
 			serviceInfos := make([]ws.ServiceInfo, 0, len(services))
 			for _, svc := range services {
 				serviceInfos = append(serviceInfos, ws.ServiceInfo{
-					ID:          fmt.Sprintf("%d", svc.ID),
-					Name:        svc.Name,
-					Description: svc.Description,
-					Type:        svc.Type,
-					Config:      svc.Capabilities,
-					Status:      svc.Status,
-					CreatedAt:   svc.CreatedAt.Unix(),
-					UpdatedAt:   svc.UpdatedAt.Unix(),
+					ID:                      fmt.Sprintf("%d", svc.ID),
+					Name:                    svc.Name,
+					Description:             svc.Description,
+					Type:                    svc.Type,
+					Config:                  svc.Capabilities,
+					Status:                  svc.Status,
+					CreatedAt:               svc.CreatedAt.Unix(),
+					UpdatedAt:               svc.UpdatedAt.Unix(),
+					AcceptedPaymentNetworks: svc.AcceptedPaymentNetworks,
 				})
 			}
 
@@ -458,14 +461,15 @@ func (e *Emitter) BroadcastServiceUpdate() {
 	serviceInfos := make([]ws.ServiceInfo, 0, len(services))
 	for _, svc := range services {
 		serviceInfos = append(serviceInfos, ws.ServiceInfo{
-			ID:          fmt.Sprintf("%d", svc.ID),
-			Name:        svc.Name,
-			Description: svc.Description,
-			Type:        svc.Type,
-			Config:      svc.Capabilities,
-			Status:      svc.Status,
-			CreatedAt:   svc.CreatedAt.Unix(),
-			UpdatedAt:   svc.UpdatedAt.Unix(),
+			ID:                      fmt.Sprintf("%d", svc.ID),
+			Name:                    svc.Name,
+			Description:             svc.Description,
+			Type:                    svc.Type,
+			Config:                  svc.Capabilities,
+			Status:                  svc.Status,
+			CreatedAt:               svc.CreatedAt.Unix(),
+			UpdatedAt:               svc.UpdatedAt.Unix(),
+			AcceptedPaymentNetworks: svc.AcceptedPaymentNetworks,
 		})
 	}
 
@@ -613,5 +617,129 @@ func (e *Emitter) BroadcastDockerBuildOutput(serviceName, imageName, stream, err
 
 	if err := e.hub.BroadcastPayload(ws.MessageTypeDockerBuildOutput, payload); err != nil {
 		e.logger.WithError(err).Error("Failed to broadcast Docker build output")
+	}
+}
+
+// BroadcastWalletUpdate sends wallet list update
+func (e *Emitter) BroadcastWalletUpdate() {
+	// This method can be called to broadcast wallet updates
+	// Implementation will be added when walletManager is properly initialized
+	if e.walletManager == nil {
+		return
+	}
+
+	// For now, just broadcast a simple update message
+	// The actual wallet list will be fetched by the client via API
+	if err := e.hub.BroadcastPayload(ws.MessageTypeWalletsUpdated, ws.WalletsPayload{
+		Wallets: []ws.WalletPayload{},
+	}); err != nil {
+		e.logger.WithError(err).Error("Failed to broadcast wallet update")
+	}
+}
+
+// BroadcastInvoiceCreated sends invoice created notification
+func (e *Emitter) BroadcastInvoiceCreated(invoice *ws.InvoicePayload) {
+	if err := e.hub.BroadcastPayload(ws.MessageTypeInvoiceCreated, invoice); err != nil {
+		e.logger.WithError(err).Error("Failed to broadcast invoice created")
+	}
+}
+
+// BroadcastInvoiceReceived sends invoice received notification
+func (e *Emitter) BroadcastInvoiceReceived(invoice *ws.InvoicePayload) {
+	if err := e.hub.BroadcastPayload(ws.MessageTypeInvoiceReceived, invoice); err != nil {
+		e.logger.WithError(err).Error("Failed to broadcast invoice received")
+	}
+}
+
+// BroadcastInvoiceUpdate sends invoice status update
+func (e *Emitter) BroadcastInvoiceUpdate(invoiceID string, status string) {
+	// This method can be called to broadcast invoice status updates
+	// Implementation will be added when invoiceManager is properly initialized
+	if e.invoiceManager == nil {
+		return
+	}
+
+	var msgType ws.MessageType
+	switch status {
+	case "accepted":
+		msgType = ws.MessageTypeInvoiceAccepted
+	case "rejected":
+		msgType = ws.MessageTypeInvoiceRejected
+	case "settled":
+		msgType = ws.MessageTypeInvoiceSettled
+	case "expired":
+		msgType = ws.MessageTypeInvoiceExpired
+	default:
+		return
+	}
+
+	// For now, broadcast with minimal data
+	// The client can fetch full invoice details via API
+	payload := ws.InvoicePayload{
+		InvoiceID: invoiceID,
+		Status:    status,
+	}
+
+	if err := e.hub.BroadcastPayload(msgType, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to broadcast invoice update")
+	}
+}
+
+// EmitInvoiceReceived sends invoice received notification with full invoice data
+func (e *Emitter) EmitInvoiceReceived(invoice *database.PaymentInvoice) {
+	payload := ws.InvoicePayload{
+		InvoiceID:   invoice.InvoiceID,
+		FromPeerID:  invoice.FromPeerID,
+		ToPeerID:    invoice.ToPeerID,
+		Amount:      invoice.Amount,
+		Currency:    invoice.Currency,
+		Network:     invoice.Network,
+		Description: invoice.Description,
+		Status:      invoice.Status,
+		CreatedAt:   invoice.CreatedAt.Unix(),
+	}
+
+	if invoice.ExpiresAt != nil {
+		payload.ExpiresAt = invoice.ExpiresAt.Unix()
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeInvoiceReceived, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit invoice received")
+	}
+}
+
+// EmitInvoiceAccepted sends invoice accepted notification
+func (e *Emitter) EmitInvoiceAccepted(invoiceID string) {
+	payload := ws.InvoicePayload{
+		InvoiceID: invoiceID,
+		Status:    "accepted",
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeInvoiceAccepted, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit invoice accepted")
+	}
+}
+
+// EmitInvoiceRejected sends invoice rejected notification
+func (e *Emitter) EmitInvoiceRejected(invoiceID string) {
+	payload := ws.InvoicePayload{
+		InvoiceID: invoiceID,
+		Status:    "rejected",
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeInvoiceRejected, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit invoice rejected")
+	}
+}
+
+// EmitInvoiceSettled sends invoice settled notification
+func (e *Emitter) EmitInvoiceSettled(invoiceID string) {
+	payload := ws.InvoicePayload{
+		InvoiceID: invoiceID,
+		Status:    "settled",
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeInvoiceSettled, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit invoice settled")
 	}
 }

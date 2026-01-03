@@ -49,10 +49,117 @@
               <p>{{ service.description || $t('message.common.noDescription') }}</p>
             </div>
 
-            <div class="info-item">
-              <label>{{ $t('message.services.pricing') }}</label>
-              <p>{{ formatPricing(service) }}</p>
-            </div>
+            <!-- Pricing Display (when not editing) -->
+            <template v-if="!editingPricing">
+              <div class="info-item">
+                <label>{{ $t('message.services.pricing') }}</label>
+                <p>{{ formatPricing(service) }}</p>
+              </div>
+
+              <div class="info-item">
+                <label>{{ $t('message.services.paymentNetwork') }}</label>
+                <p v-if="service.accepted_payment_networks && service.accepted_payment_networks.length > 0">
+                  {{ service.accepted_payment_networks.map((n: string) => {
+                    const network = paymentNetworks.find(pn => pn.value === n)
+                    return network ? network.label : n
+                  }).join(', ') }}
+                </p>
+                <p v-else class="text-secondary">{{ $t('message.services.noNetworks') }}</p>
+              </div>
+            </template>
+
+            <!-- Pricing Edit Form (when editing) -->
+            <template v-else>
+              <div class="info-item full-width pricing-edit-section">
+                <div class="pricing-edit-grid">
+                  <!-- Pricing Amount -->
+                  <div class="field">
+                    <label for="edit-pricing-amount">{{ $t('message.services.servicePrice') }} *</label>
+                    <div class="pricing-row">
+                      <InputNumber
+                        id="edit-pricing-amount"
+                        v-model="pricingForm.pricingAmount"
+                        :min="0"
+                        :maxFractionDigits="6"
+                        placeholder="0.00"
+                        class="pricing-amount"
+                      />
+                      <span class="pricing-currency-label">USDC</span>
+                    </div>
+                  </div>
+
+                  <!-- Pricing Type -->
+                  <div class="field">
+                    <label for="edit-pricing-type">{{ $t('message.services.pricingType') }} *</label>
+                    <Select
+                      id="edit-pricing-type"
+                      v-model="pricingForm.pricingType"
+                      :options="pricingTypes"
+                      optionLabel="label"
+                      optionValue="value"
+                      class="w-full"
+                    />
+                  </div>
+
+                  <!-- Recurring Options (only if RECURRING) -->
+                  <template v-if="pricingForm.pricingType === 'RECURRING'">
+                    <div class="field">
+                      <label for="edit-pricing-interval">{{ $t('message.services.interval') }}</label>
+                      <InputNumber
+                        id="edit-pricing-interval"
+                        v-model="pricingForm.pricingInterval"
+                        :min="1"
+                        class="w-full"
+                      />
+                    </div>
+
+                    <div class="field">
+                      <label for="edit-pricing-unit">{{ $t('message.services.unit') }}</label>
+                      <Select
+                        id="edit-pricing-unit"
+                        v-model="pricingForm.pricingUnit"
+                        :options="pricingUnits"
+                        optionLabel="label"
+                        optionValue="value"
+                        class="w-full"
+                      />
+                    </div>
+                  </template>
+
+                  <!-- Payment Networks -->
+                  <div class="field" :class="{ 'full-width': pricingForm.pricingType === 'ONE_TIME' }">
+                    <label for="edit-payment-networks">{{ $t('message.services.acceptedPaymentNetworks') }} *</label>
+                    <MultiSelect
+                      id="edit-payment-networks"
+                      v-model="pricingForm.acceptedPaymentNetworks"
+                      :options="paymentNetworks"
+                      optionLabel="label"
+                      optionValue="value"
+                      placeholder="Select blockchain networks"
+                      display="chip"
+                      class="w-full"
+                    />
+                  </div>
+
+                  <!-- Action Buttons -->
+                  <div class="field full-width pricing-actions">
+                    <Button
+                      :label="$t('message.common.cancel')"
+                      icon="pi pi-times"
+                      outlined
+                      @click="cancelEditPricing"
+                      :disabled="savingPricing"
+                    />
+                    <Button
+                      :label="$t('message.common.save')"
+                      icon="pi pi-check"
+                      @click="savePricing"
+                      :loading="savingPricing"
+                    />
+                  </div>
+                </div>
+              </div>
+            </template>
 
             <div class="info-item">
               <label>{{ $t('message.common.createdAt') }}</label>
@@ -63,6 +170,17 @@
               <label>{{ $t('message.common.updatedAt') }}</label>
               <p>{{ formatDate(service.updated_at) }}</p>
             </div>
+          </div>
+
+          <!-- Edit Pricing Button (when not editing) -->
+          <div v-if="!editingPricing" class="card-footer-actions">
+            <Button
+              :label="$t('message.services.editPricing')"
+              icon="pi pi-pencil"
+              size="small"
+              @click="startEditPricing"
+              outlined
+            />
           </div>
         </template>
       </Card>
@@ -228,6 +346,9 @@ import Button from 'primevue/button'
 import Tag from 'primevue/tag'
 import ProgressSpinner from 'primevue/progressspinner'
 import Message from 'primevue/message'
+import InputNumber from 'primevue/inputnumber'
+import Select from 'primevue/select'
+import MultiSelect from 'primevue/multiselect'
 import InterfaceReviewDialog from '../components/services/InterfaceReviewDialog.vue'
 import { api } from '../services/api'
 
@@ -247,6 +368,15 @@ const passphrase = ref<string | null>(null)
 const showPassphrase = ref(false)
 const serviceInterfaces = ref<any[]>([])
 const showEditInterfaces = ref(false)
+const editingPricing = ref(false)
+const savingPricing = ref(false)
+const pricingForm = ref({
+  pricingAmount: 0,
+  pricingType: 'ONE_TIME' as 'ONE_TIME' | 'RECURRING',
+  pricingInterval: 1,
+  pricingUnit: 'MONTHS' as 'SECONDS' | 'MINUTES' | 'HOURS' | 'DAYS' | 'WEEKS' | 'MONTHS' | 'YEARS',
+  acceptedPaymentNetworks: [] as string[]
+})
 
 // Computed
 const compressionRatio = computed(() => {
@@ -254,6 +384,32 @@ const compressionRatio = computed(() => {
   const ratio = (dataDetails.value.size_bytes / dataDetails.value.original_size_bytes) * 100
   return ratio.toFixed(1)
 })
+
+const pricingTypes = computed(() => [
+  { label: t('message.services.oneTime'), value: 'ONE_TIME' },
+  { label: t('message.services.recurring'), value: 'RECURRING' }
+])
+
+const pricingUnits = computed(() => [
+  { label: t('message.services.seconds'), value: 'SECONDS' },
+  { label: t('message.services.minutes'), value: 'MINUTES' },
+  { label: t('message.services.hours'), value: 'HOURS' },
+  { label: t('message.services.days'), value: 'DAYS' },
+  { label: t('message.services.weeks'), value: 'WEEKS' },
+  { label: t('message.services.months'), value: 'MONTHS' },
+  { label: t('message.services.years'), value: 'YEARS' }
+])
+
+const paymentNetworks = computed(() => [
+  { label: 'Base Mainnet', value: 'eip155:8453' },
+  { label: 'Base Sepolia (Testnet)', value: 'eip155:84532' },
+  { label: 'Ethereum Mainnet', value: 'eip155:1' },
+  { label: 'Polygon', value: 'eip155:137' },
+  { label: 'Arbitrum', value: 'eip155:42161' },
+  { label: 'Optimism', value: 'eip155:10' },
+  { label: 'Solana Mainnet', value: 'solana:mainnet-beta' },
+  { label: 'Solana Devnet', value: 'solana:devnet' }
+])
 
 // Methods
 const goBack = () => {
@@ -355,17 +511,16 @@ const formatPricing = (svc: any): string => {
 
   const amount = svc.pricing_amount
   const type = svc.pricing_type || 'ONE_TIME'
-  const tokenLabel = amount === 1 ? 'token' : 'tokens'
 
   if (type === 'ONE_TIME') {
-    return `${amount} ${tokenLabel}`
+    return `${amount} USDC`
   }
 
   const interval = svc.pricing_interval || 1
   const unit = svc.pricing_unit || 'MONTHS'
   const unitStr = interval > 1 ? `${interval} ${unit.toLowerCase()}` : unit.toLowerCase().slice(0, -1)
 
-  return `${amount} ${tokenLabel}/${unitStr}`
+  return `${amount} USDC/${unitStr}`
 }
 
 const getStatusLabel = (status: string): string => {
@@ -504,6 +659,85 @@ const handleSaveInterfaces = async (data: { interfaces: any[], entrypoint: strin
       detail: err.response?.data?.error || t('message.services.errors.interfacesUpdateFailed'),
       life: 3000
     })
+  }
+}
+
+const startEditPricing = () => {
+  // Load current values into form
+  pricingForm.value = {
+    pricingAmount: service.value.pricing_amount || 0,
+    pricingType: service.value.pricing_type || 'ONE_TIME',
+    pricingInterval: service.value.pricing_interval || 1,
+    pricingUnit: service.value.pricing_unit || 'MONTHS',
+    acceptedPaymentNetworks: service.value.accepted_payment_networks || []
+  }
+  editingPricing.value = true
+}
+
+const cancelEditPricing = () => {
+  editingPricing.value = false
+}
+
+const savePricing = async () => {
+  // Validation
+  if (pricingForm.value.pricingAmount < 0) {
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: t('message.services.invalidPricing'),
+      life: 3000
+    })
+    return
+  }
+
+  if (!pricingForm.value.acceptedPaymentNetworks || pricingForm.value.acceptedPaymentNetworks.length === 0) {
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: t('message.services.networksRequired'),
+      life: 3000
+    })
+    return
+  }
+
+  try {
+    savingPricing.value = true
+
+    const updateData = {
+      pricing_amount: pricingForm.value.pricingAmount,
+      pricing_type: pricingForm.value.pricingType,
+      pricing_interval: pricingForm.value.pricingInterval,
+      pricing_unit: pricingForm.value.pricingUnit,
+      accepted_payment_networks: pricingForm.value.acceptedPaymentNetworks
+    }
+
+    await api.updateServicePricing(service.value.id, updateData)
+
+    // Update local service object
+    service.value.pricing_amount = pricingForm.value.pricingAmount
+    service.value.pricing_type = pricingForm.value.pricingType
+    service.value.pricing_interval = pricingForm.value.pricingInterval
+    service.value.pricing_unit = pricingForm.value.pricingUnit
+    service.value.accepted_payment_networks = pricingForm.value.acceptedPaymentNetworks
+
+    editingPricing.value = false
+
+    toast.add({
+      severity: 'success',
+      summary: t('message.common.success'),
+      detail: t('message.services.pricingUpdated'),
+      life: 3000
+    })
+  } catch (err: any) {
+    console.error('Failed to update pricing:', err)
+    toast.add({
+      severity: 'error',
+      summary: t('message.common.error'),
+      detail: err.response?.data?.error || t('message.services.errors.pricingUpdateFailed'),
+      life: 3000
+    })
+  } finally {
+    savingPricing.value = false
   }
 }
 
@@ -727,5 +961,71 @@ onMounted(() => {
       }
     }
   }
+}
+
+.card-footer-actions {
+  margin-top: vars.$spacing-lg;
+  padding-top: vars.$spacing-lg;
+  border-top: 1px solid var(--surface-border);
+  display: flex;
+  gap: vars.$spacing-md;
+}
+
+.pricing-edit-section {
+  .pricing-edit-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: vars.$spacing-lg;
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: vars.$spacing-xs;
+
+      &.full-width {
+        grid-column: 1 / -1;
+      }
+
+      label {
+        font-weight: 500;
+        font-size: vars.$font-size-sm;
+        color: vars.$color-text-secondary;
+      }
+    }
+
+    .pricing-row {
+      display: flex;
+      align-items: center;
+      gap: vars.$spacing-sm;
+
+      .pricing-amount {
+        flex: 1;
+      }
+
+      .pricing-currency-label {
+        font-weight: 600;
+        color: vars.$color-text;
+        font-size: 1rem;
+        padding: 0 vars.$spacing-sm;
+        white-space: nowrap;
+      }
+    }
+
+    .pricing-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: vars.$spacing-md;
+      padding-top: vars.$spacing-md;
+    }
+  }
+}
+
+.w-full {
+  width: 100%;
+}
+
+.text-secondary {
+  color: vars.$color-text-secondary;
+  font-style: italic;
 }
 </style>

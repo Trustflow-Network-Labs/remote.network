@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 	"github.com/quic-go/quic-go"
@@ -30,6 +31,7 @@ type JobMessageHandler struct {
 	knownPeers    *KnownPeersManager
 	metadataQuery *MetadataQueryService
 	ourPeerID     string
+	walletManager *payment.WalletManager // x402 wallet manager for payment signing
 	// Callbacks for job operations
 	onJobRequest              func(*types.JobExecutionRequest, string) (*types.JobExecutionResponse, error)
 	onJobStart                func(*types.JobStartRequest, string) (*types.JobStartResponse, error)
@@ -46,11 +48,20 @@ type JobMessageHandler struct {
 
 // NewJobMessageHandler creates a new job message handler
 func NewJobMessageHandler(cm *utils.ConfigManager, quicPeer *QUICPeer) *JobMessageHandler {
+	// Initialize wallet manager for x402 payment signing
+	walletManager, err := payment.NewWalletManager(cm)
+	if err != nil {
+		// Log error but don't fail - payments will be disabled
+		logger := utils.NewLogsManager(cm)
+		logger.Warn(fmt.Sprintf("Failed to initialize wallet manager: %v (payments disabled)", err), "job_handler")
+	}
+
 	return &JobMessageHandler{
-		logger:     utils.NewLogsManager(cm),
-		cm:         cm,
-		quicPeer:   quicPeer,
-		relayCache: make(map[string]*RelayCache),
+		logger:        utils.NewLogsManager(cm),
+		cm:            cm,
+		quicPeer:      quicPeer,
+		walletManager: walletManager,
+		relayCache:    make(map[string]*RelayCache),
 	}
 }
 
@@ -865,6 +876,73 @@ func (jmh *JobMessageHandler) handleJobCancel(msg *QUICMessage, stream *quic.Str
 // SendJobRequest sends a job execution request to a peer (supports both direct and relay connections)
 func (jmh *JobMessageHandler) SendJobRequest(peerID string, request *types.JobExecutionRequest) (*types.JobExecutionResponse, error) {
 	jmh.logger.Info(fmt.Sprintf("Sending job request to peer %s for workflow %d", peerID, request.WorkflowID), "job_handler")
+
+	// GENERATE PAYMENT SIGNATURE (x402 protocol)
+	// Check if service requires payment and generate signature
+	if request.ServiceID > 0 && jmh.dbManager != nil && jmh.walletManager != nil {
+		service, err := jmh.dbManager.GetService(request.ServiceID)
+		if err != nil {
+			jmh.logger.Warn(fmt.Sprintf("Failed to get service %d for payment check: %v", request.ServiceID, err), "job_handler")
+		} else if service != nil && service.PricingAmount > 0 {
+			// Service requires payment - generate payment signature
+
+			// 1. Get service's accepted payment networks (empty = any network accepted)
+			acceptedNetworks := service.AcceptedPaymentNetworks
+			if len(acceptedNetworks) == 0 {
+				// Empty list means service accepts any network
+				// Use config chain ID as fallback for backward compatibility
+				acceptedNetworks = []string{jmh.cm.GetConfigWithDefault("x402_chain_id", "eip155:84532")}
+				jmh.logger.Debug(fmt.Sprintf("Service %d accepts any payment network, using config default: %v",
+					request.ServiceID, acceptedNetworks), "job_handler")
+			}
+
+			// 2. Get default wallet ID for priority
+			defaultWalletID := jmh.cm.GetConfigWithDefault("x402_default_wallet_id", "")
+
+			// 3. Select best wallet matching accepted networks
+			wallet, walletID, err := jmh.walletManager.SelectBestWallet(acceptedNetworks, defaultWalletID)
+			if err != nil {
+				return nil, fmt.Errorf("no compatible wallet found for service %d: %v (service accepts: %v)",
+					request.ServiceID, err, acceptedNetworks)
+			}
+
+			jmh.logger.Info(fmt.Sprintf("Selected wallet %s (network: %s) for service %d (accepted networks: %v)",
+				walletID, wallet.Network, request.ServiceID, acceptedNetworks), "job_handler")
+
+			// 4. Get wallet passphrase from config or environment
+			// In production, this should be prompted or retrieved from secure storage
+			passphrase := jmh.cm.GetConfigWithDefault("x402_wallet_passphrase", "")
+			if passphrase == "" {
+				// Try to use empty passphrase for testing (not recommended for production)
+				jmh.logger.Warn("No wallet passphrase configured, using empty passphrase (INSECURE)", "job_handler")
+			}
+
+			// 5. Sign payment with selected wallet's network
+			paymentData := &payment.PaymentData{
+				Amount:      service.PricingAmount,
+				Currency:    "USDC",
+				Network:     wallet.Network, // Use wallet's network, not config chain ID
+				Recipient:   peerID,         // Payment goes to service provider
+				Description: fmt.Sprintf("Job execution for service %d", request.ServiceID),
+				Metadata: map[string]interface{}{
+					"service_id":      request.ServiceID,
+					"workflow_id":     request.WorkflowID,
+					"workflow_job_id": request.WorkflowJobID,
+				},
+			}
+
+			paymentSig, err := jmh.walletManager.SignPayment(walletID, paymentData, passphrase)
+			if err != nil {
+				return nil, fmt.Errorf("failed to sign payment: %v", err)
+			}
+
+			// Add payment signature to request
+			request.PaymentSignature = paymentSig
+
+			jmh.logger.Info(fmt.Sprintf("Payment signature generated for service %d (amount: %.6f %s, wallet: %s, network: %s)",
+				request.ServiceID, paymentSig.Amount, paymentSig.Currency, walletID, wallet.Network), "job_handler")
+		}
+	}
 
 	// Create message
 	msg := CreateJobRequest(request)

@@ -20,6 +20,21 @@ const (
 	MessageTypeJobStatusUpdated MessageType = "job.status.updated"
 	MessageTypeBlacklistUpdated MessageType = "blacklist.updated"
 
+	// Wallet message types
+	MessageTypeWalletCreated       MessageType = "wallet.created"
+	MessageTypeWalletDeleted       MessageType = "wallet.deleted"
+	MessageTypeWalletBalanceUpdate MessageType = "wallet.balance.update"
+	MessageTypeWalletsUpdated      MessageType = "wallets.updated"
+
+	// Invoice message types
+	MessageTypeInvoiceCreated  MessageType = "invoice.created"
+	MessageTypeInvoiceReceived MessageType = "invoice.received"
+	MessageTypeInvoiceAccepted MessageType = "invoice.accepted"
+	MessageTypeInvoiceRejected MessageType = "invoice.rejected"
+	MessageTypeInvoiceSettled  MessageType = "invoice.settled"
+	MessageTypeInvoiceExpired  MessageType = "invoice.expired"
+	MessageTypeInvoicesUpdated MessageType = "invoices.updated"
+
 	// File upload message types
 	MessageTypeFileUploadStart    MessageType = "file.upload.start"
 	MessageTypeFileUploadChunk    MessageType = "file.upload.chunk"
@@ -142,14 +157,15 @@ type ServicesPayload struct {
 }
 
 type ServiceInfo struct {
-	ID          string                 `json:"id"`
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	Type        string                 `json:"type"`
-	Config      map[string]interface{} `json:"config,omitempty"`
-	Status      string                 `json:"status"`
-	CreatedAt   int64                  `json:"created_at"`
-	UpdatedAt   int64                  `json:"updated_at"`
+	ID                      string                 `json:"id"`
+	Name                    string                 `json:"name"`
+	Description             string                 `json:"description,omitempty"`
+	Type                    string                 `json:"type"`
+	Config                  map[string]interface{} `json:"config,omitempty"`
+	Status                  string                 `json:"status"`
+	CreatedAt               int64                  `json:"created_at"`
+	UpdatedAt               int64                  `json:"updated_at"`
+	AcceptedPaymentNetworks []string               `json:"accepted_payment_networks,omitempty"`
 }
 
 // WorkflowsPayload contains workflow list information
@@ -278,24 +294,27 @@ type ServiceSearchResponsePayload struct {
 
 // RemoteServiceInfo represents a service from a remote peer
 type RemoteServiceInfo struct {
-	ID              int64                  `json:"id"`
-	Name            string                 `json:"name"`
-	Description     string                 `json:"description"`
-	ServiceType     string                 `json:"service_type"`
-	Type            string                 `json:"type"`
-	Status          string                 `json:"status"`
-	PricingAmount   float64                `json:"pricing_amount"`
-	PricingType     string                 `json:"pricing_type"`
-	PricingInterval int                    `json:"pricing_interval"`
-	PricingUnit     string                 `json:"pricing_unit"`
-	Capabilities    map[string]interface{} `json:"capabilities,omitempty"`
-	Hash            string                 `json:"hash,omitempty"`
-	SizeBytes       int64                  `json:"size_bytes,omitempty"`
-	Entrypoint      []string               `json:"entrypoint,omitempty"` // For DOCKER services
-	Cmd             []string               `json:"cmd,omitempty"`        // For DOCKER services
-	PeerID          string                 `json:"peer_id"` // ID of peer offering this service
-	PeerName        string                 `json:"peer_name,omitempty"`
-	Interfaces      []RemoteServiceInterface `json:"interfaces,omitempty"` // Service interfaces
+	ID                      int64                    `json:"id"`
+	Name                    string                   `json:"name"`
+	Description             string                   `json:"description"`
+	ServiceType             string                   `json:"service_type"`
+	Type                    string                   `json:"type"`
+	Status                  string                   `json:"status"`
+	PricingAmount           float64                  `json:"pricing_amount"`
+	PricingType             string                   `json:"pricing_type"`
+	PricingInterval         int                      `json:"pricing_interval"`
+	PricingUnit             string                   `json:"pricing_unit"`
+	Capabilities            map[string]interface{}   `json:"capabilities,omitempty"`
+	Hash                    string                   `json:"hash,omitempty"`
+	SizeBytes               int64                    `json:"size_bytes,omitempty"`
+	Entrypoint              []string                 `json:"entrypoint,omitempty"`                 // For DOCKER services
+	Cmd                     []string                 `json:"cmd,omitempty"`                        // For DOCKER services
+	PeerID                  string                   `json:"peer_id"`                              // ID of peer offering this service
+	PeerName                string                   `json:"peer_name,omitempty"`
+	Interfaces              []RemoteServiceInterface `json:"interfaces,omitempty"`                 // Service interfaces
+	AcceptedPaymentNetworks []string                 `json:"accepted_payment_networks,omitempty"`  // Payment networks accepted for this service
+	PaymentCompatible       bool                     `json:"payment_compatible"`                   // Whether user has compatible wallet
+	CompatibilityNote       string                   `json:"compatibility_note,omitempty"`         // Explanation if not compatible
 }
 
 // RemoteServiceInterface represents a service interface from a remote peer
@@ -392,4 +411,38 @@ type JobStatusUpdatedPayload struct {
 	JobName        string `json:"job_name"`
 	Status         string `json:"status"`
 	Error          string `json:"error,omitempty"`
+}
+
+// WalletPayload contains wallet information
+type WalletPayload struct {
+	WalletID  string  `json:"wallet_id"`
+	Network   string  `json:"network"`
+	Address   string  `json:"address"`
+	Balance   float64 `json:"balance,omitempty"`
+	Currency  string  `json:"currency,omitempty"`
+	CreatedAt int64   `json:"created_at"`
+}
+
+// WalletsPayload contains list of wallets
+type WalletsPayload struct {
+	Wallets []WalletPayload `json:"wallets"`
+}
+
+// InvoicePayload contains invoice information
+type InvoicePayload struct {
+	InvoiceID   string  `json:"invoice_id"`
+	FromPeerID  string  `json:"from_peer_id"`
+	ToPeerID    string  `json:"to_peer_id"`
+	Amount      float64 `json:"amount"`
+	Currency    string  `json:"currency"`
+	Network     string  `json:"network"`
+	Description string  `json:"description"`
+	Status      string  `json:"status"`
+	CreatedAt   int64   `json:"created_at"`
+	ExpiresAt   int64   `json:"expires_at,omitempty"`
+}
+
+// InvoicesPayload contains list of invoices
+type InvoicesPayload struct {
+	Invoices []InvoicePayload `json:"invoices"`
 }

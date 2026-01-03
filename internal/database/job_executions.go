@@ -51,6 +51,27 @@ type JobInterfacePeer struct {
 	CreatedAt          time.Time `json:"created_at"`
 }
 
+// JobPayment represents a payment for a job execution (x402 protocol)
+type JobPayment struct {
+	ID               int64   `json:"id"`
+	JobExecutionID   *int64  `json:"job_execution_id,omitempty"` // Nullable for P2P invoices
+	WalletID         string  `json:"wallet_id"`
+	PaymentNetwork   string  `json:"payment_network"`
+	PaymentSender    string  `json:"payment_sender"`
+	PaymentRecipient string  `json:"payment_recipient"`
+	PaymentAmount    float64 `json:"payment_amount"`
+	PaymentCurrency  string  `json:"payment_currency"`
+	PaymentNonce     string  `json:"payment_nonce"`
+	PaymentSignature string  `json:"payment_signature"`
+	PaymentTimestamp int64   `json:"payment_timestamp"` // Timestamp used in signature
+	TransactionID    *string `json:"transaction_id,omitempty"`
+	Status           string  `json:"status"` // pending, verified, settled, refunded, failed
+	VerifiedAt       *int64  `json:"verified_at,omitempty"`
+	SettledAt        *int64  `json:"settled_at,omitempty"`
+	RefundedAt       *int64  `json:"refunded_at,omitempty"`
+	CreatedAt        int64   `json:"created_at"`
+}
+
 // InitJobExecutionsTable creates the job execution tables
 func (sm *SQLiteManager) InitJobExecutionsTable() error {
 	createTableSQL := `
@@ -117,6 +138,34 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 	CREATE INDEX IF NOT EXISTS idx_job_interface_peers_peer_id ON job_interface_peers(peer_id);
 	CREATE INDEX IF NOT EXISTS idx_job_interface_peers_peer_workflow_job_id ON job_interface_peers(peer_workflow_job_id);
 	CREATE INDEX IF NOT EXISTS idx_job_interface_peers_peer_job_execution_id ON job_interface_peers(peer_job_execution_id);
+
+	-- Job payments table (x402 payment protocol)
+	-- Note: job_execution_id is nullable to support P2P invoice payments (not tied to job executions)
+	CREATE TABLE IF NOT EXISTS job_payments (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_execution_id INTEGER,
+		wallet_id TEXT NOT NULL,
+		payment_network TEXT NOT NULL,
+		payment_sender TEXT NOT NULL,
+		payment_recipient TEXT NOT NULL,
+		payment_amount REAL NOT NULL,
+		payment_currency TEXT NOT NULL DEFAULT 'USDC',
+		payment_nonce TEXT NOT NULL UNIQUE,
+		payment_signature TEXT NOT NULL,
+		payment_timestamp INTEGER NOT NULL,
+		transaction_id TEXT,
+		status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'verified', 'settled', 'refunded', 'failed')),
+		verified_at INTEGER,
+		settled_at INTEGER,
+		refunded_at INTEGER,
+		created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+		FOREIGN KEY (job_execution_id) REFERENCES job_executions(id) ON DELETE CASCADE
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_job_payments_job_execution ON job_payments(job_execution_id);
+	CREATE INDEX IF NOT EXISTS idx_job_payments_nonce ON job_payments(payment_nonce);
+	CREATE INDEX IF NOT EXISTS idx_job_payments_status ON job_payments(status);
+	CREATE INDEX IF NOT EXISTS idx_job_payments_wallet ON job_payments(wallet_id);
 	`
 
 	_, err := sm.db.Exec(createTableSQL)
@@ -893,4 +942,157 @@ func UnmarshalStringMap(data string) (map[string]string, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// ==================== Job Payment Functions ====================
+
+// CreateJobPayment creates a new payment record for a job execution
+func (sm *SQLiteManager) CreateJobPayment(payment *JobPayment) (int64, error) {
+	result, err := sm.db.Exec(`
+		INSERT INTO job_payments (
+			job_execution_id, wallet_id, payment_network, payment_sender, payment_recipient,
+			payment_amount, payment_currency, payment_nonce, payment_signature, payment_timestamp,
+			transaction_id, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		payment.JobExecutionID,
+		payment.WalletID,
+		payment.PaymentNetwork,
+		payment.PaymentSender,
+		payment.PaymentRecipient,
+		payment.PaymentAmount,
+		payment.PaymentCurrency,
+		payment.PaymentNonce,
+		payment.PaymentSignature,
+		payment.PaymentTimestamp,
+		payment.TransactionID,
+		payment.Status,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create job payment: %v", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get payment ID: %v", err)
+	}
+
+	return id, nil
+}
+
+// GetJobPayment retrieves a payment by ID
+func (sm *SQLiteManager) GetJobPayment(paymentID int64) (*JobPayment, error) {
+	payment := &JobPayment{}
+	err := sm.db.QueryRow(`
+		SELECT id, job_execution_id, wallet_id, payment_network, payment_sender, payment_recipient,
+		       payment_amount, payment_currency, payment_nonce, payment_signature, payment_timestamp,
+		       transaction_id, status, verified_at, settled_at, refunded_at, created_at
+		FROM job_payments WHERE id = ?
+	`, paymentID).Scan(
+		&payment.ID,
+		&payment.JobExecutionID,
+		&payment.WalletID,
+		&payment.PaymentNetwork,
+		&payment.PaymentSender,
+		&payment.PaymentRecipient,
+		&payment.PaymentAmount,
+		&payment.PaymentCurrency,
+		&payment.PaymentNonce,
+		&payment.PaymentSignature,
+		&payment.PaymentTimestamp,
+		&payment.TransactionID,
+		&payment.Status,
+		&payment.VerifiedAt,
+		&payment.SettledAt,
+		&payment.RefundedAt,
+		&payment.CreatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get job payment: %v", err)
+	}
+
+	return payment, nil
+}
+
+// GetJobPaymentByJobID retrieves a payment for a specific job execution
+func (sm *SQLiteManager) GetJobPaymentByJobID(jobExecutionID int64) (*JobPayment, error) {
+	payment := &JobPayment{}
+	err := sm.db.QueryRow(`
+		SELECT id, job_execution_id, wallet_id, payment_network, payment_sender, payment_recipient,
+		       payment_amount, payment_currency, payment_nonce, payment_signature, payment_timestamp,
+		       transaction_id, status, verified_at, settled_at, refunded_at, created_at
+		FROM job_payments WHERE job_execution_id = ?
+	`, jobExecutionID).Scan(
+		&payment.ID,
+		&payment.JobExecutionID,
+		&payment.WalletID,
+		&payment.PaymentNetwork,
+		&payment.PaymentSender,
+		&payment.PaymentRecipient,
+		&payment.PaymentAmount,
+		&payment.PaymentCurrency,
+		&payment.PaymentNonce,
+		&payment.PaymentSignature,
+		&payment.PaymentTimestamp,
+		&payment.TransactionID,
+		&payment.Status,
+		&payment.VerifiedAt,
+		&payment.SettledAt,
+		&payment.RefundedAt,
+		&payment.CreatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get job payment by job ID: %v", err)
+	}
+
+	return payment, nil
+}
+
+// UpdateJobPaymentStatus updates the payment status and relevant timestamp
+func (sm *SQLiteManager) UpdateJobPaymentStatus(paymentID int64, status string) error {
+	now := time.Now().Unix()
+	var query string
+
+	switch status {
+	case "verified":
+		query = "UPDATE job_payments SET status = ?, verified_at = ? WHERE id = ?"
+	case "settled":
+		query = "UPDATE job_payments SET status = ?, settled_at = ? WHERE id = ?"
+	case "refunded":
+		query = "UPDATE job_payments SET status = ?, refunded_at = ? WHERE id = ?"
+	case "failed":
+		query = "UPDATE job_payments SET status = ? WHERE id = ?"
+		_, err := sm.db.Exec(query, status, paymentID)
+		return err
+	default:
+		return fmt.Errorf("unknown payment status: %s", status)
+	}
+
+	_, err := sm.db.Exec(query, status, now, paymentID)
+	if err != nil {
+		return fmt.Errorf("failed to update payment status: %v", err)
+	}
+
+	return nil
+}
+
+// UpdateJobPaymentTransaction updates the transaction ID for a payment
+func (sm *SQLiteManager) UpdateJobPaymentTransaction(paymentID int64, transactionID string) error {
+	_, err := sm.db.Exec(`
+		UPDATE job_payments SET transaction_id = ? WHERE id = ?
+	`, transactionID, paymentID)
+
+	if err != nil {
+		return fmt.Errorf("failed to update payment transaction ID: %v", err)
+	}
+
+	return nil
 }

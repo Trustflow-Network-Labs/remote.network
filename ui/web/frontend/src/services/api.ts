@@ -181,6 +181,20 @@ class APIClient {
   }
 
   /**
+   * Update service pricing and payment networks
+   */
+  async updateServicePricing(id: number, pricingData: {
+    pricing_amount: number
+    pricing_type: string
+    pricing_interval: number
+    pricing_unit: string
+    accepted_payment_networks: string[]
+  }) {
+    const response = await this.client.put(`/api/services/${id}/pricing`, pricingData)
+    return response.data
+  }
+
+  /**
    * Get service interfaces
    */
   async getServiceInterfaces(serviceId: number) {
@@ -603,6 +617,129 @@ class APIClient {
     const response = await this.client.post('/api/relay/prefer', { peer_id: peerId })
     return response.data
   }
+
+  // ===== Wallet Management =====
+
+  /**
+   * List all wallets
+   */
+  async listWallets(includeBalance: boolean = false): Promise<{ wallets: Wallet[]; count: number }> {
+    const response = await this.client.get('/api/wallets', {
+      params: { balance: includeBalance }
+    })
+    return response.data
+  }
+
+  /**
+   * Create new wallet
+   */
+  async createWallet(network: string, passphrase: string): Promise<{ success: boolean; wallet_id: string; address: string; network: string }> {
+    const response = await this.client.post('/api/wallets', { network, passphrase })
+    return response.data
+  }
+
+  /**
+   * Import wallet from private key
+   */
+  async importWallet(privateKey: string, network: string, passphrase: string): Promise<{ success: boolean; wallet_id: string; address: string; network: string }> {
+    const response = await this.client.post('/api/wallets/import', {
+      private_key: privateKey,
+      network,
+      passphrase
+    })
+    return response.data
+  }
+
+  /**
+   * Delete wallet
+   */
+  async deleteWallet(walletId: string, passphrase: string): Promise<{ success: boolean; message: string }> {
+    const response = await this.client.delete(`/api/wallets/${walletId}`, {
+      data: { passphrase }
+    })
+    return response.data
+  }
+
+  /**
+   * Get wallet balance
+   */
+  async getWalletBalance(walletId: string): Promise<WalletBalance> {
+    const response = await this.client.get(`/api/wallets/${walletId}/balance`)
+    return response.data
+  }
+
+  /**
+   * Export wallet private key
+   */
+  async exportWallet(walletId: string, passphrase: string): Promise<{ success: boolean; wallet_id: string; private_key: string; address: string; network: string }> {
+    const response = await this.client.post(`/api/wallets/${walletId}/export`, { passphrase })
+    return response.data
+  }
+
+  // ===== Invoice Management =====
+
+  /**
+   * Create payment invoice
+   */
+  async createInvoice(
+    toPeerID: string,
+    fromWalletId: string,
+    amount: number,
+    currency: string,
+    network: string,
+    description: string,
+    expiresInHours: number = 24
+  ): Promise<{ success: boolean; invoice_id: string }> {
+    const response = await this.client.post('/api/invoices', {
+      to_peer_id: toPeerID,
+      from_wallet_id: fromWalletId,
+      amount,
+      currency,
+      network,
+      description,
+      expires_in_hours: expiresInHours
+    })
+    return response.data
+  }
+
+  /**
+   * List invoices
+   */
+  async listInvoices(status?: string, limit: number = 50, offset: number = 0): Promise<{ invoices: Invoice[]; count: number }> {
+    const response = await this.client.get('/api/invoices', {
+      params: { status, limit, offset }
+    })
+    return response.data
+  }
+
+  /**
+   * Get invoice details
+   */
+  async getInvoice(invoiceId: string): Promise<Invoice> {
+    const response = await this.client.get(`/api/invoices/${invoiceId}`)
+    return response.data
+  }
+
+  /**
+   * Accept invoice and make payment
+   */
+  async acceptInvoice(invoiceId: string, walletId: string, passphrase: string): Promise<{ success: boolean; message: string }> {
+    const response = await this.client.post(`/api/invoices/${invoiceId}/accept`, {
+      wallet_id: walletId,
+      passphrase
+    })
+    return response.data
+  }
+
+  /**
+   * Reject invoice
+   */
+  async rejectInvoice(invoiceId: string, reason?: string): Promise<{ success: boolean; message: string }> {
+    const response = await this.client.post(`/api/invoices/${invoiceId}/reject`, {
+      reason: reason || ''
+    })
+    return response.data
+  }
 }
 
 // Create default instance for localhost
@@ -612,6 +749,48 @@ export const api = new APIClient()
 export default APIClient
 
 // ===== Type Definitions =====
+
+/**
+ * Wallet information
+ */
+export interface Wallet {
+  wallet_id: string
+  network: string
+  address: string
+  created_at: number
+  balance?: WalletBalance
+}
+
+/**
+ * Wallet balance information
+ */
+export interface WalletBalance {
+  wallet_id: string
+  network: string
+  address: string
+  balance: number
+  currency: string
+  updated_at: number
+}
+
+/**
+ * Payment invoice
+ */
+export interface Invoice {
+  invoice_id: string
+  from_peer_id: string
+  to_peer_id: string
+  amount: number
+  currency: string
+  network: string
+  description: string
+  status: string // 'pending', 'accepted', 'rejected', 'settled', 'expired'
+  created_at: number
+  expires_at?: number
+  accepted_at?: number
+  rejected_at?: number
+  settled_at?: number
+}
 
 /**
  * GPU information

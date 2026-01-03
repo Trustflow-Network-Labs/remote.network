@@ -890,6 +890,62 @@ func (pm *PeerManager) InitializeJobSystem() error {
 	return nil
 }
 
+// SetupInvoiceHandler initializes and configures the invoice handler
+// This should be called after the invoice manager is created
+func (pm *PeerManager) SetupInvoiceHandler(invoiceManager interface{}, eventEmitter p2p.EventEmitter) error {
+	pm.logger.Info("Setting up invoice handler for P2P invoice messaging", "core")
+
+	// Create invoice handler
+	invoiceHandler := p2p.NewInvoiceHandler(
+		pm.dbManager,
+		pm.logger,
+		pm.keyPair.PeerID(),
+		eventEmitter,
+	)
+
+	// Set invoice handler on QUIC peer
+	pm.quic.SetInvoiceHandler(invoiceHandler)
+	pm.logger.Info("Invoice handler created and set on QUIC peer", "core")
+
+	// Create invoice message handler for retry and relay support
+	invoiceMessageHandler := p2p.NewInvoiceMessageHandler(
+		pm.logger,
+		pm.config,
+		pm.quic,
+	)
+
+	// Set dependencies for relay forwarding
+	if pm.metadataQuery != nil {
+		invoiceMessageHandler.SetDependencies(
+			pm.dbManager,
+			pm.knownPeers,
+			pm.metadataQuery,
+			pm.keyPair.PeerID(),
+		)
+		pm.logger.Info("Invoice message handler dependencies set (relay support enabled)", "core")
+	} else {
+		pm.logger.Warn("Metadata query service not available, invoice relay support disabled", "core")
+	}
+
+	// Set invoice message handler on QUIC peer
+	pm.quic.SetInvoiceMessageHandler(invoiceMessageHandler)
+	pm.logger.Info("Invoice message handler created with retry and relay support", "core")
+
+	// Set dependencies on invoice manager (connect QUIC peer to invoice manager)
+	type InvoiceManagerWithDeps interface {
+		SetDependencies(quicPeer interface{}, localPeerID string)
+	}
+
+	if im, ok := invoiceManager.(InvoiceManagerWithDeps); ok {
+		im.SetDependencies(pm.quic, pm.keyPair.PeerID())
+		pm.logger.Info("Invoice manager dependencies set (QUIC peer connected)", "core")
+	} else {
+		pm.logger.Warn("Invoice manager does not support SetDependencies", "core")
+	}
+
+	return nil
+}
+
 // StartJobSystem starts the job and workflow management system
 func (pm *PeerManager) StartJobSystem() error {
 	if pm.jobManager == nil || pm.workflowManager == nil {

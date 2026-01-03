@@ -22,6 +22,7 @@ import (
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -43,16 +44,16 @@ type QUICPeer struct {
 	connections     map[string]*ConnectionInfo // remote_addr → connection info
 	peerConnections map[string]string          // peer_id → remote_addr
 	connMutex       sync.RWMutex
-	tlsConfig   *tls.Config
-	port         int
+	tlsConfig       *tls.Config
+	port            int
 	// Our peer ID for including in responses
-	peerID      string
+	peerID string
 	// Database manager for peer metadata
-	dbManager   *database.SQLiteManager
+	dbManager *database.SQLiteManager
 	// DHT peer reference to get node ID
-	dhtPeer     *DHTPeer
+	dhtPeer *DHTPeer
 	// Relay peer reference for relay service info
-	relayPeer   *RelayPeer
+	relayPeer *RelayPeer
 	// Hole puncher for NAT traversal
 	holePuncher *HolePuncher
 	// Identity exchanger for Phase 3 identity + known peers exchange
@@ -63,6 +64,9 @@ type QUICPeer struct {
 	capabilitiesHandler *CapabilitiesHandler
 	// Job message handler for job execution and data transfer
 	jobHandler *JobMessageHandler
+	// Invoice handler for P2P invoice payments
+	invoiceHandler        *InvoiceHandler
+	invoiceMessageHandler *InvoiceMessageHandler
 	// Callback for relay peer discovery
 	onRelayDiscovered func(*database.PeerMetadata)
 	// Callback for connection failures
@@ -408,6 +412,15 @@ func (q *QUICPeer) SetJobHandler(handler *JobMessageHandler) {
 	q.jobHandler = handler
 }
 
+// SetInvoiceHandler sets the invoice message handler
+func (q *QUICPeer) SetInvoiceHandler(handler *InvoiceHandler) {
+	q.invoiceHandler = handler
+}
+
+func (q *QUICPeer) SetInvoiceMessageHandler(handler *InvoiceMessageHandler) {
+	q.invoiceMessageHandler = handler
+}
+
 // GetJobHandler returns the job message handler
 func (q *QUICPeer) GetJobHandler() *JobMessageHandler {
 	return q.jobHandler
@@ -561,7 +574,7 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 	// Read message - loop until we have complete data or error
 	// QUIC streams may not deliver all data in a single Read() call for large messages
 	maxMessageSize := q.config.GetConfigInt("max_message_size", 10*1024*1024, 65536, 100*1024*1024) // Default 10MB max
-	buffer := make([]byte, 0, 65536) // Start with 64KB capacity
+	buffer := make([]byte, 0, 65536)                                                                // Start with 64KB capacity
 	readBuf := make([]byte, 65536)
 
 	for {
@@ -701,6 +714,41 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		}
 		shouldCloseStream = false // JobMessageHandler manages stream lifecycle
 		return
+	case MessageTypeInvoiceRequest:
+		// Invoice request from another peer
+		if q.invoiceHandler != nil {
+			// Get peer ID from connection
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			response = q.invoiceHandler.HandleInvoiceRequest(msg, remoteAddr, peerID)
+		} else {
+			q.logger.Warn("Received invoice_request but invoice handler is not initialized", "quic")
+			response = CreateInvoiceResponse("", false, "invoice system not available")
+		}
+	case MessageTypeInvoiceResponse:
+		// Invoice acceptance/rejection response
+		if q.invoiceHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.invoiceHandler.HandleInvoiceResponse(msg, remoteAddr, peerID)
+		} else {
+			q.logger.Warn("Received invoice_response but invoice handler is not initialized", "quic")
+		}
+	case MessageTypeInvoiceNotify:
+		// Invoice status notification (settled, expired, etc.)
+		if q.invoiceHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.invoiceHandler.HandleInvoiceNotify(msg, remoteAddr, peerID)
+		} else {
+			q.logger.Warn("Received invoice_notify but invoice handler is not initialized", "quic")
+		}
 	default:
 		q.logger.Warn(fmt.Sprintf("Unknown message type %s from %s", msg.Type, remoteAddr), "quic")
 		return
@@ -1108,6 +1156,105 @@ func (q *QUICPeer) SendMessageWithResponse(peerID string, message []byte) ([]byt
 	return buffer[:n], nil
 }
 
+// SendInvoiceRequest sends an invoice request to a peer with retry and relay fallback
+func (q *QUICPeer) SendInvoiceRequest(toPeerID string, invoiceData *payment.InvoiceRequestData) error {
+	// Convert payment.InvoiceRequestData to p2p.InvoiceRequestData
+	p2pData := &InvoiceRequestData{
+		InvoiceID:         invoiceData.InvoiceID,
+		FromPeerID:        invoiceData.FromPeerID,
+		ToPeerID:          invoiceData.ToPeerID,
+		FromWalletAddress: invoiceData.FromWalletAddress,
+		Amount:            invoiceData.Amount,
+		Currency:          invoiceData.Currency,
+		Network:           invoiceData.Network,
+		Description:       invoiceData.Description,
+		ExpiresAt:         invoiceData.ExpiresAt,
+		Metadata:          invoiceData.Metadata,
+	}
+
+	// Use message handler for retry and relay support if available
+	if q.invoiceMessageHandler != nil {
+		return q.invoiceMessageHandler.SendInvoiceRequestWithRetry(toPeerID, p2pData, p2pData.InvoiceID)
+	}
+
+	// Fallback to direct send without retry (backward compatibility)
+	return q.SendInvoiceRequestDirect(toPeerID, p2pData)
+}
+
+// SendInvoiceResponse sends an invoice acceptance/rejection response with retry and relay fallback
+func (q *QUICPeer) SendInvoiceResponse(toPeerID string, invoiceID string, accepted bool, message string) error {
+	// Use message handler for retry and relay support if available
+	if q.invoiceMessageHandler != nil {
+		return q.invoiceMessageHandler.SendInvoiceResponseWithRetry(toPeerID, invoiceID, accepted, message)
+	}
+
+	// Fallback to direct send without retry (backward compatibility)
+	return q.SendInvoiceResponseDirect(toPeerID, invoiceID, accepted, message)
+}
+
+// SendInvoiceNotification sends an invoice status notification with retry and relay fallback
+func (q *QUICPeer) SendInvoiceNotification(toPeerID string, invoiceID string, status string, message string) error {
+	// Use message handler for retry and relay support if available
+	if q.invoiceMessageHandler != nil {
+		return q.invoiceMessageHandler.SendInvoiceNotificationWithRetry(toPeerID, invoiceID, status, message)
+	}
+
+	// Fallback to direct send without retry (backward compatibility)
+	return q.SendInvoiceNotificationDirect(toPeerID, invoiceID, status, message)
+}
+
+// SendInvoiceRequestDirect sends an invoice request directly without retry or relay fallback
+func (q *QUICPeer) SendInvoiceRequestDirect(toPeerID string, invoiceData *InvoiceRequestData) error {
+	msg := CreateInvoiceRequest(invoiceData)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal invoice request: %v", err)
+	}
+
+	if err := q.SendMessageToPeer(toPeerID, msgBytes); err != nil {
+		return fmt.Errorf("failed to send invoice request to peer %s: %v", toPeerID[:8], err)
+	}
+
+	q.logger.Info(fmt.Sprintf("Sent invoice request %s to peer %s", invoiceData.InvoiceID, toPeerID[:8]), "quic")
+	return nil
+}
+
+// SendInvoiceResponseDirect sends an invoice response directly without retry or relay fallback
+func (q *QUICPeer) SendInvoiceResponseDirect(toPeerID string, invoiceID string, accepted bool, message string) error {
+	msg := CreateInvoiceResponse(invoiceID, accepted, message)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal invoice response: %v", err)
+	}
+
+	if err := q.SendMessageToPeer(toPeerID, msgBytes); err != nil {
+		return fmt.Errorf("failed to send invoice response to peer %s: %v", toPeerID[:8], err)
+	}
+
+	status := "rejected"
+	if accepted {
+		status = "accepted"
+	}
+	q.logger.Info(fmt.Sprintf("Sent invoice %s response to peer %s: %s", invoiceID, toPeerID[:8], status), "quic")
+	return nil
+}
+
+// SendInvoiceNotificationDirect sends an invoice notification directly without retry or relay fallback
+func (q *QUICPeer) SendInvoiceNotificationDirect(toPeerID string, invoiceID string, status string, message string) error {
+	msg := CreateInvoiceNotify(invoiceID, status, message)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal invoice notification: %v", err)
+	}
+
+	if err := q.SendMessageToPeer(toPeerID, msgBytes); err != nil {
+		return fmt.Errorf("failed to send invoice notification to peer %s: %v", toPeerID[:8], err)
+	}
+
+	q.logger.Info(fmt.Sprintf("Sent invoice %s notification to peer %s: %s", invoiceID, toPeerID[:8], status), "quic")
+	return nil
+}
+
 // DisconnectFromPeer explicitly closes a connection to a peer by address
 // Used for cleanup after relay candidate measurement to free resources
 func (q *QUICPeer) DisconnectFromPeer(addr string) error {
@@ -1346,6 +1493,32 @@ func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage, sourcePeerID string) *
 		q.logger.Warn("Received job message via relay but job handler not initialized", "quic")
 		return nil
 
+	case MessageTypeInvoiceRequest:
+		// Invoice request forwarded via relay
+		if q.invoiceHandler != nil {
+			return q.invoiceHandler.HandleInvoiceRequest(msg, sourcePeerID, sourcePeerID)
+		}
+		q.logger.Warn("Received invoice_request via relay but invoice handler not initialized", "quic")
+		return CreateInvoiceResponse("", false, "invoice system not available")
+
+	case MessageTypeInvoiceResponse:
+		// Invoice response forwarded via relay
+		if q.invoiceHandler != nil {
+			q.invoiceHandler.HandleInvoiceResponse(msg, sourcePeerID, sourcePeerID)
+		} else {
+			q.logger.Warn("Received invoice_response via relay but invoice handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeInvoiceNotify:
+		// Invoice notification forwarded via relay
+		if q.invoiceHandler != nil {
+			q.invoiceHandler.HandleInvoiceNotify(msg, sourcePeerID, sourcePeerID)
+		} else {
+			q.logger.Warn("Received invoice_notify via relay but invoice handler not initialized", "quic")
+		}
+		return nil
+
 	case MessageTypeRelayHolePunch:
 		// Hole punch coordination via relay
 		// TODO: Route to hole puncher
@@ -1412,7 +1585,7 @@ func (q *QUICPeer) cleanupIdleConnections() {
 	// (Half of QUIC's 30-minute idle timeout to catch stale connections early)
 	idleTimeout := 15 * time.Minute
 
-	q.logger.Debug(fmt.Sprintf("Starting idle connection cleanup (interval=5m, timeout=15m)"), "quic")
+	q.logger.Debug("Starting idle connection cleanup (interval=5m, timeout=15m)", "quic")
 
 	for {
 		select {

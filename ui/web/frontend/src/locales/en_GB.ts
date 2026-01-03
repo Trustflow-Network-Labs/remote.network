@@ -270,6 +270,18 @@ export default {
       repoRequired: 'Repository URL is required',
       pathRequired: 'Local path is required',
       executablePathRequired: 'Executable path is required',
+      networkRequired: 'Payment network is required',
+      networksRequired: 'At least one payment network is required',
+      servicePrice: 'Service Price',
+      acceptedPaymentNetworks: 'Accepted Payment Networks',
+      pricingType: 'Pricing Type',
+      paymentNetwork: 'Payment Network',
+      editPricing: 'Edit Pricing',
+      pricingUpdated: 'Pricing updated successfully',
+      invalidPricing: 'Invalid pricing amount',
+      noNetworks: 'No payment networks configured',
+      interval: 'Interval',
+      unit: 'Unit',
       serviceCreated: 'Service created successfully',
       dockerCreated: 'Docker service created successfully',
       standaloneCreated: 'Standalone service created successfully',
@@ -371,7 +383,8 @@ export default {
         fetchFailed: 'Failed to fetch service details',
         statusChangeFailed: 'Failed to change service status',
         deleteFailed: 'Failed to delete service',
-        interfacesUpdateFailed: 'Failed to update service interfaces'
+        interfacesUpdateFailed: 'Failed to update service interfaces',
+        pricingUpdateFailed: 'Failed to update pricing'
       },
 
       // Sections
@@ -514,6 +527,24 @@ export default {
       unblacklistSuccess: 'Peer removed from blacklist',
       unblacklistError: 'Failed to remove peer from blacklist'
     },
+    wallets: {
+      title: 'Wallets',
+      list: 'Wallet List',
+      balance: 'Balance',
+      address: 'Address',
+      network: 'Network',
+      addWallet: 'Add Wallet',
+      noWallets: 'No wallets configured'
+    },
+    invoices: {
+      title: 'Invoices',
+      list: 'Invoice List',
+      amount: 'Amount',
+      status: 'Status',
+      createdAt: 'Created At',
+      paidAt: 'Paid At',
+      noInvoices: 'No invoices found'
+    },
     navigation: {
       dashboard: 'Dashboard',
       peers: 'Peers',
@@ -523,6 +554,8 @@ export default {
       configureNode: 'Configure Node',
       blacklist: 'Blacklist',
       services: 'Services',
+      wallets: 'Wallets',
+      invoices: 'Invoices',
       restartPeer: 'Restart Peer',
       logout: 'Logout',
       restartSuccess: 'Node restart initiated. Logging out...',

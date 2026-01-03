@@ -40,22 +40,23 @@ type ServiceSearchRequest struct {
 
 // ServiceSearchResult represents a single service in search results
 type ServiceSearchResult struct {
-	ID             int64                  `json:"id"`
-	Name           string                 `json:"name"`
-	Description    string                 `json:"description"`
-	ServiceType    string                 `json:"service_type"`
-	Type           string                 `json:"type"`
-	Status         string                 `json:"status"`
-	PricingAmount  float64                `json:"pricing_amount"`
-	PricingType    string                 `json:"pricing_type"`
-	PricingInterval int                   `json:"pricing_interval"`
-	PricingUnit    string                 `json:"pricing_unit"`
-	Capabilities   map[string]interface{} `json:"capabilities,omitempty"`
-	Hash           string                 `json:"hash,omitempty"`       // For DATA services
-	SizeBytes      int64                  `json:"size_bytes,omitempty"` // For DATA services
-	Interfaces     []ServiceInterface     `json:"interfaces,omitempty"` // Service interfaces (STDIN, STDOUT, MOUNT)
-	Entrypoint     []string               `json:"entrypoint,omitempty"` // For DOCKER services
-	Cmd            []string               `json:"cmd,omitempty"`        // For DOCKER services
+	ID                      int64                  `json:"id"`
+	Name                    string                 `json:"name"`
+	Description             string                 `json:"description"`
+	ServiceType             string                 `json:"service_type"`
+	Type                    string                 `json:"type"`
+	Status                  string                 `json:"status"`
+	PricingAmount           float64                `json:"pricing_amount"`
+	PricingType             string                 `json:"pricing_type"`
+	PricingInterval         int                    `json:"pricing_interval"`
+	PricingUnit             string                 `json:"pricing_unit"`
+	Capabilities            map[string]interface{} `json:"capabilities,omitempty"`
+	Hash                    string                 `json:"hash,omitempty"`                       // For DATA services
+	SizeBytes               int64                  `json:"size_bytes,omitempty"`                 // For DATA services
+	Interfaces              []ServiceInterface     `json:"interfaces,omitempty"`                 // Service interfaces (STDIN, STDOUT, MOUNT)
+	Entrypoint              []string               `json:"entrypoint,omitempty"`                 // For DOCKER services
+	Cmd                     []string               `json:"cmd,omitempty"`                        // For DOCKER services
+	AcceptedPaymentNetworks []string               `json:"accepted_payment_networks,omitempty"`  // Payment networks accepted for this service
 }
 
 // ServiceInterface represents a service interface for remote service info
@@ -101,17 +102,18 @@ func (sqh *ServiceQueryHandler) HandleServiceSearchRequest(msg *QUICMessage, rem
 	results := make([]*ServiceSearchResult, 0, len(matchingServices))
 	for _, service := range matchingServices {
 		result := &ServiceSearchResult{
-			ID:              service.ID,
-			Name:            service.Name,
-			Description:     service.Description,
-			ServiceType:     service.ServiceType,
-			Type:            service.Type,
-			Status:          service.Status,
-			PricingAmount:   service.PricingAmount,
-			PricingType:     service.PricingType,
-			PricingInterval: service.PricingInterval,
-			PricingUnit:     service.PricingUnit,
-			Capabilities:    service.Capabilities,
+			ID:                      service.ID,
+			Name:                    service.Name,
+			Description:             service.Description,
+			ServiceType:             service.ServiceType,
+			Type:                    service.Type,
+			Status:                  service.Status,
+			PricingAmount:           service.PricingAmount,
+			PricingType:             service.PricingType,
+			PricingInterval:         service.PricingInterval,
+			PricingUnit:             service.PricingUnit,
+			Capabilities:            service.Capabilities,
+			AcceptedPaymentNetworks: service.AcceptedPaymentNetworks,
 		}
 
 		// For DATA services, include hash and size

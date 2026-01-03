@@ -300,7 +300,8 @@ func (rs *RelaySelector) SelectBestRelay() *RelayCandidate {
 	}
 
 	// Get selection criteria from config
-	maxLatency := rs.config.GetConfigDuration("relay_max_latency", 500*time.Millisecond)
+	// Max latency set to 5s to match ping timeout (allowing relays that respond within timeout window)
+	maxLatency := rs.config.GetConfigDuration("relay_max_latency", 5*time.Second)
 	minReputation := rs.config.GetConfigFloat64("relay_min_reputation", 0.3, 0.0, 1.0)
 	maxPricing := rs.config.GetConfigFloat64("relay_max_pricing", 0.01, 0.0, 1.0)
 

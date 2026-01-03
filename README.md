@@ -19,6 +19,13 @@
 - **NAT-Friendly Architecture** - Relay-based connections, hole punching, and QUIC transport
 - **Custom Gossip Protocol** - Efficient peer-to-peer message propagation
 
+### Payment System
+- **x402 Payment Protocol** - Decentralized payment system for service compensation
+- **Multi-Chain Support** - Ethereum (Base), Solana, and other EVM chains
+- **Cryptocurrency Wallets** - Encrypted wallet management via CLI and Web UI
+- **P2P Invoice Payments** - Direct payment requests between peers
+- **Escrow Management** - Secure payment holding with automatic settlement
+
 ### Workflow Orchestration
 - **Visual Workflow Designer** - Web UI for creating and managing distributed workflows
 - **Service Registry** - Publish and discover services across the network
@@ -35,6 +42,7 @@
 - **End-to-End Encryption** - QUIC-based encrypted connections
 - **Signed Metadata** - BEP_44 ensures tamper-proof peer metadata
 - **Job Verification** - Cryptographic verification of job execution results
+- **Payment Signatures** - Cryptographic proof of payment authorization
 
 ---
 
@@ -173,6 +181,13 @@ open http://localhost:36900
 - [Docker Service Quickstart](docs/DOCKER_SERVICE_QUICKSTART.md) - Quick guide to deploying Docker services
 - [Keystore Setup](docs/KEYSTORE_SETUP.md) - Ed25519 keystore configuration and management
 
+### Payment System
+
+- [Payment System Overview](docs/PAYMENT_SYSTEM_OVERVIEW.md) - Complete payment system guide and quick start
+- [Wallet Management](docs/WALLET_MANAGEMENT.md) - Cryptocurrency wallet management (CLI + Web UI)
+- [P2P Payments](docs/P2P_PAYMENTS.md) - Peer-to-peer invoice payment system
+- [x402 Payment Protocol](docs/X402_PAYMENT_PROTOCOL.md) - Decentralized payment protocol specification
+
 ### Architecture & Design
 
 - [Architecture Overview](docs/ARCHITECTURE.md) - Complete system architecture, components, and data flow
@@ -238,11 +253,11 @@ Encrypted Input → Secure Compute → Encrypted Output
 - **Monitoring & Metrics**: Health endpoints, Prometheus metrics, resource tracking, pprof
 - **Git Integration**: Deploy services directly from Git repositories
 - **System Capabilities**: Auto-detection and matching of CPU, memory, GPU, Docker, platform
+- **Payment Integration**: x402 payment protocol, multi-chain wallets (Base, Solana), P2P invoices, escrow management
 
 ### Planned
 - Trustless job execution verification
 - Reputation and trust scoring
-- Payment integration for all services (using x402)
 - Conditional service replication
 
 ---

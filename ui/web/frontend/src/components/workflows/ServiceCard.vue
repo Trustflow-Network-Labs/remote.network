@@ -85,8 +85,7 @@ const formattedPrice = computed(() => {
   const interval = props.job.pricing_interval || 1
   const unit = props.job.pricing_unit || 'MONTHS'
 
-  const tokenLabel = amount === 1 ? 'token' : 'tokens'
-  let priceStr = `${amount} ${tokenLabel}`
+  let priceStr = `${amount} USDC`
 
   if (type === 'RECURRING') {
     const unitStr = interval > 1 ? `${interval} ${unit.toLowerCase()}` : unit.toLowerCase().slice(0, -1)

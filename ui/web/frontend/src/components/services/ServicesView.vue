@@ -472,14 +472,14 @@ function formatPricing(service: any): string {
   const type = service.pricing_type || 'ONE_TIME'
 
   if (type === 'ONE_TIME') {
-    return `${amount} tokens`
+    return `${amount} USDC`
   }
 
   const interval = service.pricing_interval || 1
   const unit = service.pricing_unit || 'MONTHS'
   const unitLabel = t(`message.services.${unit.toLowerCase()}`)
 
-  return `${amount} tokens / ${interval} ${unitLabel}`
+  return `${amount} USDC / ${interval} ${unitLabel}`
 }
 
 // Service actions

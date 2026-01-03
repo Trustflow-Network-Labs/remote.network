@@ -74,6 +74,11 @@ const (
 	MessageTypeJobDataTransferStall    MessageType = "job_data_transfer_stall"
 	MessageTypeJobCancel               MessageType = "job_cancel"
 
+	// P2P Invoice payments
+	MessageTypeInvoiceRequest  MessageType = "invoice_request"
+	MessageTypeInvoiceResponse MessageType = "invoice_response"
+	MessageTypeInvoiceNotify   MessageType = "invoice_notify"
+
 	// Legacy support
 	MessageTypeEcho MessageType = "echo"
 )
@@ -390,13 +395,16 @@ func (msg *QUICMessage) Validate() error {
 
 // RelayRegisterData contains relay registration request
 type RelayRegisterData struct {
-	PeerID          string  `json:"peer_id"`           // Persistent Ed25519-based peer ID
-	NodeID          string  `json:"node_id"`           // DHT node ID (may change on restart)
-	Topic           string  `json:"topic"`
-	NATType         string  `json:"nat_type"`
-	PublicEndpoint  string  `json:"public_endpoint,omitempty"`
-	PrivateEndpoint string  `json:"private_endpoint,omitempty"`
-	RequiresRelay   bool    `json:"requires_relay"`
+	PeerID          string      `json:"peer_id"`           // Persistent Ed25519-based peer ID
+	NodeID          string      `json:"node_id"`           // DHT node ID (may change on restart)
+	Topic           string      `json:"topic"`
+	NATType         string      `json:"nat_type"`
+	PublicEndpoint  string      `json:"public_endpoint,omitempty"`
+	PrivateEndpoint string      `json:"private_endpoint,omitempty"`
+	RequiresRelay   bool        `json:"requires_relay"`
+	// x402 payment fields
+	EstimatedBytes   int64       `json:"estimated_bytes,omitempty"`   // Estimated data transfer size for prepayment
+	PaymentSignature interface{} `json:"payment_signature,omitempty"` // x402 payment signature
 }
 
 // RelayAcceptData contains relay registration acceptance
@@ -506,15 +514,17 @@ type HolePunchSyncData struct {
 }
 
 // CreateRelayRegister creates a relay registration request
-func CreateRelayRegister(peerID, nodeID, topic, natType, publicEndpoint, privateEndpoint string, requiresRelay bool) *QUICMessage {
+func CreateRelayRegister(peerID, nodeID, topic, natType, publicEndpoint, privateEndpoint string, requiresRelay bool, estimatedBytes int64, paymentSig interface{}) *QUICMessage {
 	return NewQUICMessage(MessageTypeRelayRegister, &RelayRegisterData{
-		PeerID:          peerID,
-		NodeID:          nodeID,
-		Topic:           topic,
-		NATType:         natType,
-		PublicEndpoint:  publicEndpoint,
-		PrivateEndpoint: privateEndpoint,
-		RequiresRelay:   requiresRelay,
+		PeerID:           peerID,
+		NodeID:           nodeID,
+		Topic:            topic,
+		NATType:          natType,
+		PublicEndpoint:   publicEndpoint,
+		PrivateEndpoint:  privateEndpoint,
+		RequiresRelay:    requiresRelay,
+		EstimatedBytes:   estimatedBytes,
+		PaymentSignature: paymentSig,
 	})
 }
 
@@ -875,4 +885,55 @@ func CreateJobDataTransferStall(data interface{}) *QUICMessage {
 // CreateJobCancel creates a job cancellation message
 func CreateJobCancel(data interface{}) *QUICMessage {
 	return NewQUICMessage(MessageTypeJobCancel, data)
+}
+
+// InvoiceRequestData represents a P2P payment invoice request
+type InvoiceRequestData struct {
+	InvoiceID         string                 `json:"invoice_id"`
+	FromPeerID        string                 `json:"from_peer_id"`
+	ToPeerID          string                 `json:"to_peer_id"`
+	FromWalletAddress string                 `json:"from_wallet_address"`
+	Amount            float64                `json:"amount"`
+	Currency          string                 `json:"currency"`
+	Network           string                 `json:"network"`
+	Description       string                 `json:"description"`
+	ExpiresAt         int64                  `json:"expires_at,omitempty"`
+	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// InvoiceResponseData represents acceptance/rejection
+type InvoiceResponseData struct {
+	InvoiceID string `json:"invoice_id"`
+	Accepted  bool   `json:"accepted"`
+	Message   string `json:"message,omitempty"`
+}
+
+// InvoiceNotifyData represents status updates
+type InvoiceNotifyData struct {
+	InvoiceID string `json:"invoice_id"`
+	Status    string `json:"status"` // "settled", "expired", "cancelled"
+	Message   string `json:"message,omitempty"`
+}
+
+// CreateInvoiceRequest creates an invoice request message
+func CreateInvoiceRequest(data *InvoiceRequestData) *QUICMessage {
+	return NewQUICMessage(MessageTypeInvoiceRequest, data)
+}
+
+// CreateInvoiceResponse creates an invoice response message
+func CreateInvoiceResponse(invoiceID string, accepted bool, message string) *QUICMessage {
+	return NewQUICMessage(MessageTypeInvoiceResponse, &InvoiceResponseData{
+		InvoiceID: invoiceID,
+		Accepted:  accepted,
+		Message:   message,
+	})
+}
+
+// CreateInvoiceNotify creates a status notification message
+func CreateInvoiceNotify(invoiceID, status, message string) *QUICMessage {
+	return NewQUICMessage(MessageTypeInvoiceNotify, &InvoiceNotifyData{
+		InvoiceID: invoiceID,
+		Status:    status,
+		Message:   message,
+	})
 }

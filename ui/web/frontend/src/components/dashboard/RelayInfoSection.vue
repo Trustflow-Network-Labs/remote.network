@@ -19,7 +19,7 @@
           </div>
           <div class="stat-item">
             <span class="stat-label">{{ $t('message.dashboard.pricingPerGb') }}:</span>
-            <span class="stat-value">{{ relayStats.pricing_per_gb || 0 }} tokens</span>
+            <span class="stat-value">{{ relayStats.pricing_per_gb || 0 }} USDC</span>
           </div>
           <div class="stat-item">
             <span class="stat-label">{{ $t('message.dashboard.totalTraffic') }}:</span>
@@ -80,7 +80,7 @@
           </Column>
           <Column field="earnings" :header="$t('message.dashboard.earnings')" sortable>
             <template #body="slotProps">
-              {{ (slotProps.data.earnings || 0).toFixed(4) }} tokens
+              {{ (slotProps.data.earnings || 0).toFixed(4) }} USDC
             </template>
           </Column>
           <Column :header="$t('message.common.actions')">
@@ -126,7 +126,7 @@
           </div>
           <div class="info-item">
             <span class="info-label">{{ $t('message.dashboard.relayPricing') }}:</span>
-            <span class="info-value">{{ currentRelay.pricing_per_gb }} tokens/GB</span>
+            <span class="info-value">{{ currentRelay.pricing_per_gb }} USDC/GB</span>
           </div>
           <div class="info-item">
             <span class="info-label">{{ $t('message.dashboard.relayEndpoint') }}:</span>
@@ -150,7 +150,7 @@
           </div>
           <div class="info-item">
             <span class="info-label">{{ $t('message.dashboard.currentCost') }}:</span>
-            <span class="info-value">{{ currentRelay.current_cost?.toFixed(4) || '0.0000' }} tokens</span>
+            <span class="info-value">{{ currentRelay.current_cost?.toFixed(4) || '0.0000' }} USDC</span>
           </div>
           <div class="info-item info-item-action">
             <Button
@@ -206,7 +206,7 @@
           </Column>
           <Column field="pricing_per_gb" :header="$t('message.dashboard.pricingPerGb')" sortable>
             <template #body="slotProps">
-              {{ slotProps.data.pricing_per_gb }} tokens/GB
+              {{ slotProps.data.pricing_per_gb }} USDC/GB
             </template>
           </Column>
           <Column field="reputation_score" :header="$t('message.dashboard.reputationScore')" sortable>

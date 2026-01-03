@@ -75,6 +75,11 @@ func NewSQLiteManager(cm *utils.ConfigManager) (*SQLiteManager, error) {
 		return nil, fmt.Errorf("failed to initialize data transfers table: %v", err)
 	}
 
+	// Initialize payment invoices table
+	if err := sqlm.InitPaymentInvoicesTable(); err != nil {
+		return nil, fmt.Errorf("failed to init payment_invoices table: %w", err)
+	}
+
 	return sqlm, nil
 }
 

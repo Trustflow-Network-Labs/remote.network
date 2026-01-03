@@ -47,7 +47,7 @@
               :placeholder="$t('message.services.amount')"
               class="pricing-amount"
             />
-            <span class="tokens-label">tokens</span>
+            <span class="tokens-label">USDC</span>
           </div>
 
           <div class="pricing-row">

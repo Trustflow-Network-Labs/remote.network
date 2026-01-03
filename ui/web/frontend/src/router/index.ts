@@ -71,6 +71,18 @@ const routes: RouteRecordRaw[] = [
     name: 'ExecutionDetails',
     component: () => import('../components/workflows/ExecutionDetailsView.vue'),
     meta: { requiresAuth: true }
+  },
+  {
+    path: '/wallets',
+    name: 'Wallets',
+    component: () => import('../components/wallets/WalletsView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/invoices',
+    name: 'Invoices',
+    component: () => import('../components/invoices/InvoicesView.vue'),
+    meta: { requiresAuth: true }
   }
 ]
 

@@ -62,6 +62,20 @@ const menuItems = computed(() => {
       key: 'workflows',
       command: () => router.push('/workflows'),
       class: currentPath.startsWith('/workflows') ? 'active-menu-item' : ''
+    },
+    {
+      icon: 'pi pi-wallet',
+      label: t('message.navigation.wallets', 'Wallets'),
+      key: 'wallets',
+      command: () => router.push('/wallets'),
+      class: currentPath === '/wallets' ? 'active-menu-item' : ''
+    },
+    {
+      icon: 'pi pi-file-edit',
+      label: t('message.navigation.invoices', 'Invoices'),
+      key: 'invoices',
+      command: () => router.push('/invoices'),
+      class: currentPath === '/invoices' ? 'active-menu-item' : ''
     }
   ]
 })

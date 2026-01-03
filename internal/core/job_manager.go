@@ -19,6 +19,7 @@ import (
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/dependencies"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
@@ -45,6 +46,7 @@ type JobManager struct {
 	wg                 sync.WaitGroup
 	mu                 sync.RWMutex
 	runningJobs        map[int64]bool // Track running job IDs
+	escrowManager      *payment.EscrowManager // x402 payment escrow manager
 }
 
 // EventEmitter interface for broadcasting events (avoids circular dependency)
@@ -91,6 +93,10 @@ func NewJobManager(ctx context.Context, db *database.SQLiteManager, cm *utils.Co
 	// Initialize Standalone service for job execution
 	standaloneService := services.NewStandaloneService(db, logger, cm, appPaths, gitService)
 
+	// Initialize x402 payment infrastructure
+	x402Client := payment.NewX402Client(cm, logger)
+	escrowManager := payment.NewEscrowManager(db, x402Client, cm, logger)
+
 	jm := &JobManager{
 		ctx:               jobCtx,
 		cancel:            cancel,
@@ -106,6 +112,7 @@ func NewJobManager(ctx context.Context, db *database.SQLiteManager, cm *utils.Co
 		tickerInterval:   tickerInterval,
 		tickerStopChan:   make(chan bool),
 		runningJobs:      make(map[int64]bool),
+		escrowManager:    escrowManager,
 	}
 
 	return jm
@@ -291,6 +298,38 @@ func (jm *JobManager) executeJob(job *database.JobExecution) {
 		delete(jm.runningJobs, job.ID)
 		jm.mu.Unlock()
 
+		// SETTLE OR REFUND PAYMENT (x402 protocol)
+		// Check if this job has an associated payment escrow
+		payment, err := jm.db.GetJobPaymentByJobID(job.ID)
+		if err != nil {
+			jm.logger.Error(fmt.Sprintf("Failed to get payment for job %d: %v", job.ID, err), "job_manager")
+		} else if payment != nil {
+			// Get the final job status
+			finalJob, err := jm.db.GetJobExecution(job.ID)
+			if err != nil {
+				jm.logger.Error(fmt.Sprintf("Failed to get job %d for payment settlement: %v", job.ID, err), "job_manager")
+			} else if finalJob != nil {
+				if finalJob.Status == types.JobStatusCompleted {
+					// Settle payment on successful completion
+					if err := jm.escrowManager.SettleEscrow(payment.ID, 0); err != nil {
+						jm.logger.Error(fmt.Sprintf("Failed to settle payment %d for job %d: %v", payment.ID, job.ID, err), "job_manager")
+					} else {
+						jm.logger.Info(fmt.Sprintf("Payment %d settled for completed job %d (amount: %.6f %s)",
+							payment.ID, job.ID, payment.PaymentAmount, payment.PaymentCurrency), "job_manager")
+					}
+				} else if finalJob.Status == types.JobStatusErrored || finalJob.Status == types.JobStatusCancelled {
+					// Refund payment on failure or cancellation
+					reason := fmt.Sprintf("Job %s: %s", finalJob.Status, finalJob.ErrorMessage)
+					if err := jm.escrowManager.RefundEscrow(payment.ID, reason); err != nil {
+						jm.logger.Error(fmt.Sprintf("Failed to refund payment %d for job %d: %v", payment.ID, job.ID, err), "job_manager")
+					} else {
+						jm.logger.Info(fmt.Sprintf("Payment %d refunded for failed job %d (reason: %s)",
+							payment.ID, job.ID, reason), "job_manager")
+					}
+				}
+			}
+		}
+
 		if r := recover(); r != nil {
 			jm.logger.Error(fmt.Sprintf("Job %d execution panic recovered: %v", job.ID, r), "job_manager")
 
@@ -302,6 +341,15 @@ func (jm *JobManager) executeJob(job *database.JobExecution) {
 
 			// Send status update
 			jm.sendStatusUpdate(job.ID, job.WorkflowJobID, types.JobStatusErrored, fmt.Sprintf("Panic during execution: %v", r))
+
+			// Refund payment on panic
+			payment, err := jm.db.GetJobPaymentByJobID(job.ID)
+			if err == nil && payment != nil {
+				reason := fmt.Sprintf("Job panicked: %v", r)
+				if refundErr := jm.escrowManager.RefundEscrow(payment.ID, reason); refundErr != nil {
+					jm.logger.Error(fmt.Sprintf("Failed to refund payment %d after panic: %v", payment.ID, refundErr), "job_manager")
+				}
+			}
 		}
 	}()
 
@@ -2333,11 +2381,126 @@ func (jm *JobManager) HandleJobRequest(request *types.JobExecutionRequest, peerI
 	// Set ordering peer ID to the requesting peer
 	request.OrderingPeerID = peerID
 
+	// PAYMENT VERIFICATION (x402 protocol)
+	// Check if service requires payment and verify payment signature
+	var paymentID int64
+	if request.ServiceID > 0 {
+		service, err := jm.db.GetService(request.ServiceID)
+		if err != nil {
+			jm.logger.Error(fmt.Sprintf("Failed to get service %d: %v", request.ServiceID, err), "job_manager")
+			return &types.JobExecutionResponse{
+				WorkflowJobID: request.WorkflowJobID,
+				Accepted:      false,
+				Message:       "Service not found",
+			}, err
+		}
+
+		// Check if payment is required (service has pricing > 0)
+		// Note: Services with price = 0 are free and don't require payment
+		if service != nil && service.PricingAmount > 0 {
+			// Payment signature is mandatory for paid services
+			if request.PaymentSignature == nil {
+				jm.logger.Warn(fmt.Sprintf("Job request from %s rejected: payment required for service %d (%.6f %s)",
+					peerID[:8], service.ID, service.PricingAmount, "USDC"), "job_manager")
+				return &types.JobExecutionResponse{
+					WorkflowJobID: request.WorkflowJobID,
+					Accepted:      false,
+					Message:       fmt.Sprintf("Payment signature required (service price: %.6f USDC)", service.PricingAmount),
+				}, nil
+			}
+
+			// Convert payment signature from interface{} to *payment.PaymentSignature
+			paymentSig, ok := request.PaymentSignature.(*payment.PaymentSignature)
+			if !ok {
+				// Try to unmarshal if it's a map
+				if sigMap, isMap := request.PaymentSignature.(map[string]interface{}); isMap {
+					// Convert map to PaymentSignature
+					paymentSig = &payment.PaymentSignature{}
+					if network, ok := sigMap["network"].(string); ok {
+						paymentSig.Network = network
+					}
+					if sender, ok := sigMap["sender"].(string); ok {
+						paymentSig.Sender = sender
+					}
+					if recipient, ok := sigMap["recipient"].(string); ok {
+						paymentSig.Recipient = recipient
+					}
+					if amount, ok := sigMap["amount"].(float64); ok {
+						paymentSig.Amount = amount
+					}
+					if currency, ok := sigMap["currency"].(string); ok {
+						paymentSig.Currency = currency
+					}
+					if nonce, ok := sigMap["nonce"].(string); ok {
+						paymentSig.Nonce = nonce
+					}
+					if signature, ok := sigMap["signature"].(string); ok {
+						paymentSig.Signature = signature
+					}
+					if timestamp, ok := sigMap["timestamp"].(float64); ok {
+						paymentSig.Timestamp = int64(timestamp)
+					}
+					if metadata, ok := sigMap["metadata"].(map[string]interface{}); ok {
+						paymentSig.Metadata = metadata
+					}
+				} else {
+					jm.logger.Error(fmt.Sprintf("Invalid payment signature type from peer %s", peerID[:8]), "job_manager")
+					return &types.JobExecutionResponse{
+						WorkflowJobID: request.WorkflowJobID,
+						Accepted:      false,
+						Message:       "Invalid payment signature format",
+					}, nil
+				}
+			}
+
+			// Validate payment network matches service's accepted networks
+			acceptedNetworks := service.AcceptedPaymentNetworks
+			if len(acceptedNetworks) > 0 && paymentSig != nil {
+				// Service has specific network requirements - validate payment network
+				if !jm.isNetworkAccepted(paymentSig.Network, acceptedNetworks) {
+					jm.logger.Warn(fmt.Sprintf("Job request from %s rejected: payment network %s not accepted (accepted: %v)",
+						peerID[:8], paymentSig.Network, acceptedNetworks), "job_manager")
+					return &types.JobExecutionResponse{
+						WorkflowJobID: request.WorkflowJobID,
+						Accepted:      false,
+						Message:       fmt.Sprintf("Payment network %s not accepted (accepted: %v)", paymentSig.Network, acceptedNetworks),
+					}, nil
+				}
+				jm.logger.Debug(fmt.Sprintf("Payment network %s accepted for service %d", paymentSig.Network, service.ID), "job_manager")
+			}
+
+			// Create escrow (verifies payment with facilitator)
+			// Use temporary job ID of 0 - we'll update after job creation
+			tempJobID := int64(0)
+			paymentID, err = jm.escrowManager.CreateEscrow(tempJobID, paymentSig, service.PricingAmount)
+			if err != nil {
+				jm.logger.Error(fmt.Sprintf("Payment verification failed for peer %s: %v", peerID[:8], err), "job_manager")
+				return &types.JobExecutionResponse{
+					WorkflowJobID: request.WorkflowJobID,
+					Accepted:      false,
+					Message:       fmt.Sprintf("Payment verification failed: %v", err),
+				}, nil
+			}
+
+			jm.logger.Info(fmt.Sprintf("Payment verified (ID: %d) for job from peer %s (amount: %.6f %s)",
+				paymentID, peerID[:8], paymentSig.Amount, paymentSig.Currency), "job_manager")
+		}
+	}
+
 	// Submit the job for execution with skipInterfaces=true
 	// Phase 1 only creates the job_execution - interfaces are created in Phase 2 (HandleJobStart)
 	// The job stays in IDLE status until HandleJobStart is received
 	job, err := jm.SubmitJobWithOptions(request, nil, true)
 	if err != nil {
+		// Refund payment if job submission fails
+		if paymentID > 0 {
+			if refundErr := jm.escrowManager.RefundEscrow(paymentID, fmt.Sprintf("Job submission failed: %v", err)); refundErr != nil {
+				jm.logger.Error(fmt.Sprintf("Failed to refund payment %d: %v", paymentID, refundErr), "job_manager")
+			} else {
+				jm.logger.Info(fmt.Sprintf("Payment %d refunded due to job submission failure", paymentID), "job_manager")
+			}
+		}
+
 		jm.logger.Error(fmt.Sprintf("Failed to submit job from peer %s: %v", peerID[:8], err), "job_manager")
 		return &types.JobExecutionResponse{
 			WorkflowJobID: request.WorkflowJobID,
@@ -2345,6 +2508,12 @@ func (jm *JobManager) HandleJobRequest(request *types.JobExecutionRequest, peerI
 			Message:       fmt.Sprintf("Failed to submit job: %v", err),
 		}, err
 	}
+
+	// Update payment with actual job execution ID
+	// Note: We created the payment with jobExecutionID=0 before job creation
+	// Now we need to update it with the actual job ID
+	// This is handled internally by the database layer when we link the payment later
+	// The payment is already verified and escrowed, so the job will proceed
 
 	jm.logger.Info(fmt.Sprintf("Accepted job request from peer %s, job execution ID: %d (status: IDLE, waiting for job_start)", peerID[:8], job.ID), "job_manager")
 
@@ -3224,4 +3393,41 @@ func (jm *JobManager) checkIdleJobsForReadiness() {
 			}
 		}
 	}
+}
+
+// ==================== Payment Network Validation Helpers ====================
+
+// isNetworkAccepted checks if a payment network matches any accepted network
+func (jm *JobManager) isNetworkAccepted(paymentNetwork string, acceptedNetworks []string) bool {
+	// Empty list means any network accepted
+	if len(acceptedNetworks) == 0 {
+		return true
+	}
+
+	for _, accepted := range acceptedNetworks {
+		if jm.networkMatches(paymentNetwork, accepted) {
+			return true
+		}
+	}
+	return false
+}
+
+// networkMatches checks if a payment network matches an accepted network pattern
+func (jm *JobManager) networkMatches(payment string, accepted string) bool {
+	// Exact match
+	if payment == accepted {
+		return true
+	}
+
+	// Wildcard match (e.g., "eip155:84532" matches "eip155:*")
+	parts := strings.Split(accepted, ":")
+	paymentParts := strings.Split(payment, ":")
+
+	if len(parts) == 2 && len(paymentParts) == 2 && parts[0] == paymentParts[0] {
+		if parts[1] == "*" {
+			return true
+		}
+	}
+
+	return false
 }
