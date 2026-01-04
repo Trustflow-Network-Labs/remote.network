@@ -70,69 +70,41 @@ func (em *EscrowManager) CreateEscrow(
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Determine which facilitator client to use
-	facilitatorURL := em.x402Client.facilitatorURL
+	// Use x402 client for payment verification
 	var transactionID string
 	var isValid bool
 	var errorMsg string
 
-	// Use PayAI client if configured
-	if em.isPayAIFacilitator(facilitatorURL) {
-		em.logger.Info("Using PayAI facilitator for payment verification", "escrow")
-		payaiClient := NewPayAIClient(facilitatorURL, em.logger)
+	em.logger.Info("Using x402 facilitator for payment verification", "escrow")
 
-		description := "Payment for service"
-		if jobExecutionID > 0 {
-			description = fmt.Sprintf("Payment for job execution %d", jobExecutionID)
-		} else {
-			description = "P2P invoice payment"
-		}
+	verifyReq, err := em.convertToX402Request(paymentSig, requiredAmount, jobExecutionID)
+	if err != nil {
+		em.logger.Error(fmt.Sprintf("Failed to convert payment to X402 format: %v", err), "escrow")
+		return 0, fmt.Errorf("failed to convert payment: %v", err)
+	}
 
-		resp, err := payaiClient.VerifyPayment(ctx, paymentSig, requiredAmount, paymentSig.Recipient, description)
-		if err != nil {
-			em.logger.Error(fmt.Sprintf("PayAI verification failed: %v", err), "escrow")
-			return 0, fmt.Errorf("%w: %v", ErrPaymentVerificationFailed, err)
-		}
+	resp, err := em.x402Client.VerifyPayment(ctx, verifyReq)
+	if err != nil {
+		em.logger.Error(fmt.Sprintf("Facilitator verification failed: %v", err), "escrow")
+		return 0, fmt.Errorf("%w: %v", ErrPaymentVerificationFailed, err)
+	}
 
-		isValid = resp.IsValid
-		if !isValid {
+	// Check both IsValid (X402 format) and Valid (backward compatibility)
+	isValid = resp.IsValid || resp.Valid
+	if !isValid {
+		errorMsg = resp.Error
+		if resp.InvalidReason != "" {
 			errorMsg = resp.InvalidReason
 		}
-		// PayAI doesn't return transaction ID on verify, use nonce as identifier
-		transactionID = paymentSig.Nonce
-	} else {
-		// Use standard x402 client
-		em.logger.Info("Using standard x402 facilitator for payment verification", "escrow")
-
-		verifyReq, err := em.convertToX402Request(paymentSig, requiredAmount, jobExecutionID)
-		if err != nil {
-			em.logger.Error(fmt.Sprintf("Failed to convert payment to X402 format: %v", err), "escrow")
-			return 0, fmt.Errorf("failed to convert payment: %v", err)
-		}
-
-		resp, err := em.x402Client.VerifyPayment(ctx, verifyReq)
-		if err != nil {
-			em.logger.Error(fmt.Sprintf("Facilitator verification failed: %v", err), "escrow")
-			return 0, fmt.Errorf("%w: %v", ErrPaymentVerificationFailed, err)
-		}
-
-		// Check both IsValid (X402 format) and Valid (backward compatibility)
-		isValid = resp.IsValid || resp.Valid
-		if !isValid {
-			errorMsg = resp.Error
-			if resp.InvalidReason != "" {
-				errorMsg = resp.InvalidReason
-			}
-		}
-
-		// Generate local transaction tracking ID (facilitator doesn't return one from /verify)
-		// Use hash of signature + nonce to create unique, deterministic ID
-		trackingData := fmt.Sprintf("%s:%s:%d", paymentSig.Signature, paymentSig.Nonce, paymentSig.Timestamp)
-		trackingHash := crypto.Keccak256Hash([]byte(trackingData))
-		transactionID = trackingHash.Hex()
-
-		em.logger.Info(fmt.Sprintf("Generated tracking ID: %s", transactionID), "escrow")
 	}
+
+	// Generate local transaction tracking ID (facilitator doesn't return one from /verify)
+	// Use hash of signature + nonce to create unique, deterministic ID
+	trackingData := fmt.Sprintf("%s:%s:%d", paymentSig.Signature, paymentSig.Nonce, paymentSig.Timestamp)
+	trackingHash := crypto.Keccak256Hash([]byte(trackingData))
+	transactionID = trackingHash.Hex()
+
+	em.logger.Info(fmt.Sprintf("Generated tracking ID: %s", transactionID), "escrow")
 
 	// Check validation result
 	if !isValid {
@@ -252,58 +224,35 @@ func (em *EscrowManager) SettleEscrow(paymentID int64, actualAmount float64) err
 		Metadata:  metadata,                 // Restore metadata for settlement
 	}
 
-	// Determine which facilitator client to use
-	facilitatorURL := em.x402Client.facilitatorURL
+	// Use x402 client for payment settlement
+	em.logger.Info(fmt.Sprintf("Using x402 facilitator for settlement (payment %d)", paymentID), "escrow")
 
-	if em.isPayAIFacilitator(facilitatorURL) {
-		// PayAI requires full payment signature for settlement
-		em.logger.Info(fmt.Sprintf("Using PayAI facilitator for settlement (payment %d)", paymentID), "escrow")
-		payaiClient := NewPayAIClient(facilitatorURL, em.logger)
+	// Convert payment to x402 format for settlement
+	// Use 0 for jobExecutionID if it's nil (P2P payments)
+	jobExecID := int64(0)
+	if payment.JobExecutionID != nil {
+		jobExecID = *payment.JobExecutionID
+	}
+	settleReq, err := em.convertToX402Request(paymentSig, settlementAmount, jobExecID)
+	if err != nil {
+		em.logger.Error(fmt.Sprintf("Failed to convert payment to X402 format for settlement: %v", err), "escrow")
+		return fmt.Errorf("failed to convert payment: %v", err)
+	}
 
-		resp, err := payaiClient.SettlePayment(ctx, paymentSig, settlementAmount, payment.PaymentRecipient, "confirmed")
-		if err != nil {
-			em.logger.Error(fmt.Sprintf("PayAI settlement failed for payment %d: %v", paymentID, err), "escrow")
-			return fmt.Errorf("failed to settle payment: %v", err)
+	// Send settlement request to facilitator
+	settleResp, err := em.x402Client.SettlePayment(ctx, settleReq)
+	if err != nil {
+		em.logger.Error(fmt.Sprintf("Failed to settle payment %d: %v", paymentID, err), "escrow")
+		return fmt.Errorf("failed to settle payment: %v", err)
+	}
+
+	// Update transaction ID with blockchain transaction hash from settlement
+	if settleResp.Transaction != "" {
+		if payment.TransactionID == nil {
+			payment.TransactionID = new(string)
 		}
-
-		if !resp.Success {
-			return fmt.Errorf("settlement failed: %s", resp.ErrorReason)
-		}
-
-		// Update transaction ID with actual blockchain transaction hash
-		*payment.TransactionID = resp.Transaction
-		em.logger.Info(fmt.Sprintf("PayAI settlement successful: tx=%s", resp.Transaction), "escrow")
-	} else {
-		// Use standard x402 client
-		em.logger.Info(fmt.Sprintf("Using standard x402 facilitator for settlement (payment %d)", paymentID), "escrow")
-
-		// Convert payment to x402 format for settlement
-		// Use 0 for jobExecutionID if it's nil (P2P payments)
-		jobExecID := int64(0)
-		if payment.JobExecutionID != nil {
-			jobExecID = *payment.JobExecutionID
-		}
-		settleReq, err := em.convertToX402Request(paymentSig, settlementAmount, jobExecID)
-		if err != nil {
-			em.logger.Error(fmt.Sprintf("Failed to convert payment to X402 format for settlement: %v", err), "escrow")
-			return fmt.Errorf("failed to convert payment: %v", err)
-		}
-
-		// Send settlement request to facilitator
-		settleResp, err := em.x402Client.SettlePayment(ctx, settleReq)
-		if err != nil {
-			em.logger.Error(fmt.Sprintf("Failed to settle payment %d: %v", paymentID, err), "escrow")
-			return fmt.Errorf("failed to settle payment: %v", err)
-		}
-
-		// Update transaction ID with blockchain transaction hash from settlement
-		if settleResp.Transaction != "" {
-			if payment.TransactionID == nil {
-				payment.TransactionID = new(string)
-			}
-			*payment.TransactionID = settleResp.Transaction
-			em.logger.Info(fmt.Sprintf("Settlement successful: blockchain tx=%s", settleResp.Transaction), "escrow")
-		}
+		*payment.TransactionID = settleResp.Transaction
+		em.logger.Info(fmt.Sprintf("Settlement successful: blockchain tx=%s", settleResp.Transaction), "escrow")
 	}
 
 	// Update database status
@@ -388,22 +337,9 @@ func (em *EscrowManager) GetEscrowByJobID(jobExecutionID int64) (*database.JobPa
 	return em.db.GetJobPaymentByJobID(jobExecutionID)
 }
 
-// isPayAIFacilitator checks if the facilitator URL is PayAI
-func (em *EscrowManager) isPayAIFacilitator(facilitatorURL string) bool {
-	return facilitatorURL != "" && (facilitatorURL == "https://facilitator.payai.network" ||
-		facilitatorURL == "https://facilitator.payai.network/" ||
-		facilitatorURL == "http://facilitator.payai.network" ||
-		facilitatorURL == "http://facilitator.payai.network/")
-}
-
-// GetSignatureFormatForFacilitator determines which signature format to use based on facilitator URL
+// GetSignatureFormatForFacilitator returns the signature format for x402 facilitators
+// All x402 facilitators use EIP-712 typed structured data signing for EVM chains
 func (em *EscrowManager) GetSignatureFormatForFacilitator(facilitatorURL string) SignatureFormat {
-	// PayAI uses EIP-191 personal message signing
-	if em.isPayAIFacilitator(facilitatorURL) {
-		return SignatureFormatEIP191
-	}
-
-	// Default to EIP-712 for standard x402 facilitators (x402.org, x402.rs, etc.)
 	return SignatureFormatEIP712
 }
 
