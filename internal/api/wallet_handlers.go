@@ -29,9 +29,12 @@ func (s *APIServer) handleListWallets(w http.ResponseWriter, r *http.Request) {
 
 	response := make([]WalletResponse, 0, len(wallets))
 	for _, wallet := range wallets {
+		// Normalize network to full CAIP-2 format (converts Solana aliases to full format)
+		normalizedNetwork := payment.NormalizeSolanaNetwork(wallet.Network)
+
 		walletResp := WalletResponse{
 			WalletID:  wallet.ID,
-			Network:   wallet.Network,
+			Network:   normalizedNetwork,
 			Address:   wallet.Address,
 			CreatedAt: wallet.CreatedAt,
 		}
@@ -82,12 +85,15 @@ func (s *APIServer) handleCreateWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize network to full CAIP-2 format for response
+	normalizedNetwork := payment.NormalizeSolanaNetwork(wallet.Network)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
 		"wallet_id": wallet.ID,
 		"address":   wallet.Address,
-		"network":   wallet.Network,
+		"network":   normalizedNetwork,
 	})
 }
 
@@ -117,12 +123,15 @@ func (s *APIServer) handleImportWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize network to full CAIP-2 format for response
+	normalizedNetwork := payment.NormalizeSolanaNetwork(wallet.Network)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
 		"wallet_id": wallet.ID,
 		"address":   wallet.Address,
-		"network":   wallet.Network,
+		"network":   normalizedNetwork,
 	})
 }
 

@@ -756,6 +756,14 @@ class APIClient {
     const response = await this.client.post(`/api/invoices/${invoiceId}/resend`)
     return response.data
   }
+
+  /**
+   * Get allowed networks for invoices (intersection of facilitator and app supported networks)
+   */
+  async getAllowedNetworks(): Promise<{ success: boolean; networks: Array<{ caip2: string; display_name: string }> }> {
+    const response = await this.client.get('/api/allowed-networks')
+    return response.data
+  }
 }
 
 // Create default instance for localhost

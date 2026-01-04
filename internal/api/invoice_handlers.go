@@ -381,3 +381,26 @@ func (s *APIServer) handleResendInvoice(w http.ResponseWriter, r *http.Request) 
 		"new_invoice_id": newInvoiceID,
 	})
 }
+
+// handleGetAllowedNetworks returns networks allowed for invoice payments (intersection of facilitator and app supported networks)
+func (s *APIServer) handleGetAllowedNetworks(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	allowedNetworks, err := s.invoiceManager.GetAllowedNetworks(ctx)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to get allowed networks: %v", err), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": fmt.Sprintf("%v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"networks": allowedNetworks,
+	})
+}

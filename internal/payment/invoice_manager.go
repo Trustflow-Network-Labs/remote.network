@@ -74,9 +74,31 @@ func (im *InvoiceManager) CreateInvoice(
 		return "", fmt.Errorf("failed to get wallet address: %v", err)
 	}
 
+	// Normalize both networks to full CAIP-2 format for comparison (handles Solana aliases)
+	normalizedWalletNetwork := NormalizeSolanaNetwork(walletNetwork)
+	normalizedRequestNetwork := NormalizeSolanaNetwork(network)
+
 	// Verify wallet network matches invoice network
-	if walletNetwork != network {
+	if normalizedWalletNetwork != normalizedRequestNetwork {
 		return "", fmt.Errorf("wallet network %s does not match invoice network %s", walletNetwork, network)
+	}
+
+	// Validate that the network is in the allowed list (intersection of facilitator and app supported)
+	ctx := context.Background()
+	allowedNetworks, err := im.GetAllowedNetworks(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to validate network: %v", err)
+	}
+
+	networkAllowed := false
+	for _, allowedNet := range allowedNetworks {
+		if allowedNet.CAIP2 == network {
+			networkAllowed = true
+			break
+		}
+	}
+	if !networkAllowed {
+		return "", fmt.Errorf("network %s is not supported by both app and facilitator", network)
 	}
 
 	// Calculate expiration
@@ -180,10 +202,32 @@ func (im *InvoiceManager) AcceptInvoice(
 		return fmt.Errorf("failed to get wallet address: %v", err)
 	}
 
+	// Normalize both networks to full CAIP-2 format for comparison (handles Solana aliases)
+	normalizedWalletNetwork := NormalizeSolanaNetwork(walletNetwork)
+	normalizedInvoiceNetwork := NormalizeSolanaNetwork(invoice.Network)
+
 	// Verify wallet network matches invoice network
-	if walletNetwork != invoice.Network {
+	if normalizedWalletNetwork != normalizedInvoiceNetwork {
 		return fmt.Errorf("wallet network %s does not match invoice network %s",
 			walletNetwork, invoice.Network)
+	}
+
+	// Validate that the network is in the allowed list (intersection of facilitator and app supported)
+	ctx := context.Background()
+	allowedNetworks, err := im.GetAllowedNetworks(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to validate network: %v", err)
+	}
+
+	networkAllowed := false
+	for _, allowedNet := range allowedNetworks {
+		if allowedNet.CAIP2 == invoice.Network {
+			networkAllowed = true
+			break
+		}
+	}
+	if !networkAllowed {
+		return fmt.Errorf("network %s is not supported by both app and facilitator", invoice.Network)
 	}
 
 	// Verify invoice has recipient wallet address
@@ -437,4 +481,83 @@ func (im *InvoiceManager) sendInvoiceNotification(toPeerID string, invoiceID str
 		return quicPeer.SendInvoiceNotification(toPeerID, invoiceID, status, message)
 	}
 	return fmt.Errorf("quic peer does not implement invoice sending")
+}
+
+// AllowedNetwork represents a network that is allowed for invoice payments
+type AllowedNetwork struct {
+	CAIP2       string `json:"caip2"`        // CAIP-2 network identifier (e.g., "eip155:8453")
+	DisplayName string `json:"display_name"` // Human-readable name (e.g., "Base Mainnet")
+}
+
+// GetAllowedNetworks returns networks that are supported by both the facilitator and the app
+func (im *InvoiceManager) GetAllowedNetworks(ctx context.Context) ([]AllowedNetwork, error) {
+	// Get app-supported networks from NetworkMapper
+	networkMapper := NewNetworkMapper()
+	appSupportedNetworks := make(map[string]bool)
+	for _, network := range networkMapper.GetSupportedNetworks() {
+		appSupportedNetworks[network] = true
+	}
+
+	// Query facilitator for supported networks
+	facilitatorSupported, err := im.escrowManager.x402Client.GetSupported(ctx)
+	if err != nil {
+		im.logger.Warn(fmt.Sprintf("Failed to query facilitator for supported networks: %v", err), "invoice_manager")
+		// On error, return only app-supported networks (fail-open approach)
+		return im.getAllNetworksWithLabels(appSupportedNetworks), nil
+	}
+
+	// Extract unique networks from facilitator response
+	facilitatorNetworks := make(map[string]bool)
+	for _, kind := range facilitatorSupported.Kinds {
+		if kind.Network != "" {
+			// Normalize Solana network aliases to full CAIP-2 format
+			normalizedNetwork := NormalizeSolanaNetwork(kind.Network)
+			facilitatorNetworks[normalizedNetwork] = true
+		}
+	}
+
+	// Compute intersection: networks supported by BOTH app AND facilitator
+	allowedNetworks := make(map[string]bool)
+	for network := range appSupportedNetworks {
+		if facilitatorNetworks[network] {
+			allowedNetworks[network] = true
+		}
+	}
+
+	im.logger.Debug(fmt.Sprintf("Allowed networks: %d app-supported, %d facilitator-supported, %d allowed",
+		len(appSupportedNetworks), len(facilitatorNetworks), len(allowedNetworks)), "invoice_manager")
+
+	return im.getAllNetworksWithLabels(allowedNetworks), nil
+}
+
+// getAllNetworksWithLabels converts a map of network identifiers to AllowedNetwork structs with display names
+func (im *InvoiceManager) getAllNetworksWithLabels(networks map[string]bool) []AllowedNetwork {
+	// Map CAIP-2 identifiers to human-readable names
+	displayNames := map[string]string{
+		"eip155:8453":                                "Base Mainnet",
+		"eip155:84532":                               "Base Sepolia",
+		"eip155:1":                                   "Ethereum Mainnet",
+		"eip155:11155111":                            "Ethereum Sepolia",
+		"eip155:137":                                 "Polygon Mainnet",
+		"eip155:80002":                               "Polygon Amoy",
+		"eip155:43114":                               "Avalanche C-Chain",
+		"eip155:43113":                               "Avalanche Fuji",
+		"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "Solana Mainnet",
+		"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": "Solana Devnet",
+		"solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z":  "Solana Testnet",
+	}
+
+	result := make([]AllowedNetwork, 0, len(networks))
+	for network := range networks {
+		displayName := displayNames[network]
+		if displayName == "" {
+			displayName = network // Fallback to CAIP-2 identifier
+		}
+		result = append(result, AllowedNetwork{
+			CAIP2:       network,
+			DisplayName: displayName,
+		})
+	}
+
+	return result
 }

@@ -745,6 +745,15 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		}
 	})))
 
+	// Allowed networks endpoint (protected with JWT authentication)
+	mux.Handle("/api/allowed-networks", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.handleGetAllowedNetworks(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+
 	// WebSocket endpoint
 	mux.HandleFunc("/api/ws", s.handleWebSocket)
 

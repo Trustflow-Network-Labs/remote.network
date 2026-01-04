@@ -433,6 +433,7 @@ import { useInvoicesStore } from '../../stores/invoices'
 import { useWalletsStore } from '../../stores/wallets'
 import { useAuthStore } from '../../stores/auth'
 import { useToast } from 'primevue/usetoast'
+import { api } from '../../services/api'
 import AppLayout from '../layout/AppLayout.vue'
 import Button from 'primevue/button'
 import DataTable from 'primevue/datatable'
@@ -484,13 +485,9 @@ const createForm = ref({
 const acceptForm = ref({ walletId: '', passphrase: '' })
 const rejectForm = ref({ reason: '' })
 
-// Network options
-const networkOptions = [
-  { label: 'Base Mainnet', value: 'eip155:8453' },
-  { label: 'Base Sepolia', value: 'eip155:84532' },
-  { label: 'Solana Mainnet', value: 'solana:mainnet-beta' },
-  { label: 'Solana Devnet', value: 'solana:devnet' }
-]
+// Network options - fetched from API (intersection of facilitator and app supported networks)
+const networkOptions = ref<Array<{ label: string; value: string }>>([])
+const loadingNetworks = ref(false)
 
 // Computed
 const filteredInvoices = computed(() => {
@@ -548,6 +545,37 @@ const createWalletOptions = computed(() => {
 // Methods
 const refreshInvoices = async () => {
   await invoicesStore.fetchInvoices()
+}
+
+const fetchAllowedNetworks = async () => {
+  loadingNetworks.value = true
+  try {
+    const data = await api.getAllowedNetworks()
+    if (data.success && data.networks) {
+      // Map API response to dropdown format
+      networkOptions.value = data.networks.map((net: { display_name: string; caip2: string }) => ({
+        label: net.display_name,
+        value: net.caip2
+      }))
+    }
+  } catch (error) {
+    console.error('Error fetching allowed networks:', error)
+    toast.add({
+      severity: 'warn',
+      summary: 'Network Options',
+      detail: 'Could not load available networks. Using defaults.',
+      life: 3000
+    })
+    // Fallback to default networks if API call fails
+    networkOptions.value = [
+      { label: 'Base Mainnet', value: 'eip155:8453' },
+      { label: 'Base Sepolia', value: 'eip155:84532' },
+      { label: 'Solana Mainnet', value: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' },
+      { label: 'Solana Devnet', value: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' }
+    ]
+  } finally {
+    loadingNetworks.value = false
+  }
 }
 
 const createInvoice = async () => {
@@ -728,8 +756,11 @@ const formatAmount = (amount: any) => {
 
 // Lifecycle
 onMounted(async () => {
-  await refreshInvoices()
-  await walletsStore.fetchWallets()
+  await Promise.all([
+    refreshInvoices(),
+    walletsStore.fetchWallets(),
+    fetchAllowedNetworks()
+  ])
   invoicesStore.subscribeToUpdates()
 })
 
