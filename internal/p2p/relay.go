@@ -439,7 +439,19 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 	// Forward the payload to the target client
 	if err := rp.forwardDataToTarget(data.TargetPeerID, forwardPayload); err != nil {
 		rp.logger.Error(fmt.Sprintf("Failed to forward to target %s: %v", data.TargetPeerID, err), "relay")
+
+		// Send error response back to source through the stream
+		errorMsg := fmt.Sprintf("error: failed to forward to target: %v", err)
+		if stream != nil {
+			(*stream).Write([]byte(errorMsg))
+		}
+
 		return fmt.Errorf("failed to forward to target: %v", err)
+	}
+
+	// Send success response back to source through the stream
+	if stream != nil {
+		(*stream).Write([]byte("success"))
 	}
 
 	// Update egress counter

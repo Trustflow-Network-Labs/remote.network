@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -266,14 +267,36 @@ func (lm *LogsManager) rotateWithBackup(reason string) {
 	backupPath := filepath.Join(lm.dir, backupFileName)
 	currentPath := filepath.Join(lm.dir, lm.logFileName)
 
+	// Close the log file properly
 	if lm.File != nil {
+		// Sync to flush any buffered data (critical on Windows)
+		lm.File.Sync()
 		lm.File.Close()
 		lm.File = nil
 	}
 
+	// On Windows, add a small delay to ensure OS releases the file handle
+	if runtime.GOOS == "windows" {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Rotate the log file
 	if _, err := os.Stat(currentPath); err == nil {
+		// Try rename first (atomic and fast)
 		if err := os.Rename(currentPath, backupPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to create backup %s: %v\n", backupPath, err)
+			// On Windows, if rename fails due to file locking, try copy+delete fallback
+			if runtime.GOOS == "windows" {
+				if copyErr := lm.copyFile(currentPath, backupPath); copyErr == nil {
+					// Copy succeeded, now delete original
+					if delErr := os.Remove(currentPath); delErr != nil {
+						fmt.Fprintf(os.Stderr, "Failed to delete original log file after copy: %v\n", delErr)
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "Failed to rotate log (rename and copy both failed): %v\n", err)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Failed to create backup %s: %v\n", backupPath, err)
+			}
 		}
 	}
 
@@ -289,6 +312,39 @@ func (lm *LogsManager) rotateWithBackup(reason string) {
 		"reason":   reason,
 		"backup":   backupFileName,
 	}).Info("Log rotated")
+}
+
+// copyFile is a fallback for Windows when rename fails due to file locking
+func (lm *LogsManager) copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	buf := make([]byte, 64*1024) // 64KB buffer
+	for {
+		n, err := sourceFile.Read(buf)
+		if n > 0 {
+			if _, writeErr := destFile.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+	}
+
+	return destFile.Sync()
 }
 
 func (lm *LogsManager) cleanupOldBackups() {

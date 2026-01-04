@@ -736,6 +736,10 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			s.handleAcceptInvoice(w, r)
 		} else if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reject") {
 			s.handleRejectInvoice(w, r)
+		} else if r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/delete") {
+			s.handleDeleteInvoice(w, r)
+		} else if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/resend") {
+			s.handleResendInvoice(w, r)
 		} else {
 			http.Error(w, "Not found", http.StatusNotFound)
 		}

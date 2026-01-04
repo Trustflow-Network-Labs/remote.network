@@ -91,6 +91,7 @@ func (im *InvoiceManager) CreateInvoice(
 		InvoiceID:         invoiceID,
 		FromPeerID:        fromPeerID,
 		ToPeerID:          toPeerID,
+		FromWalletID:      fromWalletID,
 		FromWalletAddress: walletAddress,
 		Amount:            amount,
 		Currency:          currency,
@@ -101,6 +102,11 @@ func (im *InvoiceManager) CreateInvoice(
 		ExpiresAt:         expiresAt,
 	}
 
+	// Verify QUIC peer is available before creating invoice
+	if im.quicPeer == nil {
+		return "", fmt.Errorf("cannot create invoice: QUIC peer not initialized")
+	}
+
 	if err := im.db.CreatePaymentInvoice(invoice); err != nil {
 		return "", fmt.Errorf("failed to create invoice: %v", err)
 	}
@@ -108,41 +114,40 @@ func (im *InvoiceManager) CreateInvoice(
 	im.logger.Info(fmt.Sprintf("Invoice %s created: %s → %s (%.6f %s)",
 		invoiceID, fromPeerID[:8], toPeerID[:8], amount, currency), "invoice_manager")
 
-	// Send invoice to recipient via QUIC
-	if im.quicPeer != nil {
-		// Create invoice request data
-		invoiceReqData := &InvoiceRequestData{
-			InvoiceID:         invoiceID,
-			FromPeerID:        fromPeerID,
-			ToPeerID:          toPeerID,
-			FromWalletAddress: walletAddress,
-			Amount:            amount,
-			Currency:          currency,
-			Network:           network,
-			Description:       description,
-			ExpiresAt:         0,
-			Metadata:          make(map[string]interface{}),
-		}
-		if expiresAt != nil {
-			invoiceReqData.ExpiresAt = expiresAt.Unix()
-		}
-
-		// Type assert and send with retry
-		if err := im.sendInvoiceRequest(toPeerID, invoiceReqData); err != nil {
-			im.logger.Warn(fmt.Sprintf("Failed to send invoice to peer %s after all retries: %v", toPeerID[:8], err), "invoice_manager")
-
-			// Mark invoice as failed permanently
-			if markErr := im.db.MarkInvoiceFailed(invoiceID, fmt.Sprintf("Failed to deliver after %d retry attempts: %v", im.maxRetries, err)); markErr != nil {
-				im.logger.Error(fmt.Sprintf("Failed to mark invoice %s as failed: %v", invoiceID, markErr), "invoice_manager")
-			} else {
-				im.logger.Info(fmt.Sprintf("Invoice %s marked as failed (delivery unsuccessful)", invoiceID), "invoice_manager")
-			}
-
-			// Return error to inform caller
-			return "", fmt.Errorf("invoice created but delivery failed after %d attempts: %v", im.maxRetries+1, err)
-		}
+	// Create invoice request data
+	invoiceReqData := &InvoiceRequestData{
+		InvoiceID:         invoiceID,
+		FromPeerID:        fromPeerID,
+		ToPeerID:          toPeerID,
+		FromWalletAddress: walletAddress,
+		Amount:            amount,
+		Currency:          currency,
+		Network:           network,
+		Description:       description,
+		ExpiresAt:         0,
+		Metadata:          make(map[string]interface{}),
+	}
+	if expiresAt != nil {
+		invoiceReqData.ExpiresAt = expiresAt.Unix()
 	}
 
+	// Send invoice to recipient via QUIC with retry
+	if err := im.sendInvoiceRequest(toPeerID, invoiceReqData); err != nil {
+		im.logger.Warn(fmt.Sprintf("Failed to send invoice to peer %s after all retries: %v", toPeerID[:8], err), "invoice_manager")
+
+		// Mark invoice as failed so user can see it and take action (delete/resend)
+		failureReason := fmt.Sprintf("Failed to deliver after %d retry attempts: %v", im.maxRetries, err)
+		if markErr := im.db.MarkInvoiceFailed(invoiceID, failureReason); markErr != nil {
+			im.logger.Error(fmt.Sprintf("Failed to mark invoice %s as failed: %v", invoiceID, markErr), "invoice_manager")
+		} else {
+			im.logger.Info(fmt.Sprintf("Invoice %s marked as failed (delivery failed)", invoiceID), "invoice_manager")
+		}
+
+		// Return invoice ID with error so UI can show the failed invoice
+		return invoiceID, fmt.Errorf("failed to deliver invoice after %d attempts: %v", im.maxRetries+1, err)
+	}
+
+	im.logger.Info(fmt.Sprintf("Invoice %s delivered successfully to peer %s", invoiceID, toPeerID[:8]), "invoice_manager")
 	return invoiceID, nil
 }
 
@@ -241,8 +246,8 @@ func (im *InvoiceManager) AcceptInvoice(
 		return fmt.Errorf("failed to create escrow: %v", err)
 	}
 
-	// Update invoice with payment details and payer's wallet address
-	if err := im.db.UpdatePaymentInvoiceAccepted(invoiceID, string(paymentSigJSON), paymentID, walletAddress); err != nil {
+	// Update invoice with payment details, payer's wallet ID and address
+	if err := im.db.UpdatePaymentInvoiceAccepted(invoiceID, string(paymentSigJSON), paymentID, walletID, walletAddress); err != nil {
 		return fmt.Errorf("failed to update invoice: %v", err)
 	}
 
@@ -368,6 +373,26 @@ func (im *InvoiceManager) StartCleanupRoutine() {
 			}
 		}
 	}()
+}
+
+// DeleteInvoice deletes an invoice (only for failed/expired/rejected invoices)
+func (im *InvoiceManager) DeleteInvoice(invoiceID string) error {
+	invoice, err := im.db.GetPaymentInvoice(invoiceID)
+	if err != nil {
+		return fmt.Errorf("invoice not found: %v", err)
+	}
+
+	// Only allow deleting failed, expired, or rejected invoices
+	if invoice.Status != "failed" && invoice.Status != "expired" && invoice.Status != "rejected" {
+		return fmt.Errorf("cannot delete invoice with status: %s", invoice.Status)
+	}
+
+	if err := im.db.DeletePaymentInvoice(invoiceID); err != nil {
+		return fmt.Errorf("failed to delete invoice: %v", err)
+	}
+
+	im.logger.Info(fmt.Sprintf("Invoice %s deleted", invoiceID), "invoice_manager")
+	return nil
 }
 
 // Helper methods for QUIC message sending

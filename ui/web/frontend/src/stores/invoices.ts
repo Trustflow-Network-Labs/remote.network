@@ -71,8 +71,13 @@ export const useInvoicesStore = defineStore('invoices', {
           expiresInHours
         )
 
-        // Refresh invoices list
+        // Refresh invoices list (will show invoice as pending or failed)
         await this.fetchInvoices()
+
+        // If response indicates delivery failure, set error but don't throw
+        if (!response.success && response.invoice_id) {
+          this.error = response.message || 'Invoice created but delivery failed'
+        }
 
         return response
       } catch (error: any) {
@@ -119,6 +124,53 @@ export const useInvoicesStore = defineStore('invoices', {
           invoice.status = 'rejected'
           invoice.rejected_at = Date.now() / 1000
         }
+
+        return response
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        throw error
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async deleteInvoice(invoiceId: string) {
+      this.loading = true
+      this.error = null
+
+      try {
+        const response = await api.deleteInvoice(invoiceId)
+
+        // Remove invoice from local list
+        const index = this.invoices.findIndex(i => i.invoice_id === invoiceId)
+        if (index !== -1) {
+          this.invoices.splice(index, 1)
+        }
+
+        return response
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        throw error
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async resendInvoice(invoiceId: string) {
+      this.loading = true
+      this.error = null
+
+      try {
+        const response = await api.resendInvoice(invoiceId)
+
+        // Remove old invoice and refresh list to get new one
+        const index = this.invoices.findIndex(i => i.invoice_id === invoiceId)
+        if (index !== -1) {
+          this.invoices.splice(index, 1)
+        }
+
+        // Refresh to get the new invoice
+        await this.fetchInvoices()
 
         return response
       } catch (error: any) {

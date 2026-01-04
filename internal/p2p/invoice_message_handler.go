@@ -287,12 +287,31 @@ func (imh *InvoiceMessageHandler) sendMessageViaRelay(peerID string, messageByte
 	}
 	defer stream.Close()
 
-	// Send message (no response expected for one-way messages)
+	// Send message to relay
 	if _, err := stream.Write(forwardMsgBytes); err != nil {
 		return fmt.Errorf("failed to send via relay: %v", err)
 	}
 
-	imh.logger.Debug(fmt.Sprintf("Sent %s to peer %s via relay successfully", messageType, peerID[:8]), "invoice_message_handler")
+	// Wait for relay's delivery confirmation response
+	// The relay returns "success" if delivered, or "error: ..." if destination peer is offline
+	responseBuf := make([]byte, 512)
+	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := stream.Read(responseBuf)
+	if err != nil {
+		return fmt.Errorf("failed to read relay delivery confirmation: %v (destination peer may be offline)", err)
+	}
+
+	responseStr := string(responseBuf[:n])
+	if n > 6 && responseStr[:6] == "error:" {
+		// Relay failed to deliver (destination peer not connected)
+		return fmt.Errorf("relay delivery failed: %s", responseStr[7:])
+	}
+
+	if responseStr != "success" {
+		return fmt.Errorf("unexpected relay response: %s", responseStr)
+	}
+
+	imh.logger.Debug(fmt.Sprintf("Sent %s to peer %s via relay with delivery confirmation", messageType, peerID[:8]), "invoice_message_handler")
 	return nil
 }
 

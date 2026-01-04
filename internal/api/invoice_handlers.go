@@ -65,6 +65,21 @@ func (s *APIServer) handleCreateInvoice(w http.ResponseWriter, r *http.Request) 
 	)
 
 	if err != nil {
+		// If we have an invoice ID, the invoice was created but delivery failed
+		if invoiceID != "" {
+			s.logger.Warn(fmt.Sprintf("Invoice created but delivery failed: %s - %v", invoiceID, err), "api")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK) // Return 200 with invoice_id but indicate delivery failure
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":          false,
+				"invoice_id":       invoiceID,
+				"message":          "Invoice created but delivery failed. Invoice marked as failed.",
+				"delivery_error":   fmt.Sprintf("%v", err),
+			})
+			return
+		}
+
+		// No invoice ID means invoice creation failed completely
 		s.logger.Error(fmt.Sprintf("Failed to create invoice: %v", err), "api")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -222,5 +237,147 @@ func (s *APIServer) handleRejectInvoice(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "Invoice rejected",
+	})
+}
+
+// handleDeleteInvoice deletes a failed invoice
+func (s *APIServer) handleDeleteInvoice(w http.ResponseWriter, r *http.Request) {
+	invoiceID := strings.TrimPrefix(r.URL.Path, "/api/invoices/")
+	invoiceID = strings.TrimSuffix(invoiceID, "/delete")
+
+	s.logger.Info(fmt.Sprintf("Deleting invoice %s", invoiceID), "api")
+
+	// Get invoice to check status
+	invoice, err := s.invoiceManager.GetInvoice(invoiceID)
+	if err != nil {
+		s.logger.Warn(fmt.Sprintf("Invoice not found: %s", invoiceID), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "Invoice not found",
+		})
+		return
+	}
+
+	// Only allow deleting failed or expired invoices
+	if invoice.Status != "failed" && invoice.Status != "expired" && invoice.Status != "rejected" {
+		s.logger.Warn(fmt.Sprintf("Cannot delete invoice %s with status %s", invoiceID, invoice.Status), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": fmt.Sprintf("Cannot delete invoice with status: %s", invoice.Status),
+		})
+		return
+	}
+
+	if err := s.invoiceManager.DeleteInvoice(invoiceID); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to delete invoice %s: %v", invoiceID, err), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": fmt.Sprintf("%v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Invoice deleted",
+	})
+}
+
+// handleResendInvoice resends a failed invoice
+func (s *APIServer) handleResendInvoice(w http.ResponseWriter, r *http.Request) {
+	invoiceID := strings.TrimPrefix(r.URL.Path, "/api/invoices/")
+	invoiceID = strings.TrimSuffix(invoiceID, "/resend")
+
+	s.logger.Info(fmt.Sprintf("Resending invoice %s", invoiceID), "api")
+
+	// Get invoice to check status and recreate
+	invoice, err := s.invoiceManager.GetInvoice(invoiceID)
+	if err != nil {
+		s.logger.Warn(fmt.Sprintf("Invoice not found: %s", invoiceID), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "Invoice not found",
+		})
+		return
+	}
+
+	// Only allow resending failed invoices
+	if invoice.Status != "failed" {
+		s.logger.Warn(fmt.Sprintf("Cannot resend invoice %s with status %s", invoiceID, invoice.Status), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": fmt.Sprintf("Cannot resend invoice with status: %s (only failed invoices can be resent)", invoice.Status),
+		})
+		return
+	}
+
+	// Calculate new expiration (24 hours from now)
+	expiresInHours := 24
+
+	// Verify wallet still exists
+	if invoice.FromWalletID == "" {
+		s.logger.Warn(fmt.Sprintf("Invoice %s has no wallet ID (old invoice format)", invoiceID), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "Cannot resend: invoice missing wallet ID (created with old version)",
+		})
+		return
+	}
+
+	// Delete old invoice first
+	if err := s.invoiceManager.DeleteInvoice(invoiceID); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to delete old invoice %s: %v", invoiceID, err), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": fmt.Sprintf("Failed to delete old invoice: %v", err),
+		})
+		return
+	}
+
+	// Create new invoice with same details using the stored wallet ID
+	newInvoiceID, err := s.invoiceManager.CreateInvoice(
+		invoice.FromPeerID,
+		invoice.ToPeerID,
+		invoice.FromWalletID,
+		invoice.Amount,
+		invoice.Currency,
+		invoice.Network,
+		invoice.Description,
+		expiresInHours,
+	)
+
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to resend invoice: %v", err), "api")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": fmt.Sprintf("Failed to resend invoice: %v", err),
+		})
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Invoice resent successfully: old=%s, new=%s", invoiceID, newInvoiceID), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":        true,
+		"message":        "Invoice resent successfully",
+		"new_invoice_id": newInvoiceID,
 	})
 }

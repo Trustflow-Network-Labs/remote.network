@@ -13,7 +13,9 @@ type PaymentInvoice struct {
 	InvoiceID         string                 `json:"invoice_id"`
 	FromPeerID        string                 `json:"from_peer_id"`
 	ToPeerID          string                 `json:"to_peer_id"`
+	FromWalletID      string                 `json:"from_wallet_id,omitempty"`      // Wallet ID of invoice creator
 	FromWalletAddress string                 `json:"from_wallet_address,omitempty"` // Wallet address of invoice creator
+	ToWalletID        string                 `json:"to_wallet_id,omitempty"`        // Wallet ID of payer (set when accepted)
 	ToWalletAddress   string                 `json:"to_wallet_address,omitempty"`   // Wallet address of payer (set when accepted)
 	Amount            float64                `json:"amount"`
 	Currency          string                 `json:"currency"`
@@ -68,7 +70,9 @@ func (sm *SQLiteManager) InitPaymentInvoicesTable() error {
 		invoice_id TEXT NOT NULL UNIQUE,
 		from_peer_id TEXT NOT NULL,
 		to_peer_id TEXT NOT NULL,
+		from_wallet_id TEXT,
 		from_wallet_address TEXT,
+		to_wallet_id TEXT,
 		to_wallet_address TEXT,
 		amount REAL NOT NULL,
 		currency TEXT NOT NULL,
@@ -93,20 +97,7 @@ func (sm *SQLiteManager) InitPaymentInvoicesTable() error {
 	`
 
 	_, err := sm.db.Exec(query)
-	if err != nil {
-		return err
-	}
-
-	// Migrate existing tables to add wallet address columns if they don't exist
-	migrationQuery := `
-	ALTER TABLE payment_invoices ADD COLUMN from_wallet_address TEXT;
-	ALTER TABLE payment_invoices ADD COLUMN to_wallet_address TEXT;
-	`
-
-	// Ignore errors if columns already exist
-	sm.db.Exec(migrationQuery)
-
-	return nil
+	return err
 }
 
 // CreatePaymentInvoice inserts a new invoice
@@ -115,9 +106,10 @@ func (sm *SQLiteManager) CreatePaymentInvoice(invoice *PaymentInvoice) error {
 
 	query := `
 	INSERT INTO payment_invoices (
-		invoice_id, from_peer_id, to_peer_id, from_wallet_address, to_wallet_address,
+		invoice_id, from_peer_id, to_peer_id,
+		from_wallet_id, from_wallet_address, to_wallet_id, to_wallet_address,
 		amount, currency, network, description, status, created_at, expires_at, metadata
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	var expiresAt *int64
@@ -130,7 +122,9 @@ func (sm *SQLiteManager) CreatePaymentInvoice(invoice *PaymentInvoice) error {
 		invoice.InvoiceID,
 		invoice.FromPeerID,
 		invoice.ToPeerID,
+		invoice.FromWalletID,
 		invoice.FromWalletAddress,
+		invoice.ToWalletID,
 		invoice.ToWalletAddress,
 		invoice.Amount,
 		invoice.Currency,
@@ -153,7 +147,8 @@ func (sm *SQLiteManager) CreatePaymentInvoice(invoice *PaymentInvoice) error {
 // GetPaymentInvoice retrieves an invoice by ID
 func (sm *SQLiteManager) GetPaymentInvoice(invoiceID string) (*PaymentInvoice, error) {
 	query := `
-	SELECT id, invoice_id, from_peer_id, to_peer_id, from_wallet_address, to_wallet_address,
+	SELECT id, invoice_id, from_peer_id, to_peer_id,
+		   from_wallet_id, from_wallet_address, to_wallet_id, to_wallet_address,
 		   amount, currency, network, description, status, payment_signature, transaction_id, payment_id,
 		   created_at, expires_at, accepted_at, rejected_at, settled_at, metadata
 	FROM payment_invoices
@@ -161,7 +156,7 @@ func (sm *SQLiteManager) GetPaymentInvoice(invoiceID string) (*PaymentInvoice, e
 	`
 
 	invoice := &PaymentInvoice{}
-	var fromWalletAddr, toWalletAddr sql.NullString
+	var fromWalletID, fromWalletAddr, toWalletID, toWalletAddr sql.NullString
 	var paymentSigStr, transactionIDStr, metadataStr sql.NullString
 	var paymentID sql.NullInt64
 	var createdAt, expiresAt, acceptedAt, rejectedAt, settledAt sql.NullInt64
@@ -171,7 +166,9 @@ func (sm *SQLiteManager) GetPaymentInvoice(invoiceID string) (*PaymentInvoice, e
 		&invoice.InvoiceID,
 		&invoice.FromPeerID,
 		&invoice.ToPeerID,
+		&fromWalletID,
 		&fromWalletAddr,
+		&toWalletID,
 		&toWalletAddr,
 		&invoice.Amount,
 		&invoice.Currency,
@@ -193,9 +190,15 @@ func (sm *SQLiteManager) GetPaymentInvoice(invoiceID string) (*PaymentInvoice, e
 		return nil, err
 	}
 
-	// Populate wallet addresses
+	// Populate wallet IDs and addresses
+	if fromWalletID.Valid {
+		invoice.FromWalletID = fromWalletID.String
+	}
 	if fromWalletAddr.Valid {
 		invoice.FromWalletAddress = fromWalletAddr.String
+	}
+	if toWalletID.Valid {
+		invoice.ToWalletID = toWalletID.String
 	}
 	if toWalletAddr.Valid {
 		invoice.ToWalletAddress = toWalletAddr.String
@@ -248,8 +251,9 @@ func (sm *SQLiteManager) GetPaymentInvoice(invoiceID string) (*PaymentInvoice, e
 // ListPaymentInvoices retrieves invoices for a peer
 func (sm *SQLiteManager) ListPaymentInvoices(peerID string, status string, limit, offset int) ([]*PaymentInvoice, error) {
 	query := `
-	SELECT id, invoice_id, from_peer_id, to_peer_id, amount, currency, network,
-		   description, status, created_at, expires_at
+	SELECT id, invoice_id, from_peer_id, to_peer_id,
+		   from_wallet_id, from_wallet_address, to_wallet_id, to_wallet_address,
+		   amount, currency, network, description, status, created_at, expires_at
 	FROM payment_invoices
 	WHERE (from_peer_id = ? OR to_peer_id = ?)
 	`
@@ -273,6 +277,7 @@ func (sm *SQLiteManager) ListPaymentInvoices(peerID string, status string, limit
 	invoices := make([]*PaymentInvoice, 0)
 	for rows.Next() {
 		invoice := &PaymentInvoice{}
+		var fromWalletID, fromWalletAddr, toWalletID, toWalletAddr sql.NullString
 		var createdAt, expiresAt sql.NullInt64
 
 		err := rows.Scan(
@@ -280,6 +285,10 @@ func (sm *SQLiteManager) ListPaymentInvoices(peerID string, status string, limit
 			&invoice.InvoiceID,
 			&invoice.FromPeerID,
 			&invoice.ToPeerID,
+			&fromWalletID,
+			&fromWalletAddr,
+			&toWalletID,
+			&toWalletAddr,
 			&invoice.Amount,
 			&invoice.Currency,
 			&invoice.Network,
@@ -291,6 +300,20 @@ func (sm *SQLiteManager) ListPaymentInvoices(peerID string, status string, limit
 
 		if err != nil {
 			continue
+		}
+
+		// Populate wallet IDs and addresses
+		if fromWalletID.Valid {
+			invoice.FromWalletID = fromWalletID.String
+		}
+		if fromWalletAddr.Valid {
+			invoice.FromWalletAddress = fromWalletAddr.String
+		}
+		if toWalletID.Valid {
+			invoice.ToWalletID = toWalletID.String
+		}
+		if toWalletAddr.Valid {
+			invoice.ToWalletAddress = toWalletAddr.String
 		}
 
 		if createdAt.Valid {
@@ -340,6 +363,7 @@ func (sm *SQLiteManager) UpdatePaymentInvoiceAccepted(
 	invoiceID string,
 	paymentSigJSON string,
 	paymentID int64,
+	toWalletID string,
 	toWalletAddress string,
 ) error {
 	query := `
@@ -347,12 +371,13 @@ func (sm *SQLiteManager) UpdatePaymentInvoiceAccepted(
 	SET status = 'accepted',
 		payment_signature = ?,
 		payment_id = ?,
+		to_wallet_id = ?,
 		to_wallet_address = ?,
 		accepted_at = strftime('%s', 'now')
 	WHERE invoice_id = ?
 	`
 
-	_, err := sm.db.Exec(query, paymentSigJSON, paymentID, toWalletAddress, invoiceID)
+	_, err := sm.db.Exec(query, paymentSigJSON, paymentID, toWalletID, toWalletAddress, invoiceID)
 	return err
 }
 
@@ -385,5 +410,13 @@ func (sm *SQLiteManager) MarkInvoiceFailed(invoiceID string, reason string) erro
 	`
 
 	_, err := sm.db.Exec(query, reason, invoiceID)
+	return err
+}
+
+// DeletePaymentInvoice deletes an invoice from the database
+// Used when invoice delivery fails to prevent orphaned invoices
+func (sm *SQLiteManager) DeletePaymentInvoice(invoiceID string) error {
+	query := `DELETE FROM payment_invoices WHERE invoice_id = ?`
+	_, err := sm.db.Exec(query, invoiceID)
 	return err
 }

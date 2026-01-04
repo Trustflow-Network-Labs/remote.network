@@ -27,7 +27,8 @@
             <Tab :value="0">All ({{ invoiceCount.total }})</Tab>
             <Tab :value="1">Pending ({{ invoiceCount.pending }})</Tab>
             <Tab :value="2">Settled ({{ invoiceCount.settled }})</Tab>
-            <Tab :value="3">Expired ({{ invoiceCount.expired }})</Tab>
+            <Tab :value="3">Failed ({{ invoiceCount.failed }})</Tab>
+            <Tab :value="4">Expired ({{ invoiceCount.expired }})</Tab>
           </TabList>
         </Tabs>
       </div>
@@ -129,6 +130,25 @@
                   size="small"
                   severity="danger"
                   @click="openRejectDialog(slotProps.data)"
+                />
+                <Button
+                  v-if="slotProps.data.status === 'failed' && getDirection(slotProps.data) === 'Sent'"
+                  label="Resend"
+                  icon="pi pi-refresh"
+                  size="small"
+                  severity="warning"
+                  @click="openResendDialog(slotProps.data)"
+                  :loading="resending"
+                />
+                <Button
+                  v-if="(slotProps.data.status === 'failed' || slotProps.data.status === 'expired' || slotProps.data.status === 'rejected') && getDirection(slotProps.data) === 'Sent'"
+                  label="Delete"
+                  icon="pi pi-trash"
+                  size="small"
+                  severity="danger"
+                  @click="openDeleteDialog(slotProps.data)"
+                  :loading="deleting"
+                  outlined
                 />
                 <Button
                   icon="pi pi-info-circle"
@@ -302,6 +322,55 @@
         </template>
       </Dialog>
 
+      <!-- Delete Invoice Dialog -->
+      <Dialog v-model:visible="showDeleteDialog" header="Delete Invoice" :style="{width: '400px'}" modal>
+        <div class="dialog-content">
+          <Message severity="warn" :closable="false">
+            Are you sure you want to delete this invoice? This action cannot be undone.
+          </Message>
+          <div v-if="selectedInvoice" class="invoice-summary">
+            <p><strong>Invoice ID:</strong> {{ shortenId(selectedInvoice.invoice_id) }}</p>
+            <p><strong>Amount:</strong> {{ selectedInvoice.amount }} {{ selectedInvoice.currency }}</p>
+            <p><strong>Status:</strong> {{ selectedInvoice.status.toUpperCase() }}</p>
+          </div>
+        </div>
+        <template #footer>
+          <Button label="Cancel" icon="pi pi-times" @click="showDeleteDialog = false" text />
+          <Button
+            label="Delete"
+            icon="pi pi-trash"
+            severity="danger"
+            @click="deleteInvoice"
+            :loading="deleting"
+          />
+        </template>
+      </Dialog>
+
+      <!-- Resend Invoice Dialog -->
+      <Dialog v-model:visible="showResendDialog" header="Resend Invoice" :style="{width: '400px'}" modal>
+        <div class="dialog-content">
+          <Message severity="info" :closable="false">
+            This will delete the failed invoice and create a new one with the same details.
+          </Message>
+          <div v-if="selectedInvoice" class="invoice-summary">
+            <p><strong>Recipient:</strong> {{ shortenId(selectedInvoice.to_peer_id) }}</p>
+            <p><strong>Amount:</strong> {{ selectedInvoice.amount }} {{ selectedInvoice.currency }}</p>
+            <p><strong>Network:</strong> {{ getNetworkDisplay(selectedInvoice.network) }}</p>
+            <p><strong>New Expiration:</strong> 24 hours from now</p>
+          </div>
+        </div>
+        <template #footer>
+          <Button label="Cancel" icon="pi pi-times" @click="showResendDialog = false" text />
+          <Button
+            label="Resend"
+            icon="pi pi-refresh"
+            severity="warning"
+            @click="resendInvoice"
+            :loading="resending"
+          />
+        </template>
+      </Dialog>
+
       <!-- Invoice Details Dialog -->
       <Dialog v-model:visible="showDetailsDialog" header="Invoice Details" :style="{width: '500px'}" modal>
         <div class="invoice-details-full" v-if="selectedInvoice">
@@ -392,9 +461,13 @@ const showCreateDialog = ref(false)
 const showAcceptDialog = ref(false)
 const showRejectDialog = ref(false)
 const showDetailsDialog = ref(false)
+const showDeleteDialog = ref(false)
+const showResendDialog = ref(false)
 const creating = ref(false)
 const accepting = ref(false)
 const rejecting = ref(false)
+const deleting = ref(false)
+const resending = ref(false)
 const selectedInvoice = ref<any>(null)
 
 // Forms
@@ -427,7 +500,8 @@ const filteredInvoices = computed(() => {
   if (tabIndex === 0) return allInvoices
   if (tabIndex === 1) return allInvoices.filter(i => i.status === 'pending')
   if (tabIndex === 2) return allInvoices.filter(i => i.status === 'settled')
-  if (tabIndex === 3) return allInvoices.filter(i => i.status === 'expired')
+  if (tabIndex === 3) return allInvoices.filter(i => i.status === 'failed')
+  if (tabIndex === 4) return allInvoices.filter(i => i.status === 'expired')
 
   return allInvoices
 })
@@ -446,6 +520,7 @@ const invoiceCount = computed(() => {
     total: invoices.length,
     pending: invoices.filter(i => i.status === 'pending').length,
     settled: invoices.filter(i => i.status === 'settled').length,
+    failed: invoices.filter(i => i.status === 'failed').length,
     expired: invoices.filter(i => i.status === 'expired').length
   }
 })
@@ -478,7 +553,7 @@ const refreshInvoices = async () => {
 const createInvoice = async () => {
   creating.value = true
   try {
-    await invoicesStore.createInvoice(
+    const response = await invoicesStore.createInvoice(
       createForm.value.toPeerID,
       createForm.value.fromWalletId,
       createForm.value.amount,
@@ -487,7 +562,19 @@ const createInvoice = async () => {
       createForm.value.description,
       createForm.value.expiresInHours
     )
-    toast.add({ severity: 'success', summary: 'Invoice Created', life: 3000 })
+
+    // Check if delivery failed but invoice was created
+    if (!response.success && response.invoice_id) {
+      toast.add({
+        severity: 'warn',
+        summary: 'Invoice Created (Delivery Failed)',
+        detail: 'Invoice saved but could not be delivered to recipient. You can resend it from the Failed tab.',
+        life: 6000
+      })
+    } else {
+      toast.add({ severity: 'success', summary: 'Invoice Created', detail: 'Invoice delivered successfully', life: 3000 })
+    }
+
     showCreateDialog.value = false
     createForm.value = {
       toPeerID: '',
@@ -549,6 +636,44 @@ const rejectInvoice = async () => {
   }
 }
 
+const openDeleteDialog = (invoice: any) => {
+  selectedInvoice.value = invoice
+  showDeleteDialog.value = true
+}
+
+const deleteInvoice = async () => {
+  if (!selectedInvoice.value) return
+  deleting.value = true
+  try {
+    await invoicesStore.deleteInvoice(selectedInvoice.value.invoice_id)
+    toast.add({ severity: 'success', summary: 'Invoice Deleted', detail: 'Invoice removed successfully', life: 3000 })
+    showDeleteDialog.value = false
+  } catch (error: any) {
+    toast.add({ severity: 'error', summary: 'Failed to delete invoice', detail: error.message, life: 5000 })
+  } finally {
+    deleting.value = false
+  }
+}
+
+const openResendDialog = (invoice: any) => {
+  selectedInvoice.value = invoice
+  showResendDialog.value = true
+}
+
+const resendInvoice = async () => {
+  if (!selectedInvoice.value) return
+  resending.value = true
+  try {
+    const response = await invoicesStore.resendInvoice(selectedInvoice.value.invoice_id)
+    toast.add({ severity: 'success', summary: 'Invoice Resent', detail: `New invoice ID: ${response.new_invoice_id}`, life: 5000 })
+    showResendDialog.value = false
+  } catch (error: any) {
+    toast.add({ severity: 'error', summary: 'Failed to resend invoice', detail: error.message, life: 5000 })
+  } finally {
+    resending.value = false
+  }
+}
+
 const viewDetails = (invoice: any) => {
   selectedInvoice.value = invoice
   showDetailsDialog.value = true
@@ -564,6 +689,7 @@ const getStatusSeverity = (status: string) => {
     accepted: 'info',
     settled: 'success',
     rejected: 'danger',
+    failed: 'danger',
     expired: 'secondary'
   }
   return map[status] || 'info'

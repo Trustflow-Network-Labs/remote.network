@@ -342,6 +342,20 @@ func (wm *WalletManager) GetWalletAddress(walletID string) (string, string, erro
 	return wallet.Address, wallet.Network, nil
 }
 
+// FindWalletByAddress finds a wallet ID by its address and network
+func (wm *WalletManager) FindWalletByAddress(address string, network string) (string, error) {
+	wm.mu.RLock()
+	defer wm.mu.RUnlock()
+
+	for _, wallet := range wm.wallets {
+		if wallet.Address == address && wallet.Network == network {
+			return wallet.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("no wallet found for address %s on network %s", address, network)
+}
+
 // GetWallet retrieves and decrypts a wallet by ID
 func (wm *WalletManager) GetWallet(walletID string, passphrase string) (*Wallet, error) {
 	wm.mu.RLock()

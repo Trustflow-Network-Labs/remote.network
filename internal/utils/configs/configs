@@ -175,6 +175,13 @@ token_usdc_ethereum_sepolia_version = 2
 token_usdc_ethereum_name = USDC
 token_usdc_ethereum_version = 2
 
+[invoices]
+# Invoice delivery retry configuration
+# Max retry attempts for invoice delivery (0-10, default: 3)
+invoice_max_retries = 1
+# Retry backoff in milliseconds (500-10000, default: 2000)
+invoice_retry_backoff_ms = 1000
+
 [x402]
 # x402 Payment Protocol Configuration
 # Payment is MANDATORY for all services with price > 0

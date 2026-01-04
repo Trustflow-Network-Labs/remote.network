@@ -689,7 +689,7 @@ class APIClient {
     network: string,
     description: string,
     expiresInHours: number = 24
-  ): Promise<{ success: boolean; invoice_id: string }> {
+  ): Promise<{ success: boolean; invoice_id: string; message?: string; delivery_error?: string }> {
     const response = await this.client.post('/api/invoices', {
       to_peer_id: toPeerID,
       from_wallet_id: fromWalletId,
@@ -738,6 +738,22 @@ class APIClient {
     const response = await this.client.post(`/api/invoices/${invoiceId}/reject`, {
       reason: reason || ''
     })
+    return response.data
+  }
+
+  /**
+   * Delete invoice (only for failed/expired/rejected invoices)
+   */
+  async deleteInvoice(invoiceId: string): Promise<{ success: boolean; message: string }> {
+    const response = await this.client.delete(`/api/invoices/${invoiceId}/delete`)
+    return response.data
+  }
+
+  /**
+   * Resend invoice (only for failed invoices)
+   */
+  async resendInvoice(invoiceId: string): Promise<{ success: boolean; message: string; new_invoice_id: string }> {
+    const response = await this.client.post(`/api/invoices/${invoiceId}/resend`)
     return response.data
   }
 }
