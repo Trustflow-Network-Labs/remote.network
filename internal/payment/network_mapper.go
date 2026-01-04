@@ -28,16 +28,40 @@ func NewNetworkMapper() *NetworkMapper {
 		"eip155:43114": "avalanche",
 		"eip155:43113": "avalanche-fuji",
 
-		// Solana networks
+		// Solana networks (full CAIP-2 format)
 		"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "solana",
 		"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": "solana-devnet",
 		"solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z":  "solana-testnet",
+
+		// Solana networks (aliases for backward compatibility)
+		"solana:mainnet-beta": "solana",
+		"solana:mainnet":      "solana",
+		"solana:devnet":       "solana-devnet",
+		"solana:testnet":      "solana-testnet",
 	}
 
-	// Create reverse mapping
-	payAIToCaip2 := make(map[string]string)
-	for caip2, payai := range caip2ToPayAI {
-		payAIToCaip2[payai] = caip2
+	// Create reverse mapping (use canonical CAIP-2 format only, not aliases)
+	payAIToCaip2 := map[string]string{
+		// Base networks
+		"base":         "eip155:8453",
+		"base-sepolia": "eip155:84532",
+
+		// Ethereum networks
+		"ethereum":         "eip155:1",
+		"ethereum-sepolia": "eip155:11155111",
+
+		// Polygon networks
+		"polygon":       "eip155:137",
+		"polygon-amoy":  "eip155:80002",
+
+		// Avalanche networks
+		"avalanche":      "eip155:43114",
+		"avalanche-fuji": "eip155:43113",
+
+		// Solana networks (canonical CAIP-2 format only)
+		"solana":         "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+		"solana-devnet":  "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+		"solana-testnet": "solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z",
 	}
 
 	return &NetworkMapper{

@@ -43,86 +43,101 @@ func NewSolanaSPLSignerWithConfig(rpcEndpoint string, config interface{}) *Solan
 	}
 }
 
-// CreateSPLTransferTransaction creates a signed SPL token transfer transaction
-// Returns the base64-encoded serialized transaction ready for x402 X-PAYMENT header
+// CreateSPLTransferTransaction creates a partially-signed SPL token transfer transaction
+// compatible with x402 facilitator requirements.
+// Returns the base64-encoded serialized transaction ready for x402 payment header
+//
+// The transaction includes exactly 3 instructions as required by x402:
+// 1. SetComputeUnitLimit
+// 2. SetComputeUnitPrice
+// 3. TransferChecked (SPL token transfer with decimals)
+//
+// Parameters:
+//   - feePayer: The facilitator's public key (will complete signing and pay fees)
+//   - clientKey: The client's private key (signs the transaction)
+//   - tokenMint: The SPL token mint address
+//   - recipient: The payment recipient's public key
+//   - amount: The token amount in smallest units
+//   - decimals: The token's decimal places
 func (s *SolanaSPLSigner) CreateSPLTransferTransaction(
 	ctx context.Context,
-	privateKey solana.PrivateKey,
+	feePayer solana.PublicKey,
+	clientKey solana.PrivateKey,
 	tokenMint solana.PublicKey,
 	recipient solana.PublicKey,
 	amount uint64,
+	decimals uint8,
 ) (string, error) {
-	// Get the payer's public key
-	payer := privateKey.PublicKey()
+	client := clientKey.PublicKey()
 
-	// Get the payer's associated token account for this mint
-	payerATA, _, err := solana.FindAssociatedTokenAddress(payer, tokenMint)
+	// Get the client's associated token account for this mint
+	sourceATA, _, err := solana.FindAssociatedTokenAddress(client, tokenMint)
 	if err != nil {
-		return "", fmt.Errorf("failed to find payer ATA: %v", err)
+		return "", fmt.Errorf("failed to find source ATA: %v", err)
 	}
 
 	// Get the recipient's associated token account for this mint
-	recipientATA, _, err := solana.FindAssociatedTokenAddress(recipient, tokenMint)
+	destinationATA, _, err := solana.FindAssociatedTokenAddress(recipient, tokenMint)
 	if err != nil {
-		return "", fmt.Errorf("failed to find recipient ATA: %v", err)
+		return "", fmt.Errorf("failed to find destination ATA: %v", err)
 	}
 
-	// Get recent blockhash
-	recent, err := s.rpcClient.GetRecentBlockhash(ctx, rpc.CommitmentFinalized)
+	// Get latest blockhash
+	latestBlockhash, err := s.rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
 	if err != nil {
-		return "", fmt.Errorf("failed to get recent blockhash: %v", err)
+		return "", fmt.Errorf("failed to get latest blockhash: %v", err)
 	}
 
-	// Check if recipient's ATA exists, if not, create it
-	instructions := []solana.Instruction{}
+	// Build compute budget instructions (required by x402)
+	computebudget := solana.MustPublicKeyFromBase58("ComputeBudget111111111111111111111111111111")
 
-	// Check if recipient ATA exists
-	accountInfo, err := s.rpcClient.GetAccountInfo(ctx, recipientATA)
-	if err != nil || accountInfo == nil || accountInfo.Value == nil {
-		// Create associated token account for recipient
-		// Use the associated token program from config
-		createATAInstruction := solana.NewInstruction(
-			s.associatedTokenProgramID, // Associated Token Program ID from config
-			solana.AccountMetaSlice{
-				{PublicKey: payer, IsSigner: true, IsWritable: true},
-				{PublicKey: recipientATA, IsSigner: false, IsWritable: true},
-				{PublicKey: recipient, IsSigner: false, IsWritable: false},
-				{PublicKey: tokenMint, IsSigner: false, IsWritable: false},
-				{PublicKey: solana.SystemProgramID, IsSigner: false, IsWritable: false},
-				{PublicKey: solana.TokenProgramID, IsSigner: false, IsWritable: false},
-			},
-			[]byte{}, // Create instruction - empty data
-		)
-		instructions = append(instructions, createATAInstruction)
-	}
+	// Instruction 1: SetComputeUnitLimit
+	cuLimitData := []byte{0x02} // SetComputeUnitLimit discriminator
+	cuLimitData = append(cuLimitData, 0x00, 0x09, 0x3d, 0x00) // 400000 units (little-endian u32)
+	cuLimitIx := solana.NewInstruction(
+		computebudget,
+		solana.AccountMetaSlice{},
+		cuLimitData,
+	)
 
-	// Create SPL token transfer instruction
-	transferInstruction, err := token.NewTransferInstruction(
+	// Instruction 2: SetComputeUnitPrice
+	cuPriceData := []byte{0x03} // SetComputeUnitPrice discriminator
+	cuPriceData = append(cuPriceData, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) // 0 micro-lamports (little-endian u64)
+	cuPriceIx := solana.NewInstruction(
+		computebudget,
+		solana.AccountMetaSlice{},
+		cuPriceData,
+	)
+
+	// Instruction 3: TransferChecked (SPL token transfer with decimals verification)
+	transferIx, err := token.NewTransferCheckedInstruction(
 		amount,
-		payerATA,
-		recipientATA,
-		payer,
-		[]solana.PublicKey{}, // No multi-sig
+		decimals,
+		sourceATA,
+		tokenMint,
+		destinationATA,
+		client,
+		[]solana.PublicKey{}, // No additional signers
 	).ValidateAndBuild()
 	if err != nil {
 		return "", fmt.Errorf("failed to create transfer instruction: %v", err)
 	}
-	instructions = append(instructions, transferInstruction)
 
-	// Create transaction
+	// Create transaction with all 3 instructions
 	tx, err := solana.NewTransaction(
-		instructions,
-		recent.Value.Blockhash,
-		solana.TransactionPayer(payer),
+		[]solana.Instruction{cuLimitIx, cuPriceIx, transferIx},
+		latestBlockhash.Value.Blockhash,
+		solana.TransactionPayer(feePayer), // Facilitator will pay fees
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to create transaction: %v", err)
 	}
 
-	// Sign transaction
-	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
-		if key.Equals(payer) {
-			return &privateKey
+	// Client partially signs the transaction (only signs for their own key, not the fee payer)
+	// The facilitator will complete the signing with their fee payer key
+	_, err = tx.PartialSign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(client) {
+			return &clientKey
 		}
 		return nil
 	})
@@ -130,7 +145,7 @@ func (s *SolanaSPLSigner) CreateSPLTransferTransaction(
 		return "", fmt.Errorf("failed to sign transaction: %v", err)
 	}
 
-	// Serialize transaction
+	// Serialize transaction to bytes
 	serialized, err := tx.MarshalBinary()
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize transaction: %v", err)
@@ -151,10 +166,10 @@ func (s *SolanaSPLSigner) CreateNativeSOLTransfer(
 	// Get the payer's public key
 	payer := privateKey.PublicKey()
 
-	// Get recent blockhash
-	recent, err := s.rpcClient.GetRecentBlockhash(ctx, rpc.CommitmentFinalized)
+	// Get latest blockhash
+	recent, err := s.rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
 	if err != nil {
-		return "", fmt.Errorf("failed to get recent blockhash: %v", err)
+		return "", fmt.Errorf("failed to get latest blockhash: %v", err)
 	}
 
 	// Create system transfer instruction
@@ -221,4 +236,36 @@ func GetSolanaRPCEndpoint(network string) string {
 // Kept for backward compatibility
 func GetRPCEndpoint(network string) string {
 	return GetSolanaRPCEndpoint(network)
+}
+
+// NormalizeSolanaNetwork converts Solana network aliases to full CAIP-2 format
+// This is needed for facilitator compatibility which expects full genesis hashes
+func NormalizeSolanaNetwork(network string) string {
+	switch network {
+	// Convert aliases to full CAIP-2 format
+	case "solana:mainnet-beta", "solana:mainnet":
+		return "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" // Mainnet
+	case "solana:devnet":
+		return "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" // Devnet
+	case "solana:testnet":
+		return "solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z" // Testnet
+	default:
+		// Already in full CAIP-2 format or unknown, return as-is
+		return network
+	}
+}
+
+// IsSolanaNetwork checks if a network identifier is a Solana network
+func IsSolanaNetwork(network string) bool {
+	switch network {
+	case "solana:mainnet-beta", "solana:mainnet",
+		"solana:devnet",
+		"solana:testnet",
+		"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+		"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+		"solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z":
+		return true
+	default:
+		return false
+	}
 }

@@ -2,7 +2,9 @@ package payment
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
@@ -26,6 +28,11 @@ func NewEscrowManager(db *database.SQLiteManager, x402Client *X402Client, config
 		logger:     logger,
 		config:     config,
 	}
+}
+
+// GetX402Client returns the X402 client for querying facilitator
+func (em *EscrowManager) GetX402Client() *X402Client {
+	return em.x402Client
 }
 
 // CreateEscrow creates and verifies a payment escrow for a job or relay session
@@ -143,6 +150,18 @@ func (em *EscrowManager) CreateEscrow(
 		jobExecIDPtr = &jobExecutionID
 	}
 
+	// Serialize metadata to JSON if present (e.g., solana_fee_payer)
+	var metadataJSON *string
+	if len(paymentSig.Metadata) > 0 {
+		metadataBytes, err := json.Marshal(paymentSig.Metadata)
+		if err != nil {
+			em.logger.Warn(fmt.Sprintf("Failed to serialize payment metadata: %v", err), "escrow")
+		} else {
+			metadataStr := string(metadataBytes)
+			metadataJSON = &metadataStr
+		}
+	}
+
 	payment := &database.JobPayment{
 		JobExecutionID:   jobExecIDPtr,
 		WalletID:         paymentSig.Sender, // Use sender address as wallet ID for tracking
@@ -154,6 +173,7 @@ func (em *EscrowManager) CreateEscrow(
 		PaymentNonce:     paymentSig.Nonce,
 		PaymentSignature: paymentSig.Signature,
 		PaymentTimestamp: paymentSig.Timestamp, // Store original timestamp for settlement
+		PaymentMetadata:  metadataJSON,         // Store metadata as JSON
 		TransactionID:    &transactionID,
 		Status:           "verified",
 	}
@@ -212,6 +232,14 @@ func (em *EscrowManager) SettleEscrow(paymentID int64, actualAmount float64) err
 	}
 
 	// Reconstruct payment signature from database for settlement
+	// Deserialize metadata if present
+	var metadata map[string]interface{}
+	if payment.PaymentMetadata != nil && *payment.PaymentMetadata != "" {
+		if err := json.Unmarshal([]byte(*payment.PaymentMetadata), &metadata); err != nil {
+			em.logger.Warn(fmt.Sprintf("Failed to deserialize payment metadata: %v", err), "escrow")
+		}
+	}
+
 	paymentSig := &PaymentSignature{
 		Network:   payment.PaymentNetwork,
 		Sender:    payment.PaymentSender,
@@ -221,6 +249,7 @@ func (em *EscrowManager) SettleEscrow(paymentID int64, actualAmount float64) err
 		Nonce:     payment.PaymentNonce,
 		Signature: payment.PaymentSignature,
 		Timestamp: payment.PaymentTimestamp, // Use original timestamp from database
+		Metadata:  metadata,                 // Restore metadata for settlement
 	}
 
 	// Determine which facilitator client to use
@@ -382,9 +411,16 @@ func (em *EscrowManager) GetSignatureFormatForFacilitator(facilitatorURL string)
 func (em *EscrowManager) convertToX402Request(paymentSig *PaymentSignature, requiredAmount float64, jobExecutionID int64) (*FacilitatorVerifyRequest, error) {
 	// Keep network ID in CAIP-2 format for x402 v2 (e.g., "eip155:84532")
 	// Do NOT convert to name like "base-sepolia" - v2 uses CAIP-2
+	// For Solana, normalize aliases to full CAIP-2 format (e.g., "solana:devnet" -> "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1")
 	networkID := paymentSig.Network
 	if networkID == "" {
 		return nil, fmt.Errorf("missing network ID")
+	}
+
+	// Normalize Solana network aliases to full CAIP-2 format for facilitator compatibility
+	if strings.HasPrefix(networkID, "solana:") {
+		networkID = NormalizeSolanaNetwork(networkID)
+		em.logger.Debug(fmt.Sprintf("Normalized Solana network: %s -> %s", paymentSig.Network, networkID), "escrow")
 	}
 
 	// Convert amounts to wei (for ETH) or smallest unit
@@ -393,6 +429,9 @@ func (em *EscrowManager) convertToX402Request(paymentSig *PaymentSignature, requ
 	valueWei := em.convertToWei(paymentSig.Amount, paymentSig.Currency)
 	requiredWei := em.convertToWei(requiredAmount, paymentSig.Currency)
 
+	// Check if this is a Solana network
+	isSolanaNetwork := strings.HasPrefix(paymentSig.Network, "solana:")
+
 	// Use domain from signature if available (set during EIP-712 signing), otherwise create from config
 	var domain *X402Domain
 	if paymentSig.EIP712Domain != nil {
@@ -400,8 +439,8 @@ func (em *EscrowManager) convertToX402Request(paymentSig *PaymentSignature, requ
 		domain = paymentSig.EIP712Domain
 		em.logger.Info(fmt.Sprintf("Using EIP-712 domain from signature: name=%s, version=%s, chainId=%s, contract=%s",
 			domain.Name, domain.Version, domain.ChainId, domain.VerifyingContract), "escrow")
-	} else {
-		// Fallback: create domain from config (for backward compatibility)
+	} else if !isSolanaNetwork {
+		// Fallback: create domain from config (for EVM networks only)
 		chainID, err := GetChainIDFromNetwork(paymentSig.Network)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get chain ID: %v", err)
@@ -422,24 +461,39 @@ func (em *EscrowManager) convertToX402Request(paymentSig *PaymentSignature, requ
 		}
 		em.logger.Info(fmt.Sprintf("Created EIP-712 domain from config: name=%s, version=%s, chainId=%s, contract=%s",
 			domain.Name, domain.Version, domain.ChainId, domain.VerifyingContract), "escrow")
+	} else {
+		// Solana networks don't use EIP-712 domains
+		em.logger.Info("Skipping EIP-712 domain for Solana network", "escrow")
 	}
 
-	// Hash the nonce to bytes32 (as required by EIP-3009 and x402 facilitators)
-	nonceHash := crypto.Keccak256Hash([]byte(paymentSig.Nonce))
+	// Create payload - different structure for Solana vs EVM
+	var payload interface{}
 
-	// Create payload wrapper with signature and authorization
-	// NOTE: Domain is NOT included in v2 payload - facilitator derives it from
-	// paymentRequirements.extra (name, version) + asset (verifyingContract) + network (chainId)
-	payloadWrapper := &X402PayloadWrapper{
-		Signature: paymentSig.Signature,
-		Authorization: &X402Authorization{
+	if isSolanaNetwork {
+		// For Solana: payload is just the base64-encoded signed transaction
+		// The signature field contains the transaction
+		payload = map[string]interface{}{
+			"transaction": paymentSig.Signature,
+		}
+		em.logger.Debug(fmt.Sprintf("Created Solana payload with transaction: %d bytes", len(paymentSig.Signature)), "escrow")
+	} else {
+		// For EVM: payload has signature + authorization structure
+		nonceHash := crypto.Keccak256Hash([]byte(paymentSig.Nonce))
+
+		authorization := &X402Authorization{
 			From:        paymentSig.Sender,
 			To:          paymentSig.Recipient,
 			Value:       valueWei,
-			ValidAfter:  fmt.Sprintf("%d", paymentSig.Timestamp-3600),  // 1 hour before
+			ValidAfter:  fmt.Sprintf("%d", paymentSig.Timestamp-3600), // 1 hour before
 			ValidBefore: fmt.Sprintf("%d", paymentSig.Timestamp+3600), // 1 hour after
-			Nonce:       nonceHash.Hex(),                              // Use hashed nonce (32 bytes with 0x prefix)
-		},
+			Nonce:       nonceHash.Hex(),
+		}
+
+		payload = &X402PayloadWrapper{
+			Signature:     paymentSig.Signature,
+			Authorization: authorization,
+		}
+		em.logger.Debug("Created EVM payload with authorization", "escrow")
 	}
 
 	// Get token contract address for asset field
@@ -459,17 +513,34 @@ func (em *EscrowManager) convertToX402Request(paymentSig *PaymentSignature, requ
 	}
 
 	// Create payment requirements (used in both top-level and accepted)
+	extra := &PaymentRequirementsExtra{}
+
+	if domain != nil {
+		extra.Name = domain.Name
+		extra.Version = domain.Version
+	}
+
+	// For Solana, extract feePayer from payment signature metadata
+	// The feePayer should have been queried from facilitator and added during signing
+	if isSolanaNetwork {
+		if paymentSig.Metadata != nil {
+			if fp, ok := paymentSig.Metadata["solana_fee_payer"].(string); ok {
+				extra.FeePayer = fp
+				em.logger.Debug(fmt.Sprintf("Added feePayer to Solana payment requirements: %s", fp), "escrow")
+			} else {
+				em.logger.Warn("Solana payment missing feePayer in metadata - verification may fail", "escrow")
+			}
+		}
+	}
+
 	paymentRequirements := &FacilitatorPaymentRequirements{
 		Scheme:            "exact",
-		Network:           networkID, // Use CAIP-2 format (e.g., "eip155:84532")
+		Network:           networkID, // Use CAIP-2 format (e.g., "eip155:84532" or "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1")
 		Asset:             tokenContract,
 		Amount:            requiredWei, // v2 uses "amount" not "maxAmountRequired"
 		PayTo:             paymentSig.Recipient,
 		MaxTimeoutSeconds: 60,
-		Extra: &PaymentRequirementsExtra{
-			Name:    domain.Name,    // EIP-712 domain name used for signing
-			Version: domain.Version, // EIP-712 domain version used for signing
-		},
+		Extra:             extra,
 	}
 
 	// Create resource info
@@ -485,7 +556,7 @@ func (em *EscrowManager) convertToX402Request(paymentSig *PaymentSignature, requ
 			X402Version: 2, // v2 protocol
 			Resource:    resourceInfo,
 			Accepted:    paymentRequirements, // What terms were accepted
-			Payload:     payloadWrapper,
+			Payload:     payload,             // Solana: {transaction: "..."}, EVM: {signature: "...", authorization: {...}}
 		},
 		PaymentRequirements: paymentRequirements, // What is required
 	}
@@ -514,4 +585,3 @@ func (em *EscrowManager) convertToWei(amount float64, currency string) string {
 	weiValue := uint64(amount * multiplier)
 	return fmt.Sprintf("%d", weiValue)
 }
-

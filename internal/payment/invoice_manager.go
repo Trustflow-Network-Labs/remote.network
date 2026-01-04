@@ -1,6 +1,7 @@
 package payment
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -204,6 +205,23 @@ func (im *InvoiceManager) AcceptInvoice(
 			"from_peer":  invoice.FromPeerID,
 			"to_peer":    invoice.ToPeerID,
 		},
+	}
+
+	// For Solana payments, query facilitator to get the feePayer address
+	if IsSolanaNetwork(invoice.Network) {
+		// Normalize network to full CAIP-2 format
+		normalizedNetwork := NormalizeSolanaNetwork(invoice.Network)
+
+		// Query facilitator for feePayer
+		ctx := context.Background()
+		feePayer, err := im.escrowManager.GetX402Client().GetSolanaFeePayer(ctx, normalizedNetwork)
+		if err != nil {
+			return fmt.Errorf("failed to get facilitator fee payer for Solana: %v", err)
+		}
+
+		// Add feePayer to metadata so wallet manager can use it
+		paymentData.Metadata["solana_fee_payer"] = feePayer
+		im.logger.Info(fmt.Sprintf("Using facilitator fee payer for Solana: %s", feePayer), "invoice_manager")
 	}
 
 	paymentSig, err := im.walletManager.SignPaymentWithFormat(walletID, paymentData, passphrase, signatureFormat)

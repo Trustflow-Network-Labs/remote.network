@@ -433,13 +433,13 @@ func (wm *WalletManager) DeleteWallet(walletID string, passphrase string) error 
 	}
 
 	// Verify passphrase by attempting to decrypt
-	_, err := wm.loadAndDecryptWallet(walletID, passphrase)
+	walletPath := filepath.Join(wm.walletsDir, walletID+".json")
+	_, err := wm.loadAndDecryptWallet(walletPath, passphrase)
 	if err != nil {
 		return fmt.Errorf("invalid passphrase: %v", err)
 	}
 
 	// Remove wallet from storage
-	walletPath := filepath.Join(wm.walletsDir, walletID+".json")
 	if err := os.Remove(walletPath); err != nil {
 		return fmt.Errorf("failed to delete wallet file: %v", err)
 	}
@@ -694,17 +694,39 @@ func (wm *WalletManager) signSolanaSPLPayment(wallet *Wallet, sig *PaymentSignat
 		return "", fmt.Errorf("invalid token mint address: %v", err)
 	}
 
-	// Convert amount to smallest unit (lamports for SOL, base units for USDC)
-	var multiplier float64
+	// Get facilitator fee payer address from payment metadata
+	// This should be provided by querying the facilitator's /supported endpoint
+	feePayerStr := ""
+	if sig.Metadata != nil {
+		if fp, ok := sig.Metadata["solana_fee_payer"].(string); ok {
+			feePayerStr = fp
+		}
+	}
+
+	if feePayerStr == "" {
+		return "", fmt.Errorf("solana_fee_payer not provided in payment metadata - this should be queried from facilitator's /supported endpoint")
+	}
+
+	feePayer, err := solana.PublicKeyFromBase58(feePayerStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid facilitator fee payer address: %v", err)
+	}
+
+	// Get token decimals and convert amount
+	var decimals uint8
+	var amountSmallest uint64
+
 	switch sig.Currency {
 	case "USDC", "USDT":
-		multiplier = 1e6 // 6 decimals
+		decimals = 6
+		amountSmallest = uint64(sig.Amount * 1e6)
 	case "SOL":
-		multiplier = 1e9 // 9 decimals
+		decimals = 9
+		amountSmallest = uint64(sig.Amount * 1e9)
 	default:
-		multiplier = 1e6 // Default to 6 decimals
+		decimals = 6 // Default to 6 decimals
+		amountSmallest = uint64(sig.Amount * 1e6)
 	}
-	amountSmallest := uint64(sig.Amount * multiplier)
 
 	// Create and sign the transaction
 	privateKey := solana.PrivateKey(wallet.PrivateKey)
@@ -714,8 +736,8 @@ func (wm *WalletManager) signSolanaSPLPayment(wallet *Wallet, sig *PaymentSignat
 		// Native SOL transfer
 		return signer.CreateNativeSOLTransfer(ctx, privateKey, recipient, amountSmallest)
 	} else {
-		// SPL token transfer (USDC, etc.)
-		return signer.CreateSPLTransferTransaction(ctx, privateKey, tokenMint, recipient, amountSmallest)
+		// SPL token transfer (USDC, etc.) - x402 compatible with 3 instructions
+		return signer.CreateSPLTransferTransaction(ctx, feePayer, privateKey, tokenMint, recipient, amountSmallest, decimals)
 	}
 }
 

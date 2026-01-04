@@ -59,7 +59,7 @@ type FacilitatorPaymentPayload struct {
 	X402Version int                             `json:"x402Version"` // Version inside payload (v2)
 	Resource    *X402ResourceInfo               `json:"resource"`    // Resource being paid for
 	Accepted    *FacilitatorPaymentRequirements `json:"accepted"`    // What payment terms were accepted
-	Payload     *X402PayloadWrapper             `json:"payload"`     // Signature and authorization
+	Payload     interface{}                     `json:"payload"`     // Scheme-specific payload: EVM uses X402PayloadWrapper, Solana uses map with "transaction" field
 }
 
 // X402ResourceInfo describes the resource being paid for
@@ -82,8 +82,9 @@ type FacilitatorPaymentRequirements struct {
 
 // PaymentRequirementsExtra contains additional parameters for payment requirements
 type PaymentRequirementsExtra struct {
-	Name    string `json:"name,omitempty"`    // EIP-712 domain name (for EVM)
-	Version string `json:"version,omitempty"` // EIP-712 domain version (for EVM)
+	Name     string `json:"name,omitempty"`     // EIP-712 domain name (for EVM)
+	Version  string `json:"version,omitempty"`  // EIP-712 domain version (for EVM)
+	FeePayer string `json:"feePayer,omitempty"` // Fee payer address (for Solana)
 }
 
 // X402PayloadWrapper wraps the authorization and signature (x402 v2 format)
@@ -110,11 +111,27 @@ type X402Authorization struct {
 	ValidAfter  string `json:"validAfter"`
 	ValidBefore string `json:"validBefore"`
 	Nonce       string `json:"nonce"`
+	FeePayer    string `json:"feePayer,omitempty"` // For Solana transactions (who pays transaction fees)
 }
 
 // FacilitatorSettleRequest is the same as VerifyRequest per x402 protocol
 // The /settle endpoint expects the full paymentPayload + paymentRequirements structure
 type FacilitatorSettleRequest = FacilitatorVerifyRequest
+
+// FacilitatorSupportedResponse is the response from /supported endpoint
+type FacilitatorSupportedResponse struct {
+	Kinds      []SupportedKind            `json:"kinds"`      // Supported payment schemes
+	Extensions []string                   `json:"extensions"` // Supported extensions
+	Signers    map[string][]string        `json:"signers"`    // Available signers by network
+}
+
+// SupportedKind represents a supported payment scheme
+type SupportedKind struct {
+	X402Version int                    `json:"x402Version"` // Protocol version (1 or 2)
+	Scheme      string                 `json:"scheme"`      // Payment scheme (e.g., "exact")
+	Network     string                 `json:"network"`     // Network identifier
+	Extra       map[string]interface{} `json:"extra,omitempty"` // Extra data (e.g., feePayer for Solana)
+}
 
 // FacilitatorRefundRequest sent to facilitator /refund endpoint
 type FacilitatorRefundRequest struct {

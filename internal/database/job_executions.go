@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -64,6 +65,7 @@ type JobPayment struct {
 	PaymentNonce     string  `json:"payment_nonce"`
 	PaymentSignature string  `json:"payment_signature"`
 	PaymentTimestamp int64   `json:"payment_timestamp"` // Timestamp used in signature
+	PaymentMetadata  *string `json:"payment_metadata,omitempty"` // JSON-encoded metadata (e.g., solana_fee_payer)
 	TransactionID    *string `json:"transaction_id,omitempty"`
 	Status           string  `json:"status"` // pending, verified, settled, refunded, failed
 	VerifiedAt       *int64  `json:"verified_at,omitempty"`
@@ -172,6 +174,19 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 	if err != nil {
 		sm.logger.Error(fmt.Sprintf("Failed to create job executions tables: %v", err), "database")
 		return err
+	}
+
+	// Migration: Add payment_metadata column if it doesn't exist (for Solana fee payer and other metadata)
+	_, err = sm.db.Exec(`
+		ALTER TABLE job_payments ADD COLUMN payment_metadata TEXT;
+	`)
+	if err != nil {
+		// Ignore error if column already exists (expected on existing databases)
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			sm.logger.Warn(fmt.Sprintf("Failed to add payment_metadata column (may already exist): %v", err), "database")
+		}
+	} else {
+		sm.logger.Info("Added payment_metadata column to job_payments table", "database")
 	}
 
 	sm.logger.Info("Job executions tables initialized successfully", "database")
@@ -952,8 +967,8 @@ func (sm *SQLiteManager) CreateJobPayment(payment *JobPayment) (int64, error) {
 		INSERT INTO job_payments (
 			job_execution_id, wallet_id, payment_network, payment_sender, payment_recipient,
 			payment_amount, payment_currency, payment_nonce, payment_signature, payment_timestamp,
-			transaction_id, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			payment_metadata, transaction_id, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		payment.JobExecutionID,
 		payment.WalletID,
@@ -965,6 +980,7 @@ func (sm *SQLiteManager) CreateJobPayment(payment *JobPayment) (int64, error) {
 		payment.PaymentNonce,
 		payment.PaymentSignature,
 		payment.PaymentTimestamp,
+		payment.PaymentMetadata,
 		payment.TransactionID,
 		payment.Status,
 	)
@@ -986,7 +1002,7 @@ func (sm *SQLiteManager) GetJobPayment(paymentID int64) (*JobPayment, error) {
 	err := sm.db.QueryRow(`
 		SELECT id, job_execution_id, wallet_id, payment_network, payment_sender, payment_recipient,
 		       payment_amount, payment_currency, payment_nonce, payment_signature, payment_timestamp,
-		       transaction_id, status, verified_at, settled_at, refunded_at, created_at
+		       payment_metadata, transaction_id, status, verified_at, settled_at, refunded_at, created_at
 		FROM job_payments WHERE id = ?
 	`, paymentID).Scan(
 		&payment.ID,
@@ -1000,6 +1016,7 @@ func (sm *SQLiteManager) GetJobPayment(paymentID int64) (*JobPayment, error) {
 		&payment.PaymentNonce,
 		&payment.PaymentSignature,
 		&payment.PaymentTimestamp,
+		&payment.PaymentMetadata,
 		&payment.TransactionID,
 		&payment.Status,
 		&payment.VerifiedAt,
@@ -1024,7 +1041,7 @@ func (sm *SQLiteManager) GetJobPaymentByJobID(jobExecutionID int64) (*JobPayment
 	err := sm.db.QueryRow(`
 		SELECT id, job_execution_id, wallet_id, payment_network, payment_sender, payment_recipient,
 		       payment_amount, payment_currency, payment_nonce, payment_signature, payment_timestamp,
-		       transaction_id, status, verified_at, settled_at, refunded_at, created_at
+		       payment_metadata, transaction_id, status, verified_at, settled_at, refunded_at, created_at
 		FROM job_payments WHERE job_execution_id = ?
 	`, jobExecutionID).Scan(
 		&payment.ID,
@@ -1038,6 +1055,7 @@ func (sm *SQLiteManager) GetJobPaymentByJobID(jobExecutionID int64) (*JobPayment
 		&payment.PaymentNonce,
 		&payment.PaymentSignature,
 		&payment.PaymentTimestamp,
+		&payment.PaymentMetadata,
 		&payment.TransactionID,
 		&payment.Status,
 		&payment.VerifiedAt,

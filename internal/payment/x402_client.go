@@ -350,3 +350,65 @@ func (c *X402Client) GetNetwork() string {
 func (c *X402Client) GetChainID() string {
 	return c.config.GetConfigWithDefault("x402_chain_id", "eip155:84532")
 }
+
+// GetSupported queries the facilitator's /supported endpoint to get supported payment schemes
+func (c *X402Client) GetSupported(ctx context.Context) (*FacilitatorSupportedResponse, error) {
+	if c.facilitatorURL == "" {
+		return nil, ErrFacilitatorUnavailable
+	}
+
+	url := c.facilitatorURL + "/supported"
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	// Send request
+	httpResp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %v", err)
+	}
+	defer httpResp.Body.Close()
+
+	// Read response body
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+
+	// Check status code
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("facilitator returned HTTP %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	// Parse response
+	var resp FacilitatorSupportedResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	c.logger.Debug(fmt.Sprintf("Facilitator supports %d payment schemes", len(resp.Kinds)), "x402_client")
+	return &resp, nil
+}
+
+// GetSolanaFeePayer queries the facilitator and returns the feePayer address for Solana network
+func (c *X402Client) GetSolanaFeePayer(ctx context.Context, network string) (string, error) {
+	supported, err := c.GetSupported(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to query facilitator: %v", err)
+	}
+
+	// Find matching Solana network in supported kinds
+	for _, kind := range supported.Kinds {
+		if kind.Network == network && kind.Extra != nil {
+			if feePayer, ok := kind.Extra["feePayer"].(string); ok {
+				c.logger.Debug(fmt.Sprintf("Found feePayer for %s: %s", network, feePayer), "x402_client")
+				return feePayer, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("facilitator does not provide feePayer for network %s", network)
+}
