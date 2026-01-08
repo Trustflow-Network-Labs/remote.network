@@ -15,6 +15,9 @@ export interface Peer {
   nat_type: string
   using_relay: boolean
   connected_relay_id: string
+  // Service counts
+  files_count?: number
+  apps_count?: number
 }
 
 export interface PeersState {
@@ -159,7 +162,9 @@ export const usePeersStore = defineStore('peers', {
           is_behind_nat: peer.is_behind_nat ?? false,
           nat_type: peer.nat_type ?? '',
           using_relay: peer.using_relay ?? false,
-          connected_relay_id: peer.connected_relay_id ?? ''
+          connected_relay_id: peer.connected_relay_id ?? '',
+          files_count: peer.files_count ?? 0,
+          apps_count: peer.apps_count ?? 0
         }))
         this.loading = false
         this.error = null

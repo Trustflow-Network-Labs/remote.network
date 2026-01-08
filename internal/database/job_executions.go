@@ -155,6 +155,7 @@ func (sm *SQLiteManager) InitJobExecutionsTable() error {
 		payment_nonce TEXT NOT NULL UNIQUE,
 		payment_signature TEXT NOT NULL,
 		payment_timestamp INTEGER NOT NULL,
+		payment_metadata TEXT,
 		transaction_id TEXT,
 		status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'verified', 'settled', 'refunded', 'failed')),
 		verified_at INTEGER,
@@ -1099,6 +1100,18 @@ func (sm *SQLiteManager) UpdateJobPaymentStatus(paymentID int64, status string) 
 		return fmt.Errorf("failed to update payment status: %v", err)
 	}
 
+	return nil
+}
+
+// UpdateJobPaymentExecutionID updates the job_execution_id for a payment
+// This is used when payment is created before job_execution (with temp ID 0)
+func (sm *SQLiteManager) UpdateJobPaymentExecutionID(paymentID int64, jobExecutionID int64) error {
+	_, err := sm.db.Exec(`
+		UPDATE job_payments SET job_execution_id = ? WHERE id = ?
+	`, jobExecutionID, paymentID)
+	if err != nil {
+		return fmt.Errorf("failed to update payment job_execution_id: %v", err)
+	}
 	return nil
 }
 

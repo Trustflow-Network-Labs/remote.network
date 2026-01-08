@@ -164,80 +164,98 @@
       </div>
 
       <!-- Create Invoice Dialog -->
-      <Dialog v-model:visible="showCreateDialog" header="Create Payment Invoice" :style="{width: '500px'}" modal>
+      <Dialog v-model:visible="showCreateDialog" header="Create Payment Invoice" :style="{width: '600px'}" modal>
         <div class="dialog-content">
-          <div class="form-field">
-            <label>Recipient Peer ID *</label>
-            <InputText
-              v-model="createForm.toPeerID"
-              placeholder="Enter recipient peer ID"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field">
-            <label>Network *</label>
-            <Select
-              v-model="createForm.network"
-              :options="networkOptions"
-              optionLabel="label"
-              optionValue="value"
-              placeholder="Select Network"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field">
-            <label>Your Wallet *</label>
-            <Select
-              v-model="createForm.fromWalletId"
-              :options="createWalletOptions"
-              optionLabel="label"
-              optionValue="value"
-              placeholder="Select wallet to receive payment"
-              class="full-width"
-              :disabled="!createForm.network"
-            />
-            <small v-if="!createForm.network" class="text-muted">Select a network first</small>
-            <small v-else-if="createWalletOptions.length === 0" class="text-warning">
-              No wallets found for {{ createForm.network }}. Create one first.
-            </small>
-          </div>
-          <div class="form-field">
-            <label>Amount *</label>
-            <InputNumber
-              v-model="createForm.amount"
-              mode="decimal"
-              :minFractionDigits="2"
-              :maxFractionDigits="6"
-              placeholder="0.000000"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field">
-            <label>Currency *</label>
-            <InputText
-              v-model="createForm.currency"
-              placeholder="USDC (ERC-3009 required)"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field">
-            <label>Description</label>
-            <Textarea
-              v-model="createForm.description"
-              rows="3"
-              placeholder="Optional description"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field">
-            <label>Expires In (hours)</label>
-            <InputNumber
-              v-model="createForm.expiresInHours"
-              :min="1"
-              :max="168"
-              class="full-width"
-            />
-          </div>
+          <table class="form-table">
+            <tbody>
+              <tr>
+                <td class="label-cell">Recipient Peer ID *</td>
+                <td class="input-cell">
+                  <InputText
+                    v-model="createForm.toPeerID"
+                    placeholder="Enter recipient peer ID"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Network *</td>
+                <td class="input-cell">
+                  <Select
+                    v-model="createForm.network"
+                    :options="networkOptions"
+                    optionLabel="label"
+                    optionValue="value"
+                    placeholder="Select Network"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Your Wallet *</td>
+                <td class="input-cell">
+                  <Select
+                    v-model="createForm.fromWalletId"
+                    :options="createWalletOptions"
+                    optionLabel="label"
+                    optionValue="value"
+                    placeholder="Select wallet to receive payment"
+                    class="full-width"
+                    :disabled="!createForm.network"
+                  />
+                  <small v-if="!createForm.network" class="field-remark">Select a network first</small>
+                  <small v-else-if="createWalletOptions.length === 0" class="field-remark text-warning">
+                    No wallets found for {{ createForm.network }}. Create one first.
+                  </small>
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Amount *</td>
+                <td class="input-cell">
+                  <InputNumber
+                    v-model="createForm.amount"
+                    mode="decimal"
+                    :minFractionDigits="2"
+                    :maxFractionDigits="6"
+                    placeholder="0.000000"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Currency *</td>
+                <td class="input-cell">
+                  <InputText
+                    v-model="createForm.currency"
+                    placeholder="USDC (ERC-3009 required)"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Description</td>
+                <td class="input-cell">
+                  <Textarea
+                    v-model="createForm.description"
+                    rows="3"
+                    placeholder="Optional description"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Expires In (hours)</td>
+                <td class="input-cell">
+                  <InputNumber
+                    v-model="createForm.expiresInHours"
+                    :min="1"
+                    :max="168"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <template #footer>
           <Button label="Cancel" icon="pi pi-times" @click="showCreateDialog = false" text />
@@ -252,9 +270,9 @@
       </Dialog>
 
       <!-- Accept Invoice Dialog -->
-      <Dialog v-model:visible="showAcceptDialog" header="Accept Payment Invoice" :style="{width: '450px'}" modal>
+      <Dialog v-model:visible="showAcceptDialog" header="Accept Payment Invoice" :style="{width: '500px'}" modal>
         <div class="dialog-content" v-if="selectedInvoice">
-          <Message severity="info">
+          <Message severity="info" style="margin-bottom: 1rem;">
             You are about to accept this invoice and make a payment.
           </Message>
           <div class="invoice-details">
@@ -262,27 +280,39 @@
             <div><strong>Network:</strong> {{ selectedInvoice.network }}</div>
             <div><strong>Description:</strong> {{ selectedInvoice.description || 'N/A' }}</div>
           </div>
-          <div class="form-field">
-            <label>Select Wallet *</label>
-            <Select
-              v-model="acceptForm.walletId"
-              :options="compatibleWallets"
-              optionLabel="label"
-              optionValue="value"
-              placeholder="Choose wallet"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field">
-            <label>Passphrase *</label>
-            <Password
-              v-model="acceptForm.passphrase"
-              placeholder="Enter wallet passphrase"
-              toggleMask
-              :feedback="false"
-              class="full-width"
-            />
-          </div>
+          <table class="form-table">
+            <tbody>
+              <tr>
+                <td class="label-cell">Select Wallet *</td>
+                <td class="input-cell">
+                  <Select
+                    v-model="acceptForm.walletId"
+                    :options="compatibleWallets"
+                    optionLabel="label"
+                    optionValue="value"
+                    placeholder="Choose wallet"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Passphrase</td>
+                <td class="input-cell">
+                  <Password
+                    v-model="acceptForm.passphrase"
+                    placeholder="Leave empty to use stored passphrase"
+                    toggleMask
+                    :feedback="false"
+                    class="full-width"
+                  />
+                  <small class="field-remark">
+                    <i class="pi pi-info-circle"></i>
+                    If left empty, will use the passphrase stored in your keystore when the wallet was created.
+                  </small>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <template #footer>
           <Button label="Cancel" icon="pi pi-times" @click="showAcceptDialog = false" text />
@@ -292,23 +322,29 @@
             severity="success"
             @click="acceptInvoice"
             :loading="accepting"
-            :disabled="!acceptForm.walletId || !acceptForm.passphrase"
+            :disabled="!acceptForm.walletId"
           />
         </template>
       </Dialog>
 
       <!-- Reject Invoice Dialog -->
-      <Dialog v-model:visible="showRejectDialog" header="Reject Invoice" :style="{width: '400px'}" modal>
+      <Dialog v-model:visible="showRejectDialog" header="Reject Invoice" :style="{width: '500px'}" modal>
         <div class="dialog-content">
-          <div class="form-field">
-            <label>Reason (optional)</label>
-            <Textarea
-              v-model="rejectForm.reason"
-              rows="3"
-              placeholder="Why are you rejecting this invoice?"
-              class="full-width"
-            />
-          </div>
+          <table class="form-table">
+            <tbody>
+              <tr>
+                <td class="label-cell">Reason</td>
+                <td class="input-cell">
+                  <Textarea
+                    v-model="rejectForm.reason"
+                    rows="3"
+                    placeholder="Why are you rejecting this invoice? (optional)"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <template #footer>
           <Button label="Cancel" icon="pi pi-times" @click="showRejectDialog = false" text />
@@ -836,6 +872,77 @@ onUnmounted(() => {
   }
 
   .dialog-content {
+    .form-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+
+      tbody {
+        tr {
+          vertical-align: top;
+        }
+
+        tr:not(:last-child) {
+          .input-cell {
+            padding-bottom: 1rem;
+          }
+        }
+      }
+
+      .label-cell {
+        vertical-align: top;
+        padding-right: 1rem;
+        padding-top: 0.6rem;
+        font-weight: 600;
+        white-space: nowrap;
+        min-width: 160px;
+      }
+
+      .input-cell {
+        vertical-align: top;
+        width: 100%;
+
+        .full-width {
+          width: 100%;
+        }
+
+        // Force PrimeVue Password to display as flex block (maintains internal flex layout but forces new line)
+        :deep(.p-password) {
+          display: flex !important;
+          width: 100% !important;
+          position: relative;
+        }
+
+        // Force other PrimeVue components to take full width
+        :deep(.p-select),
+        :deep(.p-inputtext),
+        :deep(.p-inputnumber),
+        :deep(.p-textarea) {
+          display: block !important;
+          width: 100% !important;
+        }
+
+        small.field-remark {
+          display: block !important;
+          margin-top: 0.5rem;
+          color: #6c757d;
+          font-size: 0.875rem;
+          line-height: 1.4;
+          width: 100%;
+          clear: both;
+
+          i {
+            font-size: 0.8rem;
+            margin-right: 4px;
+          }
+        }
+
+        .text-warning {
+          color: #ffa500;
+        }
+      }
+    }
+
     .form-field {
       margin-bottom: 1.5rem;
 
@@ -885,6 +992,84 @@ onUnmounted(() => {
       span {
         text-align: right;
         word-break: break-all;
+      }
+    }
+  }
+}
+</style>
+
+<style lang="scss">
+// Global styles for dialogs (they render outside scoped component)
+.p-dialog {
+  .dialog-content {
+    .form-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+
+      tbody {
+        tr {
+          vertical-align: top;
+        }
+
+        tr:not(:last-child) {
+          .input-cell {
+            padding-bottom: 1rem;
+          }
+        }
+      }
+
+      .label-cell {
+        vertical-align: top;
+        padding-right: 1rem;
+        padding-top: 0.6rem;
+        font-weight: 600;
+        white-space: nowrap;
+        min-width: 160px;
+      }
+
+      .input-cell {
+        vertical-align: top;
+        width: 100%;
+
+        .full-width {
+          width: 100%;
+        }
+
+        // Force PrimeVue Password and Select to display as flex block (maintains internal layout)
+        .p-password,
+        .p-select {
+          display: flex !important;
+          width: 100% !important;
+          position: relative;
+        }
+
+        // Force other PrimeVue components to take full width
+        .p-inputtext,
+        .p-inputnumber,
+        .p-textarea {
+          display: block !important;
+          width: 100% !important;
+        }
+
+        small.field-remark {
+          display: block !important;
+          margin-top: 0.5rem;
+          color: #6c757d;
+          font-size: 0.875rem;
+          line-height: 1.4;
+          width: 100%;
+          clear: both;
+
+          i {
+            font-size: 0.8rem;
+            margin-right: 4px;
+          }
+        }
+
+        .text-warning {
+          color: #ffa500;
+        }
       }
     }
   }

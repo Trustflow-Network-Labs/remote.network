@@ -27,11 +27,12 @@ type JobMessageHandler struct {
 	logger        *utils.LogsManager
 	cm            *utils.ConfigManager
 	quicPeer      *QUICPeer
-	dbManager     *database.SQLiteManager // For transfer database access
+	dbManager     *database.SQLiteManager  // For transfer database access
 	knownPeers    *KnownPeersManager
 	metadataQuery *MetadataQueryService
 	ourPeerID     string
-	walletManager *payment.WalletManager // x402 wallet manager for payment signing
+	walletManager *payment.WalletManager   // x402 wallet manager for payment signing
+	escrowManager *payment.EscrowManager   // x402 escrow manager for payment verification
 	// Callbacks for job operations
 	onJobRequest              func(*types.JobExecutionRequest, string) (*types.JobExecutionResponse, error)
 	onJobStart                func(*types.JobStartRequest, string) (*types.JobStartResponse, error)
@@ -65,12 +66,13 @@ func NewJobMessageHandler(cm *utils.ConfigManager, quicPeer *QUICPeer) *JobMessa
 	}
 }
 
-// SetDependencies sets the additional dependencies needed for relay forwarding
-func (jmh *JobMessageHandler) SetDependencies(dbManager *database.SQLiteManager, knownPeers *KnownPeersManager, metadataQuery *MetadataQueryService, ourPeerID string) {
+// SetDependencies sets the additional dependencies needed for relay forwarding and x402 payments
+func (jmh *JobMessageHandler) SetDependencies(dbManager *database.SQLiteManager, knownPeers *KnownPeersManager, metadataQuery *MetadataQueryService, ourPeerID string, escrowManager *payment.EscrowManager) {
 	jmh.dbManager = dbManager
 	jmh.knownPeers = knownPeers
 	jmh.metadataQuery = metadataQuery
 	jmh.ourPeerID = ourPeerID
+	jmh.escrowManager = escrowManager
 }
 
 // SetCallbacks sets the callback functions for job operations
@@ -879,37 +881,55 @@ func (jmh *JobMessageHandler) SendJobRequest(peerID string, request *types.JobEx
 
 	// GENERATE PAYMENT SIGNATURE (x402 protocol)
 	// Check if service requires payment and generate signature
-	if request.ServiceID > 0 && jmh.dbManager != nil && jmh.walletManager != nil {
-		service, err := jmh.dbManager.GetService(request.ServiceID)
+	// IMPORTANT: For remote services, we must NOT query local services table with remote service_id
+	// Instead, get pricing from workflow_node which was stored when service was discovered
+	if request.ServiceID > 0 && request.WorkflowJobID > 0 && jmh.dbManager != nil && jmh.walletManager != nil {
+		// Get workflow_job to find node_id
+		workflowJob, err := jmh.dbManager.GetWorkflowJobByID(request.WorkflowJobID)
 		if err != nil {
-			jmh.logger.Warn(fmt.Sprintf("Failed to get service %d for payment check: %v", request.ServiceID, err), "job_handler")
-		} else if service != nil && service.PricingAmount > 0 {
-			// Service requires payment - generate payment signature
+			jmh.logger.Warn(fmt.Sprintf("Failed to get workflow_job %d for payment check: %v", request.WorkflowJobID, err), "job_handler")
+		} else if workflowJob != nil {
+			// Get workflow_node to get stored pricing (from remote service discovery)
+			workflowNode, err := jmh.dbManager.GetWorkflowNodeByID(workflowJob.NodeID)
+			if err != nil {
+				jmh.logger.Warn(fmt.Sprintf("Failed to get workflow_node %d for payment check: %v", workflowJob.NodeID, err), "job_handler")
+			} else if workflowNode != nil && workflowNode.PricingAmount > 0 {
+				// Service requires payment - generate payment signature using workflow_node pricing
 
-			// 1. Get service's accepted payment networks (empty = any network accepted)
-			acceptedNetworks := service.AcceptedPaymentNetworks
-			if len(acceptedNetworks) == 0 {
-				// Empty list means service accepts any network
-				// Use config chain ID as fallback for backward compatibility
-				acceptedNetworks = []string{jmh.cm.GetConfigWithDefault("x402_chain_id", "eip155:84532")}
-				jmh.logger.Debug(fmt.Sprintf("Service %d accepts any payment network, using config default: %v",
-					request.ServiceID, acceptedNetworks), "job_handler")
+			// 1. Query provider's capabilities to get their available wallet networks
+			jmh.logger.Debug(fmt.Sprintf("Querying provider %s capabilities to find compatible payment network", peerID[:8]), "job_handler")
+			providerWalletNetworks, err := jmh.getProviderWalletNetworks(peerID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get provider wallet networks: %v", err)
 			}
 
-			// 2. Get default wallet ID for priority
+			if len(providerWalletNetworks) == 0 {
+				return nil, fmt.Errorf("provider %s has no wallets configured - cannot accept payment", peerID[:8])
+			}
+
+			jmh.logger.Info(fmt.Sprintf("Provider %s has wallets on networks: %v", peerID[:8], providerWalletNetworks), "job_handler")
+
+			// 2. Determine accepted payment networks
+			// For remote services, we accept payment on ANY network the provider has a wallet for
+			// (AcceptedPaymentNetworks is not stored in workflow_node, only on the executor's service)
+			acceptedNetworks := providerWalletNetworks
+			jmh.logger.Debug(fmt.Sprintf("Service %d accepts payment on any provider wallet network: %v",
+				request.ServiceID, acceptedNetworks), "job_handler")
+
+			// 3. Get default wallet ID for priority
 			defaultWalletID := jmh.cm.GetConfigWithDefault("x402_default_wallet_id", "")
 
-			// 3. Select best wallet matching accepted networks
+			// 4. Select best wallet matching provider's networks
 			wallet, walletID, err := jmh.walletManager.SelectBestWallet(acceptedNetworks, defaultWalletID)
 			if err != nil {
-				return nil, fmt.Errorf("no compatible wallet found for service %d: %v (service accepts: %v)",
-					request.ServiceID, err, acceptedNetworks)
+				return nil, fmt.Errorf("no compatible wallet found: payer has no wallet on networks %v (provider accepts: %v)",
+					acceptedNetworks, providerWalletNetworks)
 			}
 
-			jmh.logger.Info(fmt.Sprintf("Selected wallet %s (network: %s) for service %d (accepted networks: %v)",
-				walletID, wallet.Network, request.ServiceID, acceptedNetworks), "job_handler")
+			jmh.logger.Info(fmt.Sprintf("Selected wallet %s (network: %s) for payment to provider %s",
+				walletID, wallet.Network, peerID[:8]), "job_handler")
 
-			// 4. Get wallet passphrase from config or environment
+			// 5. Get wallet passphrase from config or environment
 			// In production, this should be prompted or retrieved from secure storage
 			passphrase := jmh.cm.GetConfigWithDefault("x402_wallet_passphrase", "")
 			if passphrase == "" {
@@ -917,18 +937,44 @@ func (jmh *JobMessageHandler) SendJobRequest(peerID string, request *types.JobEx
 				jmh.logger.Warn("No wallet passphrase configured, using empty passphrase (INSECURE)", "job_handler")
 			}
 
-			// 5. Sign payment with selected wallet's network
+			// 6. Normalize wallet network (handle Solana aliases)
+			normalizedNetwork := payment.NormalizeSolanaNetwork(wallet.Network)
+
+			// 7. For Solana networks, query facilitator for fee payer address
+			metadata := map[string]interface{}{
+				"service_id":      request.ServiceID,
+				"workflow_id":     request.WorkflowID,
+				"workflow_job_id": request.WorkflowJobID,
+			}
+
+			if payment.IsSolanaNetwork(normalizedNetwork) && jmh.escrowManager != nil {
+				// Query facilitator's /supported endpoint to get feePayer for Solana
+				feePayer, err := jmh.escrowManager.GetX402Client().GetSolanaFeePayer(context.Background(), normalizedNetwork)
+				if err != nil {
+					jmh.logger.Warn(fmt.Sprintf("Failed to get Solana fee payer from facilitator: %v (payment may fail)", err), "job_handler")
+				} else {
+					metadata["solana_fee_payer"] = feePayer
+					jmh.logger.Debug(fmt.Sprintf("Got Solana fee payer from facilitator: %s", feePayer), "job_handler")
+				}
+			}
+
+			// 8. Query recipient's wallet address for the selected payment network
+			recipientWalletAddr, err := jmh.getRecipientWalletAddress(peerID, normalizedNetwork)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get recipient wallet address: %v", err)
+			}
+
+			jmh.logger.Info(fmt.Sprintf("Recipient %s wallet address for network %s: %s",
+				peerID[:8], normalizedNetwork, recipientWalletAddr[:8]+"..."), "job_handler")
+
+			// 9. Sign payment with selected wallet's network
 			paymentData := &payment.PaymentData{
-				Amount:      service.PricingAmount,
+				Amount:      workflowNode.PricingAmount,  // Use pricing from workflow_node, not local services table
 				Currency:    "USDC",
-				Network:     wallet.Network, // Use wallet's network, not config chain ID
-				Recipient:   peerID,         // Payment goes to service provider
+				Network:     normalizedNetwork,       // Use normalized network (full CAIP-2)
+				Recipient:   recipientWalletAddr,     // Payment goes to recipient's wallet address
 				Description: fmt.Sprintf("Job execution for service %d", request.ServiceID),
-				Metadata: map[string]interface{}{
-					"service_id":      request.ServiceID,
-					"workflow_id":     request.WorkflowID,
-					"workflow_job_id": request.WorkflowJobID,
-				},
+				Metadata:    metadata,
 			}
 
 			paymentSig, err := jmh.walletManager.SignPayment(walletID, paymentData, passphrase)
@@ -940,7 +986,8 @@ func (jmh *JobMessageHandler) SendJobRequest(peerID string, request *types.JobEx
 			request.PaymentSignature = paymentSig
 
 			jmh.logger.Info(fmt.Sprintf("Payment signature generated for service %d (amount: %.6f %s, wallet: %s, network: %s)",
-				request.ServiceID, paymentSig.Amount, paymentSig.Currency, walletID, wallet.Network), "job_handler")
+				request.ServiceID, paymentSig.Amount, paymentSig.Currency, walletID, normalizedNetwork), "job_handler")
+			}
 		}
 	}
 
@@ -1757,6 +1804,193 @@ func (jmh *JobMessageHandler) doSendJobRequest(peerID string, jobRequestBytes []
 
 	jmh.logger.Info(fmt.Sprintf("Received job response from peer %s via relay: accepted=%v", peerID[:8], response.Accepted), "job_handler")
 	return &response, nil
+}
+
+// getRecipientWalletAddress queries the recipient's wallet address via QUIC connection (works for both direct and NAT peers)
+func (jmh *JobMessageHandler) getRecipientWalletAddress(peerID string, network string) (string, error) {
+	// Create capabilities request message
+	capReqMsg := CreateCapabilitiesRequest()
+	capReqBytes, err := capReqMsg.Marshal()
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal capabilities request: %v", err)
+	}
+
+	// Send capabilities request via QUIC (handles both direct and NAT/relay connections)
+	jmh.logger.Debug(fmt.Sprintf("Querying wallet address from peer %s for network %s", peerID[:8], network), "job_handler")
+
+	// Ensure connection exists - if not, try to establish one first
+	if err := jmh.ensurePeerConnection(peerID); err != nil {
+		jmh.logger.Debug(fmt.Sprintf("Failed to establish connection to peer %s: %v", peerID[:8], err), "job_handler")
+		// Continue anyway - SendMessageWithResponse will handle relay fallback
+	}
+
+	// Try direct connection first, then relay (using the working doSendMessageWithResponse)
+	responseBytes, err := jmh.quicPeer.SendMessageWithResponse(peerID, capReqBytes)
+	if err != nil {
+		jmh.logger.Debug(fmt.Sprintf("Direct capabilities query failed, trying via relay: %v", err), "job_handler")
+		// Fallback to relay if direct connection fails - use the proven working relay method
+		responseBytes, err = jmh.doSendMessageWithResponse(peerID, capReqBytes, "capabilities_request")
+		if err != nil {
+			return "", fmt.Errorf("failed to query capabilities: %v", err)
+		}
+	}
+
+	// Parse response
+	responseMsg, err := UnmarshalQUICMessage(responseBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse capabilities response: %v", err)
+	}
+
+	var capResp CapabilitiesResponseData
+	if err := responseMsg.GetDataAs(&capResp); err != nil {
+		return "", fmt.Errorf("failed to parse capabilities response data: %v", err)
+	}
+
+	// Check for errors
+	if capResp.Error != "" {
+		return "", fmt.Errorf("capabilities query error: %s", capResp.Error)
+	}
+
+	// Check if capabilities include wallet information
+	if capResp.Capabilities == nil || capResp.Capabilities.Wallets == nil {
+		return "", fmt.Errorf("recipient %s has no wallet information available", peerID[:8])
+	}
+
+	// Look for wallet address for the requested network
+	if walletAddr, ok := capResp.Capabilities.Wallets[network]; ok && walletAddr != "" {
+		jmh.logger.Debug(fmt.Sprintf("Found wallet address for peer %s on network %s: %s", peerID[:8], network, walletAddr[:8]+"..."), "job_handler")
+		return walletAddr, nil
+	}
+
+	// Get list of available networks for error message
+	availableNetworks := make([]string, 0, len(capResp.Capabilities.Wallets))
+	for net := range capResp.Capabilities.Wallets {
+		availableNetworks = append(availableNetworks, net)
+	}
+
+	return "", fmt.Errorf("recipient %s does not have a wallet for network %s (available networks: %v)",
+		peerID[:8], network, availableNetworks)
+}
+
+// ensurePeerConnection attempts to establish a connection to a peer if one doesn't exist
+func (jmh *JobMessageHandler) ensurePeerConnection(peerID string) error {
+	// Check if connection already exists
+	if _, err := jmh.quicPeer.GetConnectionByPeerID(peerID); err == nil {
+		return nil // Connection exists
+	}
+
+	// Get peer from database
+	peer, err := jmh.knownPeers.GetKnownPeer(peerID, "remote-network-mesh")
+	if err != nil || peer == nil {
+		return fmt.Errorf("peer %s not found in known_peers", peerID[:8])
+	}
+
+	// Query DHT for metadata to get connection info
+	if len(peer.PublicKey) == 0 {
+		return fmt.Errorf("peer %s has no public key", peerID[:8])
+	}
+
+	metadata, err := jmh.metadataQuery.QueryMetadata(peerID, peer.PublicKey)
+	if err != nil {
+		return fmt.Errorf("failed to query peer metadata: %v", err)
+	}
+
+	// Check if peer is publicly accessible
+	if metadata.NetworkInfo.PublicIP != "" && metadata.NetworkInfo.PublicPort > 0 {
+		peerAddr := fmt.Sprintf("%s:%d", metadata.NetworkInfo.PublicIP, metadata.NetworkInfo.PublicPort)
+		jmh.logger.Debug(fmt.Sprintf("Connecting to peer %s at %s", peerID[:8], peerAddr), "job_handler")
+		_, err := jmh.quicPeer.ConnectToPeer(peerAddr)
+		if err != nil {
+			return fmt.Errorf("failed to connect to peer: %v", err)
+		}
+		jmh.logger.Info(fmt.Sprintf("Established connection to peer %s at %s", peerID[:8], peerAddr), "job_handler")
+		return nil
+	}
+
+	return fmt.Errorf("peer %s has no public address (may require relay)", peerID[:8])
+}
+
+// getProviderWalletNetworks queries the provider's available wallet networks via QUIC connection
+func (jmh *JobMessageHandler) getProviderWalletNetworks(peerID string) ([]string, error) {
+	// Create capabilities request message
+	capReqMsg := CreateCapabilitiesRequest()
+	capReqBytes, err := capReqMsg.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal capabilities request: %v", err)
+	}
+
+	// Send capabilities request via QUIC (handles both direct and NAT/relay connections)
+	jmh.logger.Debug(fmt.Sprintf("Querying wallet networks from peer %s", peerID[:8]), "job_handler")
+
+	// Ensure connection exists - if not, try to establish one first
+	if err := jmh.ensurePeerConnection(peerID); err != nil {
+		jmh.logger.Debug(fmt.Sprintf("Failed to establish connection to peer %s: %v", peerID[:8], err), "job_handler")
+		// Continue anyway - SendMessageWithResponse will handle relay fallback
+	}
+
+	// Try direct connection first, then relay (using the working doSendMessageWithResponse)
+	responseBytes, err := jmh.quicPeer.SendMessageWithResponse(peerID, capReqBytes)
+	if err != nil {
+		jmh.logger.Debug(fmt.Sprintf("Direct capabilities query failed, trying via relay: %v", err), "job_handler")
+		// Fallback to relay if direct connection fails - use the proven working relay method
+		responseBytes, err = jmh.doSendMessageWithResponse(peerID, capReqBytes, "capabilities_request")
+		if err != nil {
+			return nil, fmt.Errorf("failed to query capabilities: %v", err)
+		}
+	}
+
+	// Parse response
+	responseMsg, err := UnmarshalQUICMessage(responseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse capabilities response: %v", err)
+	}
+
+	var capResp CapabilitiesResponseData
+	if err := responseMsg.GetDataAs(&capResp); err != nil {
+		return nil, fmt.Errorf("failed to parse capabilities response data: %v", err)
+	}
+
+	// Check for errors
+	if capResp.Error != "" {
+		return nil, fmt.Errorf("capabilities query error: %s", capResp.Error)
+	}
+
+	// Check if capabilities include wallet information
+	if capResp.Capabilities == nil || capResp.Capabilities.Wallets == nil {
+		return nil, fmt.Errorf("provider %s has no wallet information available", peerID[:8])
+	}
+
+	// Extract all wallet networks (map keys)
+	networks := make([]string, 0, len(capResp.Capabilities.Wallets))
+	for network := range capResp.Capabilities.Wallets {
+		networks = append(networks, network)
+	}
+
+	if len(networks) == 0 {
+		return nil, fmt.Errorf("provider %s has empty wallet list", peerID[:8])
+	}
+
+	jmh.logger.Debug(fmt.Sprintf("Provider %s has %d wallet networks: %v", peerID[:8], len(networks), networks), "job_handler")
+	return networks, nil
+}
+
+// intersectNetworks returns the intersection of two network lists
+func intersectNetworks(networks1, networks2 []string) []string {
+	// Create a map for fast lookup
+	networkMap := make(map[string]bool)
+	for _, network := range networks1 {
+		networkMap[network] = true
+	}
+
+	// Find common networks
+	intersection := make([]string, 0)
+	for _, network := range networks2 {
+		if networkMap[network] {
+			intersection = append(intersection, network)
+		}
+	}
+
+	return intersection
 }
 
 // Close closes the job message handler

@@ -167,6 +167,12 @@ func createFreshKeystore(keystorePath string, passphraseFile string, config *uti
 	}, nil
 }
 
+// GetKeystorePassphrase retrieves the keystore passphrase from file/keyring (exported for WalletManager)
+// This allows other components to access the keystore passphrase securely without storing it in memory
+func GetKeystorePassphrase(config *utils.ConfigManager) (string, error) {
+	return getPassphrase("", false, config)
+}
+
 // getPassphrase prompts the user for a passphrase or reads from file/keyring
 func getPassphrase(passphraseFile string, isNewKeystore bool, config *utils.ConfigManager) (string, error) {
 	// Priority 1: Check if passphrase file is provided via CLI flag (for automated deployments)

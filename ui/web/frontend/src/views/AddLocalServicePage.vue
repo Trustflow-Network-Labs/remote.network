@@ -74,23 +74,18 @@
                   <span class="pricing-currency-label">USDC</span>
                 </div>
                 <small class="field-help">Price in USDC for this service</small>
-              </div>
-
-              <div class="field" style="margin-top: 1rem;">
-                <label for="payment-networks">{{ $t('message.services.acceptedPaymentNetworks') }} *</label>
-                <MultiSelect
-                  id="payment-networks"
-                  v-model="serviceData.acceptedPaymentNetworks"
-                  :options="paymentNetworks"
-                  optionLabel="label"
-                  optionValue="value"
-                  placeholder="Select blockchain networks"
-                  display="chip"
-                  class="w-full"
-                  :class="{ 'p-invalid': errors.acceptedPaymentNetworks }"
-                />
-                <small class="field-help">Blockchain networks accepted for USDC payments</small>
-                <small v-if="errors.acceptedPaymentNetworks" class="p-error">{{ errors.acceptedPaymentNetworks }}</small>
+                <Message v-if="serviceData.pricingAmount > 0 && !hasWallets" severity="warn" :closable="false" style="margin-top: 0.5rem;">
+                  <div style="display: flex; align-items: flex-start; gap: 0.75rem;">
+                    <i class="pi pi-exclamation-triangle" style="font-size: 1.25rem;"></i>
+                    <div>
+                      <strong>No wallet configured</strong>
+                      <p style="margin: 0.25rem 0 0 0; font-size: 0.9rem;">
+                        You need at least one wallet to receive payments for this paid service.
+                        <router-link to="/wallets" style="color: inherit; text-decoration: underline;">Create a wallet</router-link> first.
+                      </p>
+                    </div>
+                  </div>
+                </Message>
               </div>
 
               <div class="field" style="margin-top: 1rem;">
@@ -581,7 +576,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useToast } from 'primevue/usetoast'
@@ -595,11 +590,12 @@ import InputText from 'primevue/inputtext'
 import Textarea from 'primevue/textarea'
 import InputNumber from 'primevue/inputnumber'
 import Select from 'primevue/select'
-import MultiSelect from 'primevue/multiselect'
 import Button from 'primevue/button'
 import SplitButton from 'primevue/splitbutton'
+import Message from 'primevue/message'
 
 import { useServicesStore } from '../stores/services'
+import { useWalletsStore } from '../stores/wallets'
 import { useChunkedFileUpload } from '../composables/useChunkedFileUpload'
 import { useWebSocket } from '../composables/useWebSocket'
 import { api } from '../services/api'
@@ -610,12 +606,16 @@ const router = useRouter()
 const { t } = useI18n()
 const toast = useToast()
 const servicesStore = useServicesStore()
+const walletsStore = useWalletsStore()
 const { uploadMultipleFiles, currentFileIndex, totalFilesCount } = useChunkedFileUpload()
 const { subscribe, MessageType } = useWebSocket()
 
 // Wizard state
 const activeStep = ref('1')
 const isCreating = ref(false)
+
+// Check if user has any wallets (for payment warnings)
+const hasWallets = computed(() => walletsStore.totalWallets > 0)
 
 // Interface review dialog state
 const showInterfaceDialog = ref(false)
@@ -631,7 +631,6 @@ const serviceData = ref({
   name: '',
   description: '',
   pricingAmount: 0,
-  acceptedPaymentNetworks: ['eip155:84532'] as string[], // Default to Base Sepolia testnet
   pricingType: 'ONE_TIME' as 'ONE_TIME' | 'RECURRING',
   pricingInterval: 1,
   pricingUnit: 'MONTHS' as 'SECONDS' | 'MINUTES' | 'HOURS' | 'DAYS' | 'WEEKS' | 'MONTHS' | 'YEARS',
@@ -668,7 +667,6 @@ const serviceData = ref({
 const errors = ref({
   name: '',
   serviceType: '',
-  acceptedPaymentNetworks: '',
   files: '',
   dockerImageName: '',
   dockerGitRepo: '',
@@ -701,17 +699,8 @@ const pricingUnits = computed(() => [
   { label: t('message.services.years'), value: 'YEARS' }
 ])
 
-// Payment networks
-const paymentNetworks = computed(() => [
-  { label: 'Base Mainnet', value: 'eip155:8453' },
-  { label: 'Base Sepolia (Testnet)', value: 'eip155:84532' },
-  { label: 'Ethereum Mainnet', value: 'eip155:1' },
-  { label: 'Polygon', value: 'eip155:137' },
-  { label: 'Arbitrum', value: 'eip155:42161' },
-  { label: 'Optimism', value: 'eip155:10' },
-  { label: 'Solana Mainnet', value: 'solana:mainnet-beta' },
-  { label: 'Solana Devnet', value: 'solana:devnet' }
-])
+// Payment networks are now auto-detected from provider's wallets at payment time
+// No need to fetch or display during service creation
 
 // Service types with descriptions
 const serviceTypes = computed(() => [
@@ -843,7 +832,6 @@ function validateStep(step: number): boolean {
   errors.value = {
     name: '',
     serviceType: '',
-    acceptedPaymentNetworks: '',
     files: '',
     dockerImageName: '',
     dockerGitRepo: '',
@@ -862,10 +850,7 @@ function validateStep(step: number): boolean {
   }
 
   if (step === 2) {
-    if (!serviceData.value.acceptedPaymentNetworks || serviceData.value.acceptedPaymentNetworks.length === 0) {
-      errors.value.acceptedPaymentNetworks = t('message.services.networksRequired')
-      return false
-    }
+    // Payment networks are optional - auto-detected from provider's wallets
   }
 
   if (step === 3) {
@@ -1013,8 +998,7 @@ async function finishWizard() {
         pricing_amount: serviceData.value.pricingAmount,
         pricing_type: serviceData.value.pricingType,
         pricing_interval: serviceData.value.pricingInterval,
-        pricing_unit: serviceData.value.pricingUnit,
-        accepted_payment_networks: serviceData.value.acceptedPaymentNetworks
+        pricing_unit: serviceData.value.pricingUnit
       })
 
       toast.add({
@@ -1071,8 +1055,7 @@ async function finishWizard() {
               image_tag: serviceData.value.dockerImageTag || 'latest',
               description: serviceData.value.description,
               username: serviceData.value.dockerUsername,
-              password: serviceData.value.dockerPassword,
-              accepted_payment_networks: serviceData.value.acceptedPaymentNetworks
+              password: serviceData.value.dockerPassword
             })
             break
 
@@ -1083,8 +1066,7 @@ async function finishWizard() {
               branch: serviceData.value.dockerGitBranch || 'main',
               username: serviceData.value.dockerGitUsername,
               password: serviceData.value.dockerGitPassword,
-              description: serviceData.value.description,
-              accepted_payment_networks: serviceData.value.acceptedPaymentNetworks
+              description: serviceData.value.description
             })
             break
 
@@ -1092,8 +1074,7 @@ async function finishWizard() {
             response = await api.createDockerFromLocal({
               service_name: serviceData.value.name,
               local_path: serviceData.value.dockerLocalPath,
-              description: serviceData.value.description,
-              accepted_payment_networks: serviceData.value.acceptedPaymentNetworks
+              description: serviceData.value.description
             })
             break
         }
@@ -1170,8 +1151,7 @@ async function finishWizard() {
             working_directory: serviceData.value.standaloneWorkdir || undefined,
             environment_variables: Object.keys(envVars).length > 0 ? envVars : undefined,
             timeout_seconds: serviceData.value.standaloneTimeout || 600,
-            description: serviceData.value.description,
-            accepted_payment_networks: serviceData.value.acceptedPaymentNetworks
+            description: serviceData.value.description
           })
 
           toast.add({
@@ -1201,8 +1181,7 @@ async function finishWizard() {
             pricing_amount: serviceData.value.pricingAmount,
             pricing_type: serviceData.value.pricingType,
             pricing_interval: serviceData.value.pricingInterval,
-            pricing_unit: serviceData.value.pricingUnit,
-            accepted_payment_networks: serviceData.value.acceptedPaymentNetworks
+            pricing_unit: serviceData.value.pricingUnit
           })
 
           toast.add({
@@ -1292,8 +1271,7 @@ async function finishWizard() {
             timeout_seconds: serviceData.value.standaloneTimeout || 600,
             username: serviceData.value.standaloneGitUsername || undefined,
             password: serviceData.value.standaloneGitPassword || undefined,
-            description: serviceData.value.description,
-            accepted_payment_networks: serviceData.value.acceptedPaymentNetworks
+            description: serviceData.value.description
           })
 
           toast.add({
@@ -1346,6 +1324,14 @@ async function handleInterfaceConfirm(data: { interfaces: any[], entrypoint: str
       })
     }
 
+    // Update pricing information (which was entered in Step 2 but not saved during creation)
+    await api.updateServicePricing(serviceId, {
+      pricing_amount: serviceData.value.pricingAmount,
+      pricing_type: serviceData.value.pricingType,
+      pricing_interval: serviceData.value.pricingInterval,
+      pricing_unit: serviceData.value.pricingUnit
+    })
+
     toast.add({
       severity: 'success',
       summary: t('message.common.success'),
@@ -1374,6 +1360,11 @@ function handleInterfaceCancel() {
 function goBack() {
   router.push('/services')
 }
+
+// Fetch wallets for payment warnings
+onMounted(async () => {
+  await walletsStore.fetchWallets()
+})
 </script>
 
 <style scoped lang="scss">

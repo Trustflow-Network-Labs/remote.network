@@ -34,11 +34,16 @@
         <Card v-for="wallet in wallets" :key="wallet.wallet_id" class="wallet-card">
           <template #header>
             <div class="wallet-header">
-              <div class="network-badge" :class="`network-${getNetworkName(wallet.network)}`">
-                {{ getNetworkName(wallet.network).toUpperCase() }}
+              <div class="header-badges">
+                <div class="network-badge" :class="`network-${getNetworkName(wallet.network)}`">
+                  {{ getNetworkName(wallet.network).toUpperCase() }}
+                </div>
+                <div v-if="wallet.is_default" class="default-badge">
+                  DEFAULT
+                </div>
               </div>
               <Select
-                :options="walletActions"
+                :options="getWalletActions(wallet)"
                 optionLabel="label"
                 placeholder="Actions"
                 @change="handleWalletAction($event, wallet)"
@@ -58,21 +63,24 @@
           <template #content>
             <div class="wallet-info">
               <div class="balance-section">
-                <div class="balance-label">Balance</div>
-                <div class="balance-value" v-if="wallet.balance">
-                  {{ wallet.balance.balance.toFixed(6) }} {{ wallet.balance.currency }}
+                <div class="balance-header">
+                  <div class="balance-label">Balance</div>
+                  <i
+                    class="pi pi-refresh reload-icon"
+                    @click="loadBalance(wallet.wallet_id)"
+                    :class="{ 'pi-spin': walletsStore.balanceLoading.get(wallet.wallet_id) }"
+                  ></i>
                 </div>
-                <Button
-                  v-else
-                  label="Load Balance"
-                  icon="pi pi-sync"
-                  size="small"
-                  @click="loadBalance(wallet.wallet_id)"
-                  :loading="walletsStore.balanceLoading.get(wallet.wallet_id)"
-                />
+                <div class="balance-value">
+                  <template v-if="wallet.balance">
+                    {{ wallet.balance.balance.toFixed(6) }} {{ wallet.balance.currency }}
+                  </template>
+                  <template v-else>
+                    <ProgressSpinner style="width:20px;height:20px" strokeWidth="4" />
+                  </template>
+                </div>
               </div>
               <div class="wallet-meta">
-                <div><strong>ID:</strong> {{ wallet.wallet_id.substring(0, 8) }}...</div>
                 <div><strong>Network:</strong> {{ wallet.network }}</div>
                 <div><strong>Created:</strong> {{ formatDate(wallet.created_at) }}</div>
               </div>
@@ -87,30 +95,41 @@
       </div>
 
       <!-- Create Wallet Dialog -->
-      <Dialog v-model:visible="showCreateDialog" header="Create New Wallet" :style="{width: '450px'}" modal>
+      <Dialog v-model:visible="showCreateDialog" header="Create New Wallet" :style="{width: '500px'}" modal>
         <div class="dialog-content">
-          <div class="form-field">
-            <label>Network</label>
-            <Select
-              v-model="createForm.network"
-              :options="networkOptions"
-              optionLabel="label"
-              optionValue="value"
-              placeholder="Select Network"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field">
-            <label>Passphrase</label>
-            <Password
-              v-model="createForm.passphrase"
-              placeholder="Enter passphrase"
-              toggleMask
-              :feedback="false"
-              class="full-width"
-            />
-            <small>Used to encrypt the wallet. Keep it safe!</small>
-          </div>
+          <table class="form-table">
+            <tbody>
+              <tr>
+                <td class="label-cell">Network</td>
+                <td class="input-cell">
+                  <Select
+                    v-model="createForm.network"
+                    :options="networkOptions"
+                    optionLabel="label"
+                    optionValue="value"
+                    placeholder="Select Network"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Passphrase</td>
+                <td class="input-cell">
+                  <Password
+                    v-model="createForm.passphrase"
+                    placeholder="Enter passphrase"
+                    toggleMask
+                    :feedback="false"
+                    class="full-width"
+                  />
+                  <small class="field-remark">
+                    <i class="pi pi-lock"></i>
+                    Used to encrypt the wallet. Will be stored securely in your keystore for autonomous payments (workflows, jobs).
+                  </small>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <template #footer>
           <Button label="Cancel" icon="pi pi-times" @click="showCreateDialog = false" text />
@@ -125,38 +144,52 @@
       </Dialog>
 
       <!-- Import Wallet Dialog -->
-      <Dialog v-model:visible="showImportDialog" header="Import Wallet" :style="{width: '450px'}" modal>
+      <Dialog v-model:visible="showImportDialog" header="Import Wallet" :style="{width: '500px'}" modal>
         <div class="dialog-content">
-          <div class="form-field">
-            <label>Private Key</label>
-            <Textarea
-              v-model="importForm.privateKey"
-              placeholder="Enter private key (hex)"
-              rows="3"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field">
-            <label>Network</label>
-            <Select
-              v-model="importForm.network"
-              :options="networkOptions"
-              optionLabel="label"
-              optionValue="value"
-              placeholder="Select Network"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field">
-            <label>Passphrase</label>
-            <Password
-              v-model="importForm.passphrase"
-              placeholder="Enter passphrase"
-              toggleMask
-              :feedback="false"
-              class="full-width"
-            />
-          </div>
+          <table class="form-table">
+            <tbody>
+              <tr>
+                <td class="label-cell">Private Key</td>
+                <td class="input-cell">
+                  <Textarea
+                    v-model="importForm.privateKey"
+                    placeholder="Enter private key (hex)"
+                    rows="3"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Network</td>
+                <td class="input-cell">
+                  <Select
+                    v-model="importForm.network"
+                    :options="networkOptions"
+                    optionLabel="label"
+                    optionValue="value"
+                    placeholder="Select Network"
+                    class="full-width"
+                  />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Passphrase</td>
+                <td class="input-cell">
+                  <Password
+                    v-model="importForm.passphrase"
+                    placeholder="Enter passphrase"
+                    toggleMask
+                    :feedback="false"
+                    class="full-width"
+                  />
+                  <small class="field-remark">
+                    <i class="pi pi-lock"></i>
+                    Will be stored securely in your keystore for autonomous payments.
+                  </small>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <template #footer>
           <Button label="Cancel" icon="pi pi-times" @click="showImportDialog = false" text />
@@ -176,16 +209,6 @@
           <Message severity="warn">
             This action cannot be undone. Make sure you have backed up your private key!
           </Message>
-          <div class="form-field">
-            <label>Passphrase</label>
-            <Password
-              v-model="deleteForm.passphrase"
-              placeholder="Enter passphrase to confirm"
-              toggleMask
-              :feedback="false"
-              class="full-width"
-            />
-          </div>
         </div>
         <template #footer>
           <Button label="Cancel" icon="pi pi-times" @click="showDeleteDialog = false" text />
@@ -195,34 +218,49 @@
             @click="deleteWallet"
             :loading="deleting"
             severity="danger"
-            :disabled="!deleteForm.passphrase"
           />
         </template>
       </Dialog>
 
       <!-- Export Wallet Dialog -->
-      <Dialog v-model:visible="showExportDialog" header="Export Private Key" :style="{width: '450px'}" modal>
+      <Dialog v-model:visible="showExportDialog" header="Export Private Key" :style="{width: '500px'}" modal>
         <div class="dialog-content">
-          <Message severity="warn">
+          <Message severity="warn" style="margin-bottom: 1rem;">
             Never share your private key! Anyone with access to it can control your funds.
           </Message>
-          <div class="form-field" v-if="!exportedKey">
-            <label>Passphrase</label>
-            <Password
-              v-model="exportForm.passphrase"
-              placeholder="Enter passphrase"
-              toggleMask
-              :feedback="false"
-              class="full-width"
-            />
-          </div>
-          <div class="form-field" v-if="exportedKey">
-            <label>Private Key</label>
-            <div class="key-display">
-              <code>{{ exportedKey }}</code>
-              <i class="pi pi-copy copy-icon" @click="copyText(exportedKey)"></i>
-            </div>
-          </div>
+          <table class="form-table" v-if="!exportedKey">
+            <tbody>
+              <tr>
+                <td class="label-cell">Passphrase *</td>
+                <td class="input-cell">
+                  <Password
+                    v-model="exportForm.passphrase"
+                    placeholder="Enter passphrase to confirm"
+                    toggleMask
+                    :feedback="false"
+                    class="full-width"
+                  />
+                  <small class="field-remark">
+                    <i class="pi pi-shield"></i>
+                    Required for security when exporting private keys.
+                  </small>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <table class="form-table" v-if="exportedKey">
+            <tbody>
+              <tr>
+                <td class="label-cell">Private Key</td>
+                <td class="input-cell">
+                  <div class="key-display">
+                    <code>{{ exportedKey }}</code>
+                    <i class="pi pi-copy copy-icon" @click="copyText(exportedKey)"></i>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <template #footer>
           <Button label="Close" icon="pi pi-times" @click="closeExportDialog" text />
@@ -273,21 +311,33 @@ const selectedWallet = ref<any>(null)
 // Forms
 const createForm = ref({ network: '', passphrase: '' })
 const importForm = ref({ privateKey: '', network: '', passphrase: '' })
-const deleteForm = ref({ passphrase: '' })
+const deleteForm = ref({})
 const exportForm = ref({ passphrase: '' })
+
+// Auto-refresh interval
+let balanceRefreshInterval: ReturnType<typeof setInterval> | null = null
 
 // Network options - fetched from API (intersection of facilitator and app supported networks)
 const networkOptions = ref<Array<{ label: string; value: string }>>([])
 const loadingNetworks = ref(false)
 
-// Wallet actions
-const walletActions = [
-  { label: 'Export Private Key', value: 'export', icon: 'pi pi-key' },
-  { label: 'Delete Wallet', value: 'delete', icon: 'pi pi-trash' }
-]
-
 // Computed
 const wallets = computed(() => walletsStore.wallets)
+
+// Get wallet actions based on whether it's default or not
+const getWalletActions = (wallet: any) => {
+  const actions = []
+
+  // Show "Set as Default" only if not already default
+  if (!wallet.is_default) {
+    actions.push({ label: 'Set as Default', value: 'set_default', icon: 'pi pi-star' })
+  }
+
+  actions.push({ label: 'Export Private Key', value: 'export', icon: 'pi pi-key' })
+  actions.push({ label: 'Delete Wallet', value: 'delete', icon: 'pi pi-trash' })
+
+  return actions
+}
 
 // Methods
 const refreshWallets = async () => {
@@ -366,12 +416,33 @@ const importWallet = async () => {
   }
 }
 
-const handleWalletAction = (event: any, wallet: any) => {
+const handleWalletAction = async (event: any, wallet: any) => {
   selectedWallet.value = wallet
   if (event.value.value === 'export') {
     showExportDialog.value = true
   } else if (event.value.value === 'delete') {
     showDeleteDialog.value = true
+  } else if (event.value.value === 'set_default') {
+    await setAsDefault(wallet.wallet_id)
+  }
+}
+
+const setAsDefault = async (walletId: string) => {
+  try {
+    await walletsStore.setDefaultWallet(walletId)
+    toast.add({
+      severity: 'success',
+      summary: 'Default Wallet Updated',
+      detail: 'Wallet has been set as default',
+      life: 3000
+    })
+  } catch (error: any) {
+    toast.add({
+      severity: 'error',
+      summary: 'Failed to set default wallet',
+      detail: error.message,
+      life: 5000
+    })
   }
 }
 
@@ -402,15 +473,43 @@ const deleteWallet = async () => {
   if (!selectedWallet.value) return
   deleting.value = true
   try {
-    await walletsStore.deleteWallet(selectedWallet.value.wallet_id, deleteForm.value.passphrase)
+    await walletsStore.deleteWallet(selectedWallet.value.wallet_id, '')
     toast.add({ severity: 'success', summary: 'Wallet Deleted', life: 3000 })
     showDeleteDialog.value = false
-    deleteForm.value = { passphrase: '' }
+    deleteForm.value = {}
     selectedWallet.value = null
   } catch (error: any) {
     toast.add({ severity: 'error', summary: 'Delete failed', detail: error.message, life: 5000 })
   } finally {
     deleting.value = false
+  }
+}
+
+const loadAllBalances = async () => {
+  const walletIds = wallets.value.map((w: any) => w.wallet_id)
+  for (const walletId of walletIds) {
+    try {
+      await walletsStore.refreshBalance(walletId)
+    } catch (error) {
+      console.error(`Failed to load balance for wallet ${walletId}:`, error)
+    }
+  }
+}
+
+const startBalanceAutoRefresh = () => {
+  // Initial load
+  loadAllBalances()
+
+  // Set up 10-second interval
+  balanceRefreshInterval = setInterval(() => {
+    loadAllBalances()
+  }, 10000)
+}
+
+const stopBalanceAutoRefresh = () => {
+  if (balanceRefreshInterval) {
+    clearInterval(balanceRefreshInterval)
+    balanceRefreshInterval = null
   }
 }
 
@@ -448,10 +547,14 @@ onMounted(async () => {
     fetchAllowedNetworks()
   ])
   walletsStore.subscribeToUpdates()
+
+  // Start auto-refresh for balances
+  startBalanceAutoRefresh()
 })
 
 onUnmounted(() => {
   walletsStore.unsubscribeFromUpdates()
+  stopBalanceAutoRefresh()
 })
 </script>
 
@@ -495,6 +598,12 @@ onUnmounted(() => {
       padding: 1rem;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 
+      .header-badges {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+      }
+
       .network-badge {
         padding: 0.25rem 0.75rem;
         border-radius: 1rem;
@@ -514,6 +623,17 @@ onUnmounted(() => {
           background: #14F195;
           color: #000;
         }
+      }
+
+      .default-badge {
+        padding: 0.25rem 0.75rem;
+        border-radius: 1rem;
+        font-size: 0.65rem;
+        font-weight: 700;
+        background: #FFD700;
+        color: #000;
+        letter-spacing: 0.5px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
       }
     }
 
@@ -541,10 +661,33 @@ onUnmounted(() => {
         background: #f8f9fa;
         border-radius: 0.5rem;
 
-        .balance-label {
-          font-size: 0.875rem;
-          color: #6c757d;
-          margin-bottom: 0.25rem;
+        .balance-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 0.5rem;
+
+          .balance-label {
+            font-size: 0.875rem;
+            color: #6c757d;
+          }
+
+          .reload-icon {
+            cursor: pointer;
+            color: #6c757d;
+            font-size: 1rem;
+            padding: 0.25rem;
+            transition: all 0.2s;
+
+            &:hover {
+              color: #2c3e50;
+              transform: scale(1.1);
+            }
+
+            &.pi-spin {
+              animation: spin 1s linear infinite;
+            }
+          }
         }
 
         .balance-value {
@@ -580,6 +723,73 @@ onUnmounted(() => {
   }
 
   .dialog-content {
+    .form-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+
+      tbody {
+        tr {
+          vertical-align: top;
+        }
+
+        tr:not(:last-child) {
+          .input-cell {
+            padding-bottom: 1rem;
+          }
+        }
+      }
+
+      .label-cell {
+        vertical-align: top;
+        padding-right: 1rem;
+        padding-top: 0.6rem;
+        font-weight: 600;
+        white-space: nowrap;
+        min-width: 140px;
+      }
+
+      .input-cell {
+        vertical-align: top;
+        width: 100%;
+
+        .full-width {
+          width: 100%;
+        }
+
+        // Force PrimeVue Password to display as flex block (maintains internal flex layout but forces new line)
+        :deep(.p-password) {
+          display: flex !important;
+          width: 100% !important;
+          position: relative;
+        }
+
+        // Force other PrimeVue components to take full width
+        :deep(.p-select),
+        :deep(.p-inputtext),
+        :deep(.p-inputnumber),
+        :deep(.p-textarea) {
+          display: block !important;
+          width: 100% !important;
+        }
+
+        small.field-remark {
+          display: block !important;
+          margin-top: 0.5rem;
+          color: #6c757d;
+          font-size: 0.875rem;
+          line-height: 1.4;
+          width: 100%;
+          clear: both;
+
+          i {
+            font-size: 0.8rem;
+            margin-right: 4px;
+          }
+        }
+      }
+    }
+
     .form-field {
       margin-bottom: 1.5rem;
 
@@ -620,6 +830,89 @@ onUnmounted(() => {
 
         &:hover {
           opacity: 1;
+        }
+      }
+    }
+  }
+}
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+</style>
+
+<style lang="scss">
+// Global styles for dialogs (they render outside scoped component)
+.p-dialog {
+  .dialog-content {
+    .form-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+
+      tbody {
+        tr {
+          vertical-align: top;
+        }
+
+        tr:not(:last-child) {
+          .input-cell {
+            padding-bottom: 1rem;
+          }
+        }
+      }
+
+      .label-cell {
+        vertical-align: top;
+        padding-right: 1rem;
+        padding-top: 0.6rem;
+        font-weight: 600;
+        white-space: nowrap;
+        min-width: 140px;
+      }
+
+      .input-cell {
+        vertical-align: top;
+        width: 100%;
+
+        .full-width {
+          width: 100%;
+        }
+
+        // Force PrimeVue Password and Select to display as flex block (maintains internal layout)
+        .p-password,
+        .p-select {
+          display: flex !important;
+          width: 100% !important;
+          position: relative;
+        }
+
+        // Force other PrimeVue components to take full width
+        .p-inputtext,
+        .p-inputnumber,
+        .p-textarea {
+          display: block !important;
+          width: 100% !important;
+        }
+
+        small.field-remark {
+          display: block !important;
+          margin-top: 0.5rem;
+          color: #6c757d;
+          font-size: 0.875rem;
+          line-height: 1.4;
+          width: 100%;
+          clear: both;
+
+          i {
+            font-size: 0.8rem;
+            margin-right: 4px;
+          }
         }
       }
     }

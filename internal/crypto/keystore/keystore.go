@@ -23,9 +23,10 @@ type Keystore struct {
 
 // KeystoreData contains the decrypted keystore contents
 type KeystoreData struct {
-	Ed25519PrivateKey []byte `json:"ed25519_private_key"` // 64 bytes
-	Ed25519PublicKey  []byte `json:"ed25519_public_key"`  // 32 bytes
-	JWTSecret         []byte `json:"jwt_secret"`          // 32 bytes
+	Ed25519PrivateKey []byte            `json:"ed25519_private_key"` // 64 bytes
+	Ed25519PublicKey  []byte            `json:"ed25519_public_key"`  // 32 bytes
+	JWTSecret         []byte            `json:"jwt_secret"`          // 32 bytes
+	WalletPassphrases map[string]string `json:"wallet_passphrases,omitempty"` // wallet_id -> passphrase mapping
 }
 
 const (
@@ -245,4 +246,169 @@ func GenerateJWTSecret() ([]byte, error) {
 		return nil, fmt.Errorf("failed to generate JWT secret: %v", err)
 	}
 	return secret, nil
+}
+
+// StoreWalletPassphrase encrypts and stores a wallet passphrase in the keystore
+// This allows autonomous payment signing without user interaction
+func StoreWalletPassphrase(keystorePath string, masterPassphrase string, walletID string, walletPassphrase string) error {
+	// Load existing keystore
+	ks, err := LoadKeystore(keystorePath)
+	if err != nil {
+		return fmt.Errorf("failed to load keystore: %v", err)
+	}
+
+	// Unlock keystore with master passphrase
+	data, err := UnlockKeystore(ks, masterPassphrase)
+	if err != nil {
+		return fmt.Errorf("failed to unlock keystore: %v", err)
+	}
+
+	// Initialize wallet passphrases map if it doesn't exist (backward compatibility)
+	if data.WalletPassphrases == nil {
+		data.WalletPassphrases = make(map[string]string)
+	}
+
+	// Store the wallet passphrase
+	data.WalletPassphrases[walletID] = walletPassphrase
+
+	// Re-encrypt keystore with updated data
+	newKS, err := CreateKeystore(
+		masterPassphrase,
+		data.Ed25519PrivateKey,
+		data.Ed25519PublicKey,
+		data.JWTSecret,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to re-encrypt keystore: %v", err)
+	}
+
+	// Copy wallet passphrases to new keystore
+	newData, err := UnlockKeystore(newKS, masterPassphrase)
+	if err != nil {
+		return fmt.Errorf("failed to unlock new keystore: %v", err)
+	}
+	newData.WalletPassphrases = data.WalletPassphrases
+
+	// Marshal and encrypt again with wallet passphrases
+	plaintext, err := json.Marshal(newData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal keystore data: %v", err)
+	}
+
+	key := deriveKey(masterPassphrase, newKS.Salt)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("failed to create cipher: %v", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("failed to create GCM: %v", err)
+	}
+
+	ciphertext := gcm.Seal(nil, newKS.Nonce, plaintext, nil)
+	newKS.Data = ciphertext
+
+	// Save updated keystore
+	if err := SaveKeystore(newKS, keystorePath); err != nil {
+		return fmt.Errorf("failed to save keystore: %v", err)
+	}
+
+	return nil
+}
+
+// GetWalletPassphrase retrieves a wallet passphrase from the keystore
+func GetWalletPassphrase(keystorePath string, masterPassphrase string, walletID string) (string, error) {
+	// Load keystore
+	ks, err := LoadKeystore(keystorePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to load keystore: %v", err)
+	}
+
+	// Unlock keystore
+	data, err := UnlockKeystore(ks, masterPassphrase)
+	if err != nil {
+		return "", fmt.Errorf("failed to unlock keystore: %v", err)
+	}
+
+	// Check if wallet passphrases exist (backward compatibility)
+	if data.WalletPassphrases == nil {
+		return "", fmt.Errorf("no wallet passphrases stored in keystore")
+	}
+
+	// Get wallet passphrase
+	passphrase, exists := data.WalletPassphrases[walletID]
+	if !exists {
+		return "", fmt.Errorf("wallet passphrase not found for wallet %s", walletID)
+	}
+
+	return passphrase, nil
+}
+
+// DeleteWalletPassphrase removes a wallet passphrase from the keystore
+func DeleteWalletPassphrase(keystorePath string, masterPassphrase string, walletID string) error {
+	// Load existing keystore
+	ks, err := LoadKeystore(keystorePath)
+	if err != nil {
+		return fmt.Errorf("failed to load keystore: %v", err)
+	}
+
+	// Unlock keystore
+	data, err := UnlockKeystore(ks, masterPassphrase)
+	if err != nil {
+		return fmt.Errorf("failed to unlock keystore: %v", err)
+	}
+
+	// Check if wallet passphrases exist
+	if data.WalletPassphrases == nil {
+		return nil // Nothing to delete
+	}
+
+	// Delete the wallet passphrase
+	delete(data.WalletPassphrases, walletID)
+
+	// Re-encrypt and save keystore
+	newKS, err := CreateKeystore(
+		masterPassphrase,
+		data.Ed25519PrivateKey,
+		data.Ed25519PublicKey,
+		data.JWTSecret,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to re-encrypt keystore: %v", err)
+	}
+
+	// Copy wallet passphrases to new keystore
+	newData, err := UnlockKeystore(newKS, masterPassphrase)
+	if err != nil {
+		return fmt.Errorf("failed to unlock new keystore: %v", err)
+	}
+	newData.WalletPassphrases = data.WalletPassphrases
+
+	// Marshal and encrypt again
+	plaintext, err := json.Marshal(newData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal keystore data: %v", err)
+	}
+
+	key := deriveKey(masterPassphrase, newKS.Salt)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("failed to create cipher: %v", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("failed to create GCM: %v", err)
+	}
+
+	ciphertext := gcm.Seal(nil, newKS.Nonce, plaintext, nil)
+	newKS.Data = ciphertext
+
+	// Save updated keystore
+	if err := SaveKeystore(newKS, keystorePath); err != nil {
+		return fmt.Errorf("failed to save keystore: %v", err)
+	}
+
+	return nil
 }

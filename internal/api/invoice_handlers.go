@@ -169,15 +169,20 @@ func (s *APIServer) handleAcceptInvoice(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if req.WalletID == "" || req.Passphrase == "" {
-		s.logger.Warn(fmt.Sprintf("Missing wallet_id or passphrase in accept invoice request for %s", invoiceID), "api")
+	if req.WalletID == "" {
+		s.logger.Warn(fmt.Sprintf("Missing wallet_id in accept invoice request for %s", invoiceID), "api")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
-			"message": "Wallet ID and passphrase are required",
+			"message": "Wallet ID is required",
 		})
 		return
+	}
+
+	// Passphrase is optional - if empty, wallet manager will try to retrieve from keystore
+	if req.Passphrase == "" {
+		s.logger.Debug(fmt.Sprintf("No passphrase provided for invoice %s - will attempt to use stored passphrase", invoiceID), "api")
 	}
 
 	s.logger.Info(fmt.Sprintf("Accepting invoice %s with wallet %s", invoiceID, req.WalletID), "api")

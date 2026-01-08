@@ -177,12 +177,12 @@ func NewAPIServer(
 		}
 	})
 
-	// Initialize wallet manager (needed for service search payment compatibility checks)
-	walletManager, err := payment.NewWalletManager(config)
+	// Initialize wallet manager with database support (for default wallet + payment compatibility checks)
+	walletManager, err := payment.NewWalletManagerWithDB(config, dbManager)
 	if err != nil {
 		logger.Warn(fmt.Sprintf("Failed to initialize wallet manager: %v", err), "api_server")
 	} else {
-		logger.Info("Wallet manager initialized", "api")
+		logger.Info("Wallet manager initialized with database support", "api")
 	}
 
 	// Initialize service search handler for remote service discovery (with wallet manager for payment compatibility)
@@ -706,6 +706,13 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
+	mux.Handle("/api/wallets/set-default", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.handleSetDefaultWallet(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
 	mux.Handle("/api/wallets/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete && strings.Count(r.URL.Path, "/") == 3 {
 			s.handleDeleteWallet(w, r)
@@ -713,6 +720,12 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 			s.handleGetWalletBalance(w, r)
 		} else if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/export") {
 			s.handleExportWallet(w, r)
+		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/check-token-account") {
+			s.handleCheckTokenAccount(w, r)
+		} else if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/initialize-token-account") {
+			s.handleInitializeTokenAccount(w, r)
+		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/token-account-address") {
+			s.handleGetTokenAccountAddress(w, r)
 		} else {
 			http.Error(w, "Not found", http.StatusNotFound)
 		}

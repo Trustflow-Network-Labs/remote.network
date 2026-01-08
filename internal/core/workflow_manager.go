@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -22,6 +23,8 @@ type WorkflowManager struct {
 	logger          *utils.LogsManager
 	jobManager      *JobManager
 	peerManager     *PeerManager
+	walletManager   *payment.WalletManager
+	escrowManager   *payment.EscrowManager
 	eventEmitter    EventEmitter // Interface for broadcasting events via WebSocket
 	activeWorkflows map[int64]*WorkflowExecution // workflow_job_id -> execution
 	mu              sync.RWMutex
@@ -62,6 +65,13 @@ func NewWorkflowManager(ctx context.Context, db *database.SQLiteManager, cm *uti
 // SetEventEmitter sets the event emitter for broadcasting updates
 func (wm *WorkflowManager) SetEventEmitter(emitter EventEmitter) {
 	wm.eventEmitter = emitter
+}
+
+// SetPaymentDependencies sets the wallet and escrow managers for x402 payment integration
+func (wm *WorkflowManager) SetPaymentDependencies(walletManager *payment.WalletManager, escrowManager *payment.EscrowManager) {
+	wm.walletManager = walletManager
+	wm.escrowManager = escrowManager
+	wm.logger.Info("Payment dependencies set for workflow manager (x402 integration enabled)", "workflow_manager")
 }
 
 // Start starts the workflow manager
@@ -369,6 +379,22 @@ func (wm *WorkflowManager) executeWorkflowJobs(execution *WorkflowExecution) {
 			remoteJobExecID, err := wm.sendRemoteJobRequest(workflowJob, jobDef, nodeIDToWorkflowJobIDMap)
 			if err != nil {
 				wm.logger.Error(fmt.Sprintf("Failed to send remote job request: %v", err), "workflow_manager")
+
+				// Update workflow_job status to ERRORED with the failure reason
+				errorMsg := fmt.Sprintf("Remote job request failed: %v", err)
+				if updateErr := wm.db.UpdateWorkflowJobStatus(workflowJob.ID, "ERRORED", nil, errorMsg); updateErr != nil {
+					wm.logger.Error(fmt.Sprintf("Failed to update workflow_job %d status to ERRORED: %v", workflowJob.ID, updateErr), "workflow_manager")
+				} else {
+					wm.logger.Info(fmt.Sprintf("Workflow_job %d marked as ERRORED: %s", workflowJob.ID, errorMsg), "workflow_manager")
+
+					// Update in-memory status as well
+					execution.mu.Lock()
+					workflowJob.Status = "ERRORED"
+					workflowJob.Error = errorMsg
+					execution.WorkflowJobs[workflowJob.ID] = workflowJob
+					execution.mu.Unlock()
+				}
+
 				continue
 			}
 
@@ -462,6 +488,7 @@ func (wm *WorkflowManager) sendRemoteJobRequest(workflowJob *database.WorkflowJo
 
 	// Create job execution request WITHOUT interfaces (Phase 1)
 	// Interfaces will be sent in Phase 2 after all job_execution_ids are collected
+	// NOTE: Payment is automatically handled by JobMessageHandler.SendJobRequest
 	request := &types.JobExecutionRequest{
 		WorkflowID:          workflowJob.WorkflowID,
 		WorkflowJobID:       workflowJob.ID,  // Send workflow_job_id
@@ -1122,44 +1149,34 @@ func (wm *WorkflowManager) requestJobStatus(execution *WorkflowExecution, jobNam
 
 // checkWorkflowCompletion checks if a workflow has completed and updates its status
 func (wm *WorkflowManager) checkWorkflowCompletion(execution *WorkflowExecution) {
-	execution.mu.RLock()
-	jobExecutions := make([]*database.JobExecution, 0, len(execution.JobExecutions))
-	for _, jobExec := range execution.JobExecutions {
-		jobExecutions = append(jobExecutions, jobExec)
+	// Get ALL workflow jobs from database (including those without job_execution_id yet)
+	// This is critical for remote jobs that may still be pending acceptance
+	workflowJobs, err := wm.db.GetWorkflowJobsByExecution(execution.WorkflowExecutionID)
+	if err != nil {
+		wm.logger.Error(fmt.Sprintf("Failed to get workflow jobs for execution %d: %v", execution.WorkflowExecutionID, err), "workflow_manager")
+		return
 	}
-	execution.mu.RUnlock()
 
-	// Count job statuses - refresh from database to get latest status
-	var completed, errored, total int
-	total = len(jobExecutions)
+	// Count job statuses based on workflow_jobs table
+	var completed, errored, pending, total int
+	total = len(workflowJobs)
 
-	for _, jobExec := range jobExecutions {
-		// Refresh job status from database (important for local jobs)
-		freshJob, err := wm.db.GetJobExecution(jobExec.ID)
-		if err != nil {
-			wm.logger.Warn(fmt.Sprintf("Failed to refresh job %d status from database: %v", jobExec.ID, err), "workflow_manager")
-			// Fall back to cached status
-			freshJob = jobExec
-		}
-
-		// Update in-memory status if it changed
-		if freshJob.Status != jobExec.Status {
-			execution.mu.Lock()
-			jobExec.Status = freshJob.Status
-			jobExec.ErrorMessage = freshJob.ErrorMessage
-			execution.mu.Unlock()
-		}
-
-		switch freshJob.Status {
-		case types.JobStatusCompleted:
+	for _, workflowJob := range workflowJobs {
+		switch workflowJob.Status {
+		case "COMPLETED":
 			completed++
-		case types.JobStatusErrored, types.JobStatusCancelled:
+		case "ERRORED", "CANCELLED", "FAILED":
 			errored++
+		case "PENDING", "RUNNING", "WAITING":
+			pending++
 		}
 	}
 
-	// Check if all jobs are done
-	if completed+errored == total {
+	wm.logger.Debug(fmt.Sprintf("Workflow execution %d status: completed=%d, errored=%d, pending=%d, total=%d",
+		execution.WorkflowExecutionID, completed, errored, pending, total), "workflow_manager")
+
+	// Check if all jobs are done (no pending jobs remaining)
+	if completed+errored == total && pending == 0 {
 		var finalStatus string
 		var errorMsg string
 

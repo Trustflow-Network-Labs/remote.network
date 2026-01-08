@@ -54,14 +54,8 @@ export const useWalletsStore = defineStore('wallets', {
       try {
         const response = await api.createWallet(network, passphrase)
 
-        // Add new wallet to list
-        const newWallet: Wallet = {
-          wallet_id: response.wallet_id,
-          network: response.network,
-          address: response.address,
-          created_at: Date.now() / 1000
-        }
-        this.wallets.push(newWallet)
+        // Refresh wallets list to get is_default flag from server
+        await this.fetchWallets()
 
         return response
       } catch (error: any) {
@@ -79,14 +73,8 @@ export const useWalletsStore = defineStore('wallets', {
       try {
         const response = await api.importWallet(privateKey, network, passphrase)
 
-        // Add imported wallet to list
-        const newWallet: Wallet = {
-          wallet_id: response.wallet_id,
-          network: response.network,
-          address: response.address,
-          created_at: Date.now() / 1000
-        }
-        this.wallets.push(newWallet)
+        // Refresh wallets list to get is_default flag from server
+        await this.fetchWallets()
 
         return response
       } catch (error: any) {
@@ -145,6 +133,25 @@ export const useWalletsStore = defineStore('wallets', {
       try {
         const response = await api.exportWallet(walletId, passphrase)
         return response
+      } catch (error: any) {
+        this.error = error.response?.data?.message || error.message
+        throw error
+      }
+    },
+
+    async setDefaultWallet(walletId: string) {
+      this.error = null
+
+      try {
+        await api.setDefaultWallet(walletId)
+
+        // Update all wallets' is_default flag
+        this.wallets = this.wallets.map(w => ({
+          ...w,
+          is_default: w.wallet_id === walletId
+        }))
+
+        return true
       } catch (error: any) {
         this.error = error.response?.data?.message || error.message
         throw error

@@ -1,13 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
 )
 
@@ -175,6 +178,14 @@ func (s *APIServer) handleAddService(w http.ResponseWriter, r *http.Request) {
 	// Initialize capabilities map if nil
 	if service.Capabilities == nil {
 		service.Capabilities = make(map[string]interface{})
+	}
+
+	// Validate payment networks if specified (optional - empty means auto-detect from provider's wallets)
+	if len(service.AcceptedPaymentNetworks) > 0 {
+		if err := s.validatePaymentNetworks(service.AcceptedPaymentNetworks); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid payment networks: %v", err), http.StatusBadRequest)
+			return
+		}
 	}
 
 	err = s.dbManager.AddService(&service)
@@ -447,9 +458,12 @@ func (s *APIServer) handleUpdateServicePricing(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if len(requestBody.AcceptedPaymentNetworks) == 0 {
-		http.Error(w, "At least one payment network is required", http.StatusBadRequest)
-		return
+	// Validate payment networks if specified (optional - empty means auto-detect from provider's wallets)
+	if len(requestBody.AcceptedPaymentNetworks) > 0 {
+		if err := s.validatePaymentNetworks(requestBody.AcceptedPaymentNetworks); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid payment networks: %v", err), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Update pricing in database
@@ -709,12 +723,18 @@ func (s *APIServer) handleSetServicePaymentNetworks(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// Validate networks
+	// Validate networks (format)
 	for _, network := range req.Networks {
 		if !isValidPaymentNetwork(network) {
 			http.Error(w, fmt.Sprintf("Invalid network: %s", network), http.StatusBadRequest)
 			return
 		}
+	}
+
+	// Validate payment networks against allowed networks (facilitator + app intersection)
+	if err := s.validatePaymentNetworks(req.Networks); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid payment networks: %v", err), http.StatusBadRequest)
+		return
 	}
 
 	// Get service
@@ -843,4 +863,45 @@ func isValidPaymentNetwork(network string) bool {
 	}
 
 	return true
+}
+
+// validatePaymentNetworks validates that all networks are supported by both facilitator and app
+func (s *APIServer) validatePaymentNetworks(networks []string) error {
+	if len(networks) == 0 {
+		return nil // Empty list is valid (means accept all)
+	}
+
+	// Get allowed networks from invoice manager (intersection of facilitator and app)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	allowedNetworks, err := s.invoiceManager.GetAllowedNetworks(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get allowed networks: %w", err)
+	}
+
+	// Build map of allowed networks for fast lookup
+	allowedMap := make(map[string]bool)
+	for _, allowed := range allowedNetworks {
+		// Normalize for comparison (handles Solana aliases)
+		normalized := payment.NormalizeSolanaNetwork(allowed.CAIP2)
+		allowedMap[normalized] = true
+	}
+
+	// Validate each requested network
+	var unsupported []string
+	for _, network := range networks {
+		// Normalize network for comparison
+		normalized := payment.NormalizeSolanaNetwork(network)
+
+		if !allowedMap[normalized] {
+			unsupported = append(unsupported, network)
+		}
+	}
+
+	if len(unsupported) > 0 {
+		return fmt.Errorf("unsupported payment networks (not enabled by both facilitator and app): %v", unsupported)
+	}
+
+	return nil
 }

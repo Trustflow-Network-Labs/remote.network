@@ -412,3 +412,95 @@ func (c *X402Client) GetSolanaFeePayer(ctx context.Context, network string) (str
 
 	return "", fmt.Errorf("facilitator does not provide feePayer for network %s", network)
 }
+
+// CreateTokenAccount requests the facilitator to create a Solana token account for a recipient
+// The facilitator signs and broadcasts the transaction, paying for the account creation
+// Returns the transaction signature
+func (c *X402Client) CreateTokenAccount(
+	ctx context.Context,
+	network string,
+	recipientAddress string,
+	tokenSymbol string,
+	unsignedTransaction string,
+) (string, error) {
+	if c.facilitatorURL == "" {
+		return "", ErrFacilitatorUnavailable
+	}
+
+	// Use a custom endpoint for token account creation
+	// This is not part of the standard x402 protocol, but some facilitators may support it
+	url := c.facilitatorURL + "/create-token-account"
+
+	type CreateTokenAccountRequest struct {
+		Network             string `json:"network"`
+		RecipientAddress    string `json:"recipient_address"`
+		TokenSymbol         string `json:"token_symbol"`
+		UnsignedTransaction string `json:"unsigned_transaction"`
+	}
+
+	req := &CreateTokenAccountRequest{
+		Network:             network,
+		RecipientAddress:    recipientAddress,
+		TokenSymbol:         tokenSymbol,
+		UnsignedTransaction: unsignedTransaction,
+	}
+
+	// Marshal request body
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %v", err)
+	}
+
+	c.logger.Info(fmt.Sprintf("X402 CreateTokenAccount Request: POST %s", url), "x402_client")
+	c.logger.Debug(fmt.Sprintf("Request body: %s", string(jsonData)), "x402_client")
+
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %v", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", "remote-network-node/1.0")
+
+	// Send request
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("X402 HTTP request failed: %v", err), "x402_client")
+		return "", ErrFacilitatorUnavailable
+	}
+	defer httpResp.Body.Close()
+
+	// Read response body
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %v", err)
+	}
+
+	c.logger.Debug(fmt.Sprintf("X402 CreateTokenAccount Response: HTTP %d, Body: %s", httpResp.StatusCode, string(respBody)), "x402_client")
+
+	// Check HTTP status code
+	if httpResp.StatusCode >= 400 {
+		return "", fmt.Errorf("facilitator returned error (HTTP %d): %s", httpResp.StatusCode, string(respBody))
+	}
+
+	// Parse response
+	type CreateTokenAccountResponse struct {
+		Success     bool   `json:"success"`
+		Transaction string `json:"transaction"`
+		Message     string `json:"message"`
+		Error       string `json:"error"`
+	}
+
+	var resp CreateTokenAccountResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return "", fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if !resp.Success {
+		return "", fmt.Errorf("facilitator failed to create token account: %s", resp.Error)
+	}
+
+	c.logger.Info(fmt.Sprintf("Token account created successfully: %s", resp.Transaction), "x402_client")
+	return resp.Transaction, nil
+}

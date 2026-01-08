@@ -11,21 +11,22 @@ import (
 
 // SystemCapabilities represents the hardware and software capabilities of the current system
 type SystemCapabilities struct {
-	Platform          string    `json:"platform" bencode:"platform"`
-	Architecture      string    `json:"architecture" bencode:"architecture"`
-	KernelVersion     string    `json:"kernel_version" bencode:"kernel_version"`
-	CPUModel          string    `json:"cpu_model" bencode:"cpu_model"`
-	CPUCores          int       `json:"cpu_cores" bencode:"cpu_cores"`
-	CPUThreads        int       `json:"cpu_threads" bencode:"cpu_threads"`
-	TotalMemoryMB     int64     `json:"total_memory_mb" bencode:"total_memory_mb"`
-	AvailableMemoryMB int64     `json:"available_memory_mb" bencode:"available_memory_mb"`
-	TotalDiskMB       int64     `json:"total_disk_mb" bencode:"total_disk_mb"`
-	AvailableDiskMB   int64     `json:"available_disk_mb" bencode:"available_disk_mb"`
-	GPUs              []GPUInfo `json:"gpus,omitempty" bencode:"gpus,omitempty"`
-	HasDocker         bool      `json:"has_docker" bencode:"has_docker"`
-	DockerVersion     string    `json:"docker_version,omitempty" bencode:"docker_version,omitempty"`
-	HasPython         bool      `json:"has_python" bencode:"has_python"`
-	PythonVersion     string    `json:"python_version,omitempty" bencode:"python_version,omitempty"`
+	Platform          string            `json:"platform" bencode:"platform"`
+	Architecture      string            `json:"architecture" bencode:"architecture"`
+	KernelVersion     string            `json:"kernel_version" bencode:"kernel_version"`
+	CPUModel          string            `json:"cpu_model" bencode:"cpu_model"`
+	CPUCores          int               `json:"cpu_cores" bencode:"cpu_cores"`
+	CPUThreads        int               `json:"cpu_threads" bencode:"cpu_threads"`
+	TotalMemoryMB     int64             `json:"total_memory_mb" bencode:"total_memory_mb"`
+	AvailableMemoryMB int64             `json:"available_memory_mb" bencode:"available_memory_mb"`
+	TotalDiskMB       int64             `json:"total_disk_mb" bencode:"total_disk_mb"`
+	AvailableDiskMB   int64             `json:"available_disk_mb" bencode:"available_disk_mb"`
+	GPUs              []GPUInfo         `json:"gpus,omitempty" bencode:"gpus,omitempty"`
+	HasDocker         bool              `json:"has_docker" bencode:"has_docker"`
+	DockerVersion     string            `json:"docker_version,omitempty" bencode:"docker_version,omitempty"`
+	HasPython         bool              `json:"has_python" bencode:"has_python"`
+	PythonVersion     string            `json:"python_version,omitempty" bencode:"python_version,omitempty"`
+	Wallets           map[string]string `json:"wallets,omitempty" bencode:"wallets,omitempty"` // Map of payment network -> wallet address (e.g., {"eip155:84532": "0x123...", "solana:devnet": "ABC..."})
 }
 
 // GPUInfo represents information about a GPU

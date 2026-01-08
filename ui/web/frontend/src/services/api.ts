@@ -188,7 +188,7 @@ class APIClient {
     pricing_type: string
     pricing_interval: number
     pricing_unit: string
-    accepted_payment_networks: string[]
+    accepted_payment_networks?: string[]
   }) {
     const response = await this.client.put(`/api/services/${id}/pricing`, pricingData)
     return response.data
@@ -676,6 +676,16 @@ class APIClient {
     return response.data
   }
 
+  /**
+   * Set wallet as default
+   */
+  async setDefaultWallet(walletId: string): Promise<{ success: boolean; default_wallet_id: string }> {
+    const response = await this.client.post('/api/wallets/set-default', {
+      wallet_id: walletId
+    })
+    return response.data
+  }
+
   // ===== Invoice Management =====
 
   /**
@@ -782,6 +792,7 @@ export interface Wallet {
   network: string
   address: string
   created_at: number
+  is_default: boolean
   balance?: WalletBalance
 }
 

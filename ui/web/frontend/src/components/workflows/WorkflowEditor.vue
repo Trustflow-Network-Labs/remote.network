@@ -94,6 +94,7 @@ import InterfaceSelector from './InterfaceSelector.vue'
 import ConnectionDetailsDialog from './ConnectionDetailsDialog.vue'
 import JobConfigDialog from './JobConfigDialog.vue'
 import { useWorkflowsStore } from '../../stores/workflows'
+import { useWalletsStore } from '../../stores/wallets'
 import type { WorkflowJob, ServiceInterface } from '../../stores/workflows'
 import { api } from '../../services/api'
 
@@ -103,6 +104,7 @@ const { t } = useI18n()
 const confirm = useConfirm()
 const toast = useToast()
 const workflowsStore = useWorkflowsStore() as any // TODO: Fix Pinia typing
+const walletsStore = useWalletsStore()
 
 // Grid configuration
 const gridBoxXSize = 160
@@ -214,6 +216,16 @@ const gridStyles = computed(() => ({
   '--grid-box-x-size': `${gridBoxXSize}px`,
   '--grid-box-y-size': `${gridBoxYSize}px`,
 }))
+
+// Check if user has any wallets (for payment warnings)
+const hasWallets = computed(() => walletsStore.totalWallets > 0)
+
+// Check if workflow contains paid services
+const hasPaidJobs = computed(() => {
+  return serviceCards.value.some(card =>
+    card.job.pricing_amount && card.job.pricing_amount > 0
+  )
+})
 
 // Validate that all interfaces are connected
 const canExecuteWorkflow = computed(() => {
@@ -708,6 +720,21 @@ async function executeWorkflow() {
       summary: t('message.common.warning'),
       detail: t('message.workflows.noWorkflowToExecute'),
       life: 3000
+    })
+    return
+  }
+
+  // Check if workflow contains paid jobs but user has no wallets
+  if (hasPaidJobs.value && !hasWallets.value) {
+    confirm.require({
+      message: 'This workflow contains paid services, but you have no wallet configured. You need a wallet to pay for these services. Would you like to create a wallet now?',
+      header: 'No Wallet Configured',
+      icon: 'pi pi-exclamation-triangle',
+      acceptLabel: 'Create Wallet',
+      rejectLabel: 'Cancel',
+      accept: () => {
+        router.push({ name: 'Wallets' })
+      }
     })
     return
   }
@@ -1684,6 +1711,9 @@ async function initializeSelfPeerDraggable() {
 
 onMounted(async () => {
   initializeSnapTargets()
+
+  // Fetch wallets for payment warnings
+  await walletsStore.fetchWallets()
 
   // Add global click handler for leader-line connections
   document.addEventListener('click', (e: MouseEvent) => {

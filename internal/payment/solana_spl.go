@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 
 	"github.com/gagliardetto/solana-go"
+	associatedtokenaccount "github.com/gagliardetto/solana-go/programs/associated-token-account"
 	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -51,6 +53,13 @@ func NewSolanaSPLSignerWithConfig(rpcEndpoint string, config interface{}) *Solan
 // 1. SetComputeUnitLimit
 // 2. SetComputeUnitPrice
 // 3. TransferChecked (SPL token transfer with decimals)
+//
+// IMPORTANT: The recipient MUST have their Associated Token Account (ATA) for the token already created.
+// New wallets receiving SPL tokens for the first time need to initialize their token account first.
+// This can be done by:
+//   - Sending themselves a tiny amount of the token from another wallet
+//   - Using the Solana CLI: spl-token create-account <mint-address>
+//   - Using wallet apps that auto-create token accounts
 //
 // Parameters:
 //   - feePayer: The facilitator's public key (will complete signing and pay fees)
@@ -268,4 +277,161 @@ func IsSolanaNetwork(network string) bool {
 	default:
 		return false
 	}
+}
+
+// CheckTokenAccountExists checks if a wallet has an Associated Token Account for a specific token
+func (s *SolanaSPLSigner) CheckTokenAccountExists(ctx context.Context, wallet solana.PublicKey, tokenMint solana.PublicKey) (bool, error) {
+	// Calculate the Associated Token Account address
+	ata, _, err := solana.FindAssociatedTokenAddress(wallet, tokenMint)
+	if err != nil {
+		return false, fmt.Errorf("failed to find ATA address: %v", err)
+	}
+
+	// Query the account
+	accountInfo, err := s.rpcClient.GetAccountInfo(ctx, ata)
+	if err != nil {
+		// Check if error is "account not found" - this is normal for new wallets
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "could not find") {
+			// Account doesn't exist - this is not an error
+			return false, nil
+		}
+		// Other RPC errors
+		return false, fmt.Errorf("failed to query account: %v", err)
+	}
+
+	// Account exists if we got valid account info
+	return accountInfo != nil && accountInfo.Value != nil, nil
+}
+
+// CreateTokenAccount creates an Associated Token Account for a wallet to receive SPL tokens
+// This is a separate transaction from payment and is required before a wallet can receive SPL tokens
+//
+// Parameters:
+//   - wallet: The wallet owner's public key
+//   - walletPrivateKey: The wallet's private key (to pay for account creation and sign)
+//   - tokenMint: The SPL token mint address (e.g., USDC)
+//
+// Returns the transaction signature
+//
+// Note: This requires the wallet to have ~0.002 SOL to pay for account rent.
+// On devnet, use a faucet to fund the wallet first: https://faucet.solana.com/
+func (s *SolanaSPLSigner) CreateTokenAccount(
+	ctx context.Context,
+	wallet solana.PublicKey,
+	walletPrivateKey solana.PrivateKey,
+	tokenMint solana.PublicKey,
+) (string, error) {
+	// Check if account already exists
+	exists, err := s.CheckTokenAccountExists(ctx, wallet, tokenMint)
+	if err != nil {
+		return "", fmt.Errorf("failed to check if token account exists: %v", err)
+	}
+	if exists {
+		return "", fmt.Errorf("token account already exists for this wallet and token")
+	}
+
+	// Get latest blockhash
+	latestBlockhash, err := s.rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		return "", fmt.Errorf("failed to get latest blockhash: %v", err)
+	}
+
+	// Create instruction to initialize Associated Token Account
+	createATAIx := associatedtokenaccount.NewCreateInstruction(
+		wallet,    // Payer (wallet pays for account creation)
+		wallet,    // Wallet owner
+		tokenMint, // Token mint
+	).Build()
+
+	// Create transaction
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{createATAIx},
+		latestBlockhash.Value.Blockhash,
+		solana.TransactionPayer(wallet), // Wallet pays fees
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create transaction: %v", err)
+	}
+
+	// Sign transaction with wallet's private key
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(wallet) {
+			return &walletPrivateKey
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to sign transaction: %v", err)
+	}
+
+	// Send transaction
+	signature, err := s.rpcClient.SendTransaction(ctx, tx)
+	if err != nil {
+		return "", fmt.Errorf("failed to send transaction: %v", err)
+	}
+
+	return signature.String(), nil
+}
+
+// GetTokenAccountAddress returns the Associated Token Account address for a wallet and token
+// This is useful for checking balances or displaying the token account address
+func (s *SolanaSPLSigner) GetTokenAccountAddress(wallet solana.PublicKey, tokenMint solana.PublicKey) (string, error) {
+	ata, _, err := solana.FindAssociatedTokenAddress(wallet, tokenMint)
+	if err != nil {
+		return "", fmt.Errorf("failed to find ATA address: %v", err)
+	}
+	return ata.String(), nil
+}
+
+// CreateTokenAccountTransactionForFacilitator creates a transaction to initialize a token account
+// where the facilitator is the payer. Returns the base64-encoded unsigned transaction.
+// The facilitator will sign and broadcast this transaction.
+//
+// This is used to initialize token accounts for new wallets without requiring them to have SOL.
+// The facilitator pays the ~0.002 SOL rent for account creation.
+//
+// Parameters:
+//   - feePayer: The facilitator's public key (will sign and pay for account creation)
+//   - walletOwner: The wallet owner's public key (who will own the token account)
+//   - tokenMint: The SPL token mint address (e.g., USDC)
+//
+// Returns the base64-encoded serialized transaction (unsigned, ready for facilitator to sign)
+func (s *SolanaSPLSigner) CreateTokenAccountTransactionForFacilitator(
+	ctx context.Context,
+	feePayer solana.PublicKey,
+	walletOwner solana.PublicKey,
+	tokenMint solana.PublicKey,
+) (string, error) {
+	// Get latest blockhash
+	latestBlockhash, err := s.rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		return "", fmt.Errorf("failed to get latest blockhash: %v", err)
+	}
+
+	// Create instruction to initialize Associated Token Account
+	createATAIx := associatedtokenaccount.NewCreateInstruction(
+		feePayer,    // Payer (facilitator pays for account creation)
+		walletOwner, // Wallet owner
+		tokenMint,   // Token mint
+	).Build()
+
+	// Create transaction
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{createATAIx},
+		latestBlockhash.Value.Blockhash,
+		solana.TransactionPayer(feePayer), // Facilitator pays fees
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create transaction: %v", err)
+	}
+
+	// Serialize transaction to bytes (unsigned - facilitator will sign)
+	serialized, err := tx.MarshalBinary()
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize transaction: %v", err)
+	}
+
+	// Return base64-encoded transaction
+	return base64.StdEncoding.EncodeToString(serialized), nil
 }

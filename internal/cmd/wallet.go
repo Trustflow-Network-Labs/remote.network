@@ -101,10 +101,13 @@ Example:
 		fmt.Printf("Network:    %s\n", wallet.Network)
 		fmt.Printf("Address:    %s\n", wallet.Address)
 		fmt.Println()
+		fmt.Println("🔒 Passphrase stored securely in your keystore")
+		fmt.Println("   This enables autonomous payments for workflows and jobs.")
+		fmt.Println()
 		fmt.Println("To set this as your default wallet:")
 		fmt.Printf("  remote-network config set x402_default_wallet_id %s\n", wallet.ID)
 		fmt.Println()
-		fmt.Println("Remember your passphrase - it cannot be recovered if lost!")
+		fmt.Println("⚠️  Remember your passphrase - it cannot be recovered if lost!")
 		fmt.Println()
 	},
 }
@@ -197,8 +200,13 @@ Example:
 		fmt.Printf("Network:    %s\n", wallet.Network)
 		fmt.Printf("Address:    %s\n", wallet.Address)
 		fmt.Println()
+		fmt.Println("🔒 Passphrase stored securely in your keystore")
+		fmt.Println("   This enables autonomous payments for workflows and jobs.")
+		fmt.Println()
 		fmt.Println("To set this as your default wallet:")
 		fmt.Printf("  remote-network config set x402_default_wallet_id %s\n", wallet.ID)
+		fmt.Println()
+		fmt.Println("⚠️  Remember your passphrase - it cannot be recovered if lost!")
 		fmt.Println()
 	},
 }

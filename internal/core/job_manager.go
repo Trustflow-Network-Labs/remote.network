@@ -298,9 +298,12 @@ func (jm *JobManager) executeJob(job *database.JobExecution) {
 		delete(jm.runningJobs, job.ID)
 		jm.mu.Unlock()
 
+		jm.logger.Info(fmt.Sprintf("DEFER BLOCK EXECUTING for job %d", job.ID), "job_manager")
+
 		// SETTLE OR REFUND PAYMENT (x402 protocol)
 		// Check if this job has an associated payment escrow
 		payment, err := jm.db.GetJobPaymentByJobID(job.ID)
+		jm.logger.Info(fmt.Sprintf("GetJobPaymentByJobID(%d): payment=%v, err=%v", job.ID, payment != nil, err), "job_manager")
 		if err != nil {
 			jm.logger.Error(fmt.Sprintf("Failed to get payment for job %d: %v", job.ID, err), "job_manager")
 		} else if payment != nil {
@@ -311,11 +314,31 @@ func (jm *JobManager) executeJob(job *database.JobExecution) {
 			} else if finalJob != nil {
 				if finalJob.Status == types.JobStatusCompleted {
 					// Settle payment on successful completion
-					if err := jm.escrowManager.SettleEscrow(payment.ID, 0); err != nil {
+					// Get current service price to settle the correct amount (in case price decreased since workflow creation)
+					var settlementAmount float64 = 0 // 0 means settle full payment amount
+					service, err := jm.db.GetService(finalJob.ServiceID)
+					if err != nil {
+						jm.logger.Warn(fmt.Sprintf("Failed to get service %d for settlement amount: %v (will settle full payment)", finalJob.ServiceID, err), "job_manager")
+					} else if service != nil && service.PricingAmount > 0 {
+						// Use current service price as settlement amount (handles price decreases)
+						// If price increased, payment was already rejected during verification
+						// If price decreased, we settle only the current required amount
+						settlementAmount = service.PricingAmount
+						if settlementAmount < payment.PaymentAmount {
+							jm.logger.Info(fmt.Sprintf("Service price decreased: settling %.6f instead of paid %.6f for job %d",
+								settlementAmount, payment.PaymentAmount, job.ID), "job_manager")
+						}
+					}
+
+					if err := jm.escrowManager.SettleEscrow(payment.ID, settlementAmount); err != nil {
 						jm.logger.Error(fmt.Sprintf("Failed to settle payment %d for job %d: %v", payment.ID, job.ID, err), "job_manager")
 					} else {
+						actualSettled := settlementAmount
+						if settlementAmount == 0 {
+							actualSettled = payment.PaymentAmount
+						}
 						jm.logger.Info(fmt.Sprintf("Payment %d settled for completed job %d (amount: %.6f %s)",
-							payment.ID, job.ID, payment.PaymentAmount, payment.PaymentCurrency), "job_manager")
+							payment.ID, job.ID, actualSettled, payment.PaymentCurrency), "job_manager")
 					}
 				} else if finalJob.Status == types.JobStatusErrored || finalJob.Status == types.JobStatusCancelled {
 					// Refund payment on failure or cancellation
@@ -2512,8 +2535,14 @@ func (jm *JobManager) HandleJobRequest(request *types.JobExecutionRequest, peerI
 	// Update payment with actual job execution ID
 	// Note: We created the payment with jobExecutionID=0 before job creation
 	// Now we need to update it with the actual job ID
-	// This is handled internally by the database layer when we link the payment later
-	// The payment is already verified and escrowed, so the job will proceed
+	if paymentID > 0 {
+		if err := jm.db.UpdateJobPaymentExecutionID(paymentID, job.ID); err != nil {
+			jm.logger.Error(fmt.Sprintf("Failed to update payment %d with job execution ID %d: %v", paymentID, job.ID, err), "job_manager")
+			// Don't fail the request - payment is already verified
+		} else {
+			jm.logger.Info(fmt.Sprintf("Updated payment %d with job execution ID %d", paymentID, job.ID), "job_manager")
+		}
+	}
 
 	jm.logger.Info(fmt.Sprintf("Accepted job request from peer %s, job execution ID: %d (status: IDLE, waiting for job_start)", peerID[:8], job.ID), "job_manager")
 
@@ -2653,6 +2682,26 @@ func (jm *JobManager) HandleJobStatusUpdate(update *types.JobStatusUpdate, peerI
 	}
 
 	jm.logger.Info(fmt.Sprintf("Updated workflow_job %d status to %s", update.WorkflowJobID, update.Status), "job_manager")
+
+	// Broadcast job status update via WebSocket for real-time UI updates
+	if jm.eventEmitter != nil {
+		// Get workflow_job to retrieve execution_id and job_name for broadcast
+		workflowJob, err := jm.db.GetWorkflowJobByID(update.WorkflowJobID)
+		if err == nil && workflowJob != nil {
+			jm.eventEmitter.BroadcastJobStatusUpdate(
+				update.JobExecutionID,
+				update.WorkflowJobID,
+				workflowJob.WorkflowExecutionID,
+				workflowJob.JobName,
+				update.Status,
+				update.ErrorMessage,
+			)
+			jm.logger.Info(fmt.Sprintf("Broadcasted job status update to WebSocket clients for workflow_job %d", update.WorkflowJobID), "job_manager")
+		} else {
+			jm.logger.Warn(fmt.Sprintf("Failed to get workflow_job %d for WebSocket broadcast: %v", update.WorkflowJobID, err), "job_manager")
+		}
+	}
+
 	return nil
 }
 
@@ -3413,15 +3462,19 @@ func (jm *JobManager) isNetworkAccepted(paymentNetwork string, acceptedNetworks 
 }
 
 // networkMatches checks if a payment network matches an accepted network pattern
-func (jm *JobManager) networkMatches(payment string, accepted string) bool {
-	// Exact match
-	if payment == accepted {
+func (jm *JobManager) networkMatches(paymentNetwork string, acceptedNetwork string) bool {
+	// Normalize both networks to handle Solana aliases (e.g., "solana:devnet" → "solana:EtWTR...")
+	normalizedPayment := payment.NormalizeSolanaNetwork(paymentNetwork)
+	normalizedAccepted := payment.NormalizeSolanaNetwork(acceptedNetwork)
+
+	// Exact match (after normalization)
+	if normalizedPayment == normalizedAccepted {
 		return true
 	}
 
 	// Wildcard match (e.g., "eip155:84532" matches "eip155:*")
-	parts := strings.Split(accepted, ":")
-	paymentParts := strings.Split(payment, ":")
+	parts := strings.Split(normalizedAccepted, ":")
+	paymentParts := strings.Split(normalizedPayment, ":")
 
 	if len(parts) == 2 && len(paymentParts) == 2 && parts[0] == paymentParts[0] {
 		if parts[1] == "*" {
@@ -3430,4 +3483,9 @@ func (jm *JobManager) networkMatches(payment string, accepted string) bool {
 	}
 
 	return false
+}
+
+// GetEscrowManager returns the escrow manager for x402 payments
+func (jm *JobManager) GetEscrowManager() *payment.EscrowManager {
+	return jm.escrowManager
 }

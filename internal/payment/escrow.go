@@ -63,7 +63,14 @@ func (em *EscrowManager) CreateEscrow(
 
 	// Check payment amount meets required amount
 	if paymentSig.Amount < requiredAmount {
-		return 0, fmt.Errorf("%w: %.6f < %.6f required", ErrInsufficientPayment, paymentSig.Amount, requiredAmount)
+		return 0, fmt.Errorf("%w: payment %.6f < %.6f required (service price may have changed since workflow creation)",
+			ErrInsufficientPayment, paymentSig.Amount, requiredAmount)
+	}
+
+	// Log if overpayment detected (price decreased since workflow creation)
+	if paymentSig.Amount > requiredAmount {
+		em.logger.Info(fmt.Sprintf("Payment overpaid: %.6f > %.6f required (service price may have decreased). Will settle only %.6f at completion.",
+			paymentSig.Amount, requiredAmount, requiredAmount), "escrow")
 	}
 
 	// Verify payment with facilitator

@@ -449,8 +449,18 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 		return fmt.Errorf("failed to forward to target: %v", err)
 	}
 
-	// Send success response back to source through the stream
-	if stream != nil {
+	// Determine if this is a request-response pattern (stream must stay open for response)
+	// or one-way message (can confirm with "success")
+	isRequestResponse := data.MessageType == "service_search" ||
+		data.MessageType == "capabilities_request" ||
+		data.MessageType == "job_status_request" ||
+		data.MessageType == "job_request" ||
+		data.MessageType == "job_data_transfer_request" ||
+		data.MessageType == "job_start"
+
+	// For one-way messages (invoice notifications, job updates, etc.), send delivery confirmation
+	// For request-response messages, keep stream open - response will be routed back later
+	if !isRequestResponse && stream != nil {
 		(*stream).Write([]byte("success"))
 	}
 

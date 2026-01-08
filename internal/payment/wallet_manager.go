@@ -27,6 +27,7 @@ import (
 	"github.com/mr-tron/base58"
 	"golang.org/x/crypto/scrypt"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto/keystore"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -37,7 +38,14 @@ type WalletManager struct {
 	mu         sync.RWMutex
 	paths      *utils.AppPaths
 	config     *utils.ConfigManager
+	dbManager  DatabaseManager // For storing default wallet
 	logger     *utils.LogsManager
+}
+
+// DatabaseManager interface for wallet manager dependencies
+type DatabaseManager interface {
+	GetDefaultWalletID() (string, error)
+	SetDefaultWalletID(walletID string) error
 }
 
 // Wallet represents a cryptocurrency wallet
@@ -60,8 +68,13 @@ type walletFile struct {
 	CreatedAt       int64  `json:"created_at"`
 }
 
-// NewWalletManager creates a new wallet manager using AppPaths (like keystore)
+// NewWalletManager creates a new wallet manager without database support (legacy)
 func NewWalletManager(config *utils.ConfigManager) (*WalletManager, error) {
+	return NewWalletManagerWithDB(config, nil)
+}
+
+// NewWalletManagerWithDB creates a new wallet manager with database support for default wallet
+func NewWalletManagerWithDB(config *utils.ConfigManager, dbManager DatabaseManager) (*WalletManager, error) {
 	paths := utils.GetAppPaths("")
 	walletsDir := filepath.Join(paths.DataDir, "wallets")
 
@@ -75,6 +88,7 @@ func NewWalletManager(config *utils.ConfigManager) (*WalletManager, error) {
 		wallets:    make(map[string]*Wallet),
 		paths:      paths,
 		config:     config,
+		dbManager:  dbManager,
 		logger:     utils.NewLogsManager(config),
 	}
 
@@ -84,6 +98,64 @@ func NewWalletManager(config *utils.ConfigManager) (*WalletManager, error) {
 	}
 
 	return wm, nil
+}
+
+// storeWalletPassphraseInKeystore stores a wallet passphrase in the encrypted keystore
+func (wm *WalletManager) storeWalletPassphraseInKeystore(walletID string, walletPassphrase string) error {
+	// Get keystore path from AppPaths
+	keystorePath := filepath.Join(wm.paths.DataDir, "keystore.dat")
+
+	// Get master passphrase from secure source (file or OS keyring)
+	// This is re-read each time to avoid storing sensitive data in memory
+	masterPassphrase, err := keystore.GetKeystorePassphrase(wm.config)
+	if err != nil {
+		// Keystore passphrase not available - this is expected in some scenarios
+		// (e.g., fresh install without keystore, headless mode without passphrase file)
+		wm.logger.Warn("Keystore passphrase not available - wallet passphrase will not be stored for autonomous payments", "wallet_manager")
+		return fmt.Errorf("keystore passphrase not available: %v", err)
+	}
+
+	// Store wallet passphrase in keystore
+	if err := keystore.StoreWalletPassphrase(keystorePath, masterPassphrase, walletID, walletPassphrase); err != nil {
+		wm.logger.Error(fmt.Sprintf("Failed to store wallet passphrase in keystore: %v", err), "wallet_manager")
+		return fmt.Errorf("failed to store wallet passphrase: %v", err)
+	}
+
+	wm.logger.Info(fmt.Sprintf("Wallet passphrase stored in keystore for wallet %s (enables autonomous payments)", walletID), "wallet_manager")
+	return nil
+}
+
+// getWalletPassphraseFromKeystore retrieves a wallet passphrase from the encrypted keystore
+func (wm *WalletManager) getWalletPassphraseFromKeystore(walletID string) (string, error) {
+	// Get keystore path
+	keystorePath := filepath.Join(wm.paths.DataDir, "keystore.dat")
+
+	// Get master passphrase from secure source (file or OS keyring)
+	masterPassphrase, err := keystore.GetKeystorePassphrase(wm.config)
+	if err != nil {
+		return "", fmt.Errorf("keystore passphrase not available: %v", err)
+	}
+
+	// Get wallet passphrase from keystore
+	passphrase, err := keystore.GetWalletPassphrase(keystorePath, masterPassphrase, walletID)
+	if err != nil {
+		return "", err
+	}
+
+	return passphrase, nil
+}
+
+// deleteWalletPassphraseFromKeystore removes a wallet passphrase from the keystore
+func (wm *WalletManager) deleteWalletPassphraseFromKeystore(walletID string) error {
+	keystorePath := filepath.Join(wm.paths.DataDir, "keystore.dat")
+
+	// Get master passphrase from secure source
+	masterPassphrase, err := keystore.GetKeystorePassphrase(wm.config)
+	if err != nil {
+		return nil // No keystore passphrase available, nothing to delete
+	}
+
+	return keystore.DeleteWalletPassphrase(keystorePath, masterPassphrase, walletID)
 }
 
 // CreateWallet creates a new wallet for the specified network
@@ -119,12 +191,26 @@ func (wm *WalletManager) CreateWallet(network string, passphrase string) (*Walle
 		return nil, fmt.Errorf("failed to save wallet: %v", err)
 	}
 
+	// Store wallet passphrase in keystore for autonomous payments
+	// This allows workflows to execute without user interaction
+	if err := wm.storeWalletPassphraseInKeystore(wallet.ID, passphrase); err != nil {
+		// Log warning but don't fail - wallet is still usable with manual passphrase entry
+		wm.logger.Warn(fmt.Sprintf("Could not store wallet passphrase in keystore: %v", err), "wallet_manager")
+	}
+
 	// Store in memory (without private key for security)
 	wm.wallets[wallet.ID] = &Wallet{
 		ID:        wallet.ID,
 		Network:   wallet.Network,
 		Address:   wallet.Address,
 		CreatedAt: wallet.CreatedAt,
+	}
+
+	// Auto-set as default if this is the first wallet
+	if wm.dbManager != nil {
+		if err := wm.setAsDefaultIfFirst(wallet.ID); err != nil {
+			wm.logger.Warn(fmt.Sprintf("Could not set wallet as default: %v", err), "wallet_manager")
+		}
 	}
 
 	return wallet, nil
@@ -219,12 +305,25 @@ func (wm *WalletManager) ImportWallet(privateKeyHex string, network string, pass
 		return nil, fmt.Errorf("failed to save wallet: %v", err)
 	}
 
+	// Store wallet passphrase in keystore for autonomous payments
+	if err := wm.storeWalletPassphraseInKeystore(wallet.ID, passphrase); err != nil {
+		// Log warning but don't fail - wallet is still usable with manual passphrase entry
+		wm.logger.Warn(fmt.Sprintf("Could not store wallet passphrase in keystore: %v", err), "wallet_manager")
+	}
+
 	// Store in memory (without private key for security)
 	wm.wallets[wallet.ID] = &Wallet{
 		ID:        wallet.ID,
 		Network:   wallet.Network,
 		Address:   wallet.Address,
 		CreatedAt: wallet.CreatedAt,
+	}
+
+	// Auto-set as default if this is the first wallet
+	if wm.dbManager != nil {
+		if err := wm.setAsDefaultIfFirst(wallet.ID); err != nil {
+			wm.logger.Warn(fmt.Sprintf("Could not set wallet as default: %v", err), "wallet_manager")
+		}
 	}
 
 	return wallet, nil
@@ -379,6 +478,17 @@ func (wm *WalletManager) SignPayment(walletID string, paymentData *PaymentData, 
 
 // SignPaymentWithFormat signs payment data using the specified wallet and signature format
 func (wm *WalletManager) SignPaymentWithFormat(walletID string, paymentData *PaymentData, passphrase string, format SignatureFormat) (*PaymentSignature, error) {
+	// If passphrase is empty, try to retrieve it from keystore (autonomous payment mode)
+	if passphrase == "" {
+		keystorePassphrase, err := wm.getWalletPassphraseFromKeystore(walletID)
+		if err != nil {
+			// Keystore passphrase not available - return error with clear message
+			return nil, fmt.Errorf("wallet passphrase required but not provided and not found in keystore: %v", err)
+		}
+		passphrase = keystorePassphrase
+		wm.logger.Debug(fmt.Sprintf("Retrieved wallet passphrase from keystore for autonomous payment (wallet: %s)", walletID), "wallet_manager")
+	}
+
 	// Get wallet with decrypted private key
 	wallet, err := wm.GetWallet(walletID, passphrase)
 	if err != nil {
@@ -446,6 +556,16 @@ func (wm *WalletManager) DeleteWallet(walletID string, passphrase string) error 
 		return fmt.Errorf("wallet %s not found", walletID)
 	}
 
+	// If passphrase is empty, try to retrieve it from keystore
+	if passphrase == "" {
+		keystorePassphrase, err := wm.getWalletPassphraseFromKeystore(walletID)
+		if err != nil {
+			return fmt.Errorf("wallet passphrase required but not provided and not found in keystore: %v", err)
+		}
+		passphrase = keystorePassphrase
+		wm.logger.Debug(fmt.Sprintf("Retrieved wallet passphrase from keystore for deletion (wallet: %s)", walletID), "wallet_manager")
+	}
+
 	// Verify passphrase by attempting to decrypt
 	walletPath := filepath.Join(wm.walletsDir, walletID+".json")
 	_, err := wm.loadAndDecryptWallet(walletPath, passphrase)
@@ -456,6 +576,12 @@ func (wm *WalletManager) DeleteWallet(walletID string, passphrase string) error 
 	// Remove wallet from storage
 	if err := os.Remove(walletPath); err != nil {
 		return fmt.Errorf("failed to delete wallet file: %v", err)
+	}
+
+	// Remove wallet passphrase from keystore
+	if err := wm.deleteWalletPassphraseFromKeystore(walletID); err != nil {
+		// Log warning but don't fail deletion
+		wm.logger.Warn(fmt.Sprintf("Could not remove wallet passphrase from keystore: %v", err), "wallet_manager")
 	}
 
 	// Remove from in-memory cache
@@ -958,10 +1084,26 @@ func (wm *WalletManager) HasCompatibleWallet(acceptedNetworks []string) bool {
 	return false
 }
 
-// SelectBestWallet selects best wallet for accepted networks
+// SelectBestWallet selects best wallet for accepted networks (legacy - uses config for default)
 func (wm *WalletManager) SelectBestWallet(acceptedNetworks []string, defaultWalletID string) (*Wallet, string, error) {
 	wm.mu.RLock()
 	defer wm.mu.RUnlock()
+
+	// If default not provided, try to get from database
+	if defaultWalletID == "" && wm.dbManager != nil {
+		dbDefault, err := wm.dbManager.GetDefaultWalletID()
+		if err == nil {
+			defaultWalletID = dbDefault
+		}
+	}
+
+	// Debug logging
+	wm.logger.Debug(fmt.Sprintf("SelectBestWallet called: acceptedNetworks=%v, defaultWalletID=%s, total_wallets=%d",
+		acceptedNetworks, defaultWalletID, len(wm.wallets)), "wallet_manager")
+	for walletID, wallet := range wm.wallets {
+		wm.logger.Debug(fmt.Sprintf("  Available wallet: ID=%s, Network=%s, Address=%s",
+			walletID, wallet.Network, wallet.Address[:8]+"..."), "wallet_manager")
+	}
 
 	// If no restrictions, use default or first available
 	if len(acceptedNetworks) == 0 {
@@ -987,11 +1129,17 @@ func (wm *WalletManager) SelectBestWallet(acceptedNetworks []string, defaultWall
 
 	// Priority 2: First matching wallet
 	for walletID, wallet := range wm.wallets {
-		if isNetworkInList(wallet.Network, acceptedNetworks) {
+		matches := isNetworkInList(wallet.Network, acceptedNetworks)
+		wm.logger.Debug(fmt.Sprintf("  Checking wallet %s (network=%s) against accepted networks: match=%v",
+			walletID, wallet.Network, matches), "wallet_manager")
+		if matches {
+			wm.logger.Info(fmt.Sprintf("Selected wallet %s for networks %v", walletID, acceptedNetworks), "wallet_manager")
 			return wallet, walletID, nil
 		}
 	}
 
+	wm.logger.Error(fmt.Sprintf("No compatible wallet found for networks: %v (checked %d wallets)",
+		acceptedNetworks, len(wm.wallets)), "wallet_manager")
 	return nil, "", fmt.Errorf("no compatible wallet found for networks: %v", acceptedNetworks)
 }
 
@@ -1019,6 +1167,255 @@ func isNetworkInList(walletNetwork string, acceptedNetworks []string) bool {
 	}
 
 	return false
+}
+
+// ==================== Default Wallet Management ====================
+
+// setAsDefaultIfFirst sets a wallet as default if no default wallet exists
+func (wm *WalletManager) setAsDefaultIfFirst(walletID string) error {
+	if wm.dbManager == nil {
+		return nil // Skip if no database support
+	}
+
+	// Check if default wallet already exists
+	currentDefault, err := wm.dbManager.GetDefaultWalletID()
+	if err != nil {
+		return fmt.Errorf("failed to check default wallet: %v", err)
+	}
+
+	// If no default set, set this wallet as default
+	if currentDefault == "" {
+		if err := wm.dbManager.SetDefaultWalletID(walletID); err != nil {
+			return fmt.Errorf("failed to set default wallet: %v", err)
+		}
+		wm.logger.Info(fmt.Sprintf("Set wallet %s as default (first wallet)", walletID), "wallet_manager")
+	}
+
+	return nil
+}
+
+// GetDefaultWalletID retrieves the default wallet ID from database
+func (wm *WalletManager) GetDefaultWalletID() (string, error) {
+	if wm.dbManager == nil {
+		return "", nil // No database support, no default
+	}
+	return wm.dbManager.GetDefaultWalletID()
+}
+
+// SetDefaultWallet sets a wallet as the default
+func (wm *WalletManager) SetDefaultWallet(walletID string) error {
+	wm.mu.RLock()
+	defer wm.mu.RUnlock()
+
+	if wm.dbManager == nil {
+		return fmt.Errorf("database support not available")
+	}
+
+	// Verify wallet exists
+	if _, exists := wm.wallets[walletID]; !exists {
+		return fmt.Errorf("wallet not found: %s", walletID)
+	}
+
+	// Set as default in database
+	if err := wm.dbManager.SetDefaultWalletID(walletID); err != nil {
+		return fmt.Errorf("failed to set default wallet: %v", err)
+	}
+
+	wm.logger.Info(fmt.Sprintf("Set wallet %s as default", walletID), "wallet_manager")
+	return nil
+}
+
+// ==================== Solana Token Account Management ====================
+
+// CheckSolanaTokenAccountByAddress checks if a Solana address has a token account for a specific SPL token
+// This is used when we only have the address (not the wallet ID)
+func (wm *WalletManager) CheckSolanaTokenAccountByAddress(walletAddress string, network string, tokenSymbol string) (bool, error) {
+	// Verify it's a Solana network
+	if !strings.HasPrefix(network, "solana:") {
+		return false, fmt.Errorf("not a Solana network: %s", network)
+	}
+
+	// Get token mint address
+	tokenMint := GetTokenContractAddressFromConfig(wm.config, network, tokenSymbol)
+	if tokenMint == "" {
+		return false, fmt.Errorf("%s mint not configured for network: %s", tokenSymbol, network)
+	}
+
+	// Create RPC client
+	rpcURL := wm.getRPCEndpoint(network)
+	if rpcURL == "" {
+		return false, fmt.Errorf("no RPC endpoint configured for network: %s", network)
+	}
+
+	signer := NewSolanaSPLSigner(rpcURL)
+
+	// Parse addresses
+	walletPubKey, err := solana.PublicKeyFromBase58(walletAddress)
+	if err != nil {
+		return false, fmt.Errorf("invalid wallet address: %v", err)
+	}
+
+	tokenMintPubKey, err := solana.PublicKeyFromBase58(tokenMint)
+	if err != nil {
+		return false, fmt.Errorf("invalid token mint address: %v", err)
+	}
+
+	// Check if token account exists
+	ctx := context.Background()
+	exists, err := signer.CheckTokenAccountExists(ctx, walletPubKey, tokenMintPubKey)
+	if err != nil {
+		return false, fmt.Errorf("failed to check token account: %v", err)
+	}
+
+	return exists, nil
+}
+
+// CheckSolanaTokenAccount checks if a Solana wallet has a token account for a specific SPL token
+func (wm *WalletManager) CheckSolanaTokenAccount(walletID string, tokenSymbol string) (bool, error) {
+	wm.mu.RLock()
+	walletMeta, exists := wm.wallets[walletID]
+	wm.mu.RUnlock()
+
+	if !exists {
+		return false, fmt.Errorf("wallet not found: %s", walletID)
+	}
+
+	// Verify it's a Solana wallet
+	if !strings.HasPrefix(walletMeta.Network, "solana:") {
+		return false, fmt.Errorf("wallet is not a Solana wallet")
+	}
+
+	// Get token mint address
+	tokenMint := GetTokenContractAddressFromConfig(wm.config, walletMeta.Network, tokenSymbol)
+	if tokenMint == "" {
+		return false, fmt.Errorf("%s mint not configured for network: %s", tokenSymbol, walletMeta.Network)
+	}
+
+	// Create RPC client
+	rpcURL := wm.getRPCEndpoint(walletMeta.Network)
+	if rpcURL == "" {
+		return false, fmt.Errorf("no RPC endpoint configured for network: %s", walletMeta.Network)
+	}
+
+	signer := NewSolanaSPLSigner(rpcURL)
+
+	// Parse addresses
+	walletPubKey, err := solana.PublicKeyFromBase58(walletMeta.Address)
+	if err != nil {
+		return false, fmt.Errorf("invalid wallet address: %v", err)
+	}
+
+	tokenMintPubKey, err := solana.PublicKeyFromBase58(tokenMint)
+	if err != nil {
+		return false, fmt.Errorf("invalid token mint address: %v", err)
+	}
+
+	// Check if token account exists
+	ctx := context.Background()
+	exists, err = signer.CheckTokenAccountExists(ctx, walletPubKey, tokenMintPubKey)
+	if err != nil {
+		return false, fmt.Errorf("failed to check token account: %v", err)
+	}
+
+	return exists, nil
+}
+
+// InitializeSolanaTokenAccount creates a token account for a Solana wallet to receive SPL tokens
+// This is required before the wallet can receive tokens like USDC
+func (wm *WalletManager) InitializeSolanaTokenAccount(walletID string, tokenSymbol string, passphrase string) (string, error) {
+	// Get and decrypt wallet
+	wallet, err := wm.GetWallet(walletID, passphrase)
+	if err != nil {
+		return "", fmt.Errorf("failed to get wallet: %v", err)
+	}
+
+	// Verify it's a Solana wallet
+	if !strings.HasPrefix(wallet.Network, "solana:") {
+		return "", fmt.Errorf("wallet is not a Solana wallet")
+	}
+
+	// Get token mint address
+	tokenMint := GetTokenContractAddressFromConfig(wm.config, wallet.Network, tokenSymbol)
+	if tokenMint == "" {
+		return "", fmt.Errorf("%s mint not configured for network: %s", tokenSymbol, wallet.Network)
+	}
+
+	// Create RPC client
+	rpcURL := wm.getRPCEndpoint(wallet.Network)
+	if rpcURL == "" {
+		return "", fmt.Errorf("no RPC endpoint configured for network: %s", wallet.Network)
+	}
+
+	signer := NewSolanaSPLSigner(rpcURL)
+
+	// Parse addresses
+	walletPubKey, err := solana.PublicKeyFromBase58(wallet.Address)
+	if err != nil {
+		return "", fmt.Errorf("invalid wallet address: %v", err)
+	}
+
+	tokenMintPubKey, err := solana.PublicKeyFromBase58(tokenMint)
+	if err != nil {
+		return "", fmt.Errorf("invalid token mint address: %v", err)
+	}
+
+	// Create Solana private key from bytes
+	walletPrivKey := solana.PrivateKey(wallet.PrivateKey)
+
+	// Create token account
+	ctx := context.Background()
+	signature, err := signer.CreateTokenAccount(ctx, walletPubKey, walletPrivKey, tokenMintPubKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to create token account: %v", err)
+	}
+
+	wm.logger.Info(fmt.Sprintf("Token account initialized for wallet %s (token: %s, tx: %s)", walletID, tokenSymbol, signature), "wallet_manager")
+	return signature, nil
+}
+
+// GetSolanaTokenAccountAddress returns the Associated Token Account address for a wallet and token
+func (wm *WalletManager) GetSolanaTokenAccountAddress(walletID string, tokenSymbol string) (string, error) {
+	wm.mu.RLock()
+	walletMeta, exists := wm.wallets[walletID]
+	wm.mu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("wallet not found: %s", walletID)
+	}
+
+	// Verify it's a Solana wallet
+	if !strings.HasPrefix(walletMeta.Network, "solana:") {
+		return "", fmt.Errorf("wallet is not a Solana wallet")
+	}
+
+	// Get token mint address
+	tokenMint := GetTokenContractAddressFromConfig(wm.config, walletMeta.Network, tokenSymbol)
+	if tokenMint == "" {
+		return "", fmt.Errorf("%s mint not configured for network: %s", tokenSymbol, walletMeta.Network)
+	}
+
+	// Create RPC client (just need it for the method)
+	rpcURL := wm.getRPCEndpoint(walletMeta.Network)
+	signer := NewSolanaSPLSigner(rpcURL)
+
+	// Parse addresses
+	walletPubKey, err := solana.PublicKeyFromBase58(walletMeta.Address)
+	if err != nil {
+		return "", fmt.Errorf("invalid wallet address: %v", err)
+	}
+
+	tokenMintPubKey, err := solana.PublicKeyFromBase58(tokenMint)
+	if err != nil {
+		return "", fmt.Errorf("invalid token mint address: %v", err)
+	}
+
+	// Get token account address
+	ataAddress, err := signer.GetTokenAccountAddress(walletPubKey, tokenMintPubKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to get token account address: %v", err)
+	}
+
+	return ataAddress, nil
 }
 
 // ==================== Utility Functions ====================

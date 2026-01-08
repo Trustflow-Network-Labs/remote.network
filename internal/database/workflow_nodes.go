@@ -312,6 +312,72 @@ func (sm *SQLiteManager) GetWorkflowNodes(workflowID int64) ([]*WorkflowNode, er
 		sm.logger, "database", workflowID)
 }
 
+// GetWorkflowNodeByID retrieves a single workflow node by ID
+func (sm *SQLiteManager) GetWorkflowNodeByID(nodeID int64) (*WorkflowNode, error) {
+	query := `SELECT id, workflow_id, service_id, peer_id, service_name, service_type, "order", gui_x, gui_y,
+		       input_mapping, output_mapping, interfaces, entrypoint, cmd, pricing_amount, pricing_type, pricing_interval, pricing_unit, created_at, updated_at
+		FROM workflow_nodes
+		WHERE id = ?`
+
+	node := &WorkflowNode{}
+	var inputMappingStr, outputMappingStr, interfacesStr, entrypointStr, cmdStr sql.NullString
+	var pricingType, pricingUnit sql.NullString
+	var pricingInterval sql.NullInt64
+
+	err := sm.db.QueryRow(query, nodeID).Scan(
+		&node.ID, &node.WorkflowID, &node.ServiceID, &node.PeerID, &node.ServiceName,
+		&node.ServiceType, &node.Order, &node.GUIX, &node.GUIY,
+		&inputMappingStr, &outputMappingStr, &interfacesStr, &entrypointStr, &cmdStr, &node.PricingAmount, &pricingType, &pricingInterval, &pricingUnit,
+		&node.CreatedAt, &node.UpdatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("workflow node %d not found", nodeID)
+		}
+		return nil, fmt.Errorf("failed to get workflow node: %v", err)
+	}
+
+	// Parse JSON mappings
+	if inputMappingStr.Valid {
+		if err := json.Unmarshal([]byte(inputMappingStr.String), &node.InputMapping); err != nil {
+			node.InputMapping = make(map[string]interface{})
+		}
+	}
+	if outputMappingStr.Valid {
+		if err := json.Unmarshal([]byte(outputMappingStr.String), &node.OutputMapping); err != nil {
+			node.OutputMapping = make(map[string]interface{})
+		}
+	}
+	if interfacesStr.Valid {
+		if err := json.Unmarshal([]byte(interfacesStr.String), &node.Interfaces); err != nil {
+			node.Interfaces = make([]interface{}, 0)
+		}
+	} else {
+		node.Interfaces = make([]interface{}, 0)
+	}
+
+	// Parse entrypoint and cmd JSON arrays
+	if entrypointStr.Valid {
+		if err := json.Unmarshal([]byte(entrypointStr.String), &node.Entrypoint); err != nil {
+			node.Entrypoint = nil
+		}
+	}
+	if cmdStr.Valid {
+		if err := json.Unmarshal([]byte(cmdStr.String), &node.Cmd); err != nil {
+			node.Cmd = nil
+		}
+	}
+
+	// Handle nullable pricing fields
+	node.PricingType = ScanNullableString(pricingType)
+	node.PricingUnit = ScanNullableString(pricingUnit)
+	if pricingInterval.Valid {
+		node.PricingInterval = int(pricingInterval.Int64)
+	}
+
+	return node, nil
+}
+
 // UpdateWorkflowNodeGUIProps updates the GUI position of a workflow node
 func (sm *SQLiteManager) UpdateWorkflowNodeGUIProps(nodeID int64, x, y int) error {
 	_, err := sm.db.Exec(`

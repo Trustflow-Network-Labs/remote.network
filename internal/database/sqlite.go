@@ -80,6 +80,11 @@ func NewSQLiteManager(cm *utils.ConfigManager) (*SQLiteManager, error) {
 		return nil, fmt.Errorf("failed to init payment_invoices table: %w", err)
 	}
 
+	// Initialize app settings table
+	if err := sqlm.InitAppSettingsTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize app settings table: %v", err)
+	}
+
 	return sqlm, nil
 }
 

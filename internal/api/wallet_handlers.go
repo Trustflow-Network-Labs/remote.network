@@ -16,6 +16,12 @@ import (
 func (s *APIServer) handleListWallets(w http.ResponseWriter, r *http.Request) {
 	wallets := s.walletManager.ListWallets()
 
+	// Get default wallet ID
+	defaultWalletID, err := s.walletManager.GetDefaultWalletID()
+	if err != nil {
+		s.logger.Warn(fmt.Sprintf("Failed to get default wallet: %v", err), "api")
+	}
+
 	// Optionally include balances
 	includeBalance := r.URL.Query().Get("balance") == "true"
 
@@ -24,6 +30,7 @@ func (s *APIServer) handleListWallets(w http.ResponseWriter, r *http.Request) {
 		Network   string                 `json:"network"`
 		Address   string                 `json:"address"`
 		CreatedAt int64                  `json:"created_at"`
+		IsDefault bool                   `json:"is_default"`
 		Balance   *payment.WalletBalance `json:"balance,omitempty"`
 	}
 
@@ -37,6 +44,7 @@ func (s *APIServer) handleListWallets(w http.ResponseWriter, r *http.Request) {
 			Network:   normalizedNetwork,
 			Address:   wallet.Address,
 			CreatedAt: wallet.CreatedAt,
+			IsDefault: wallet.ID == defaultWalletID,
 		}
 
 		if includeBalance {
@@ -51,8 +59,9 @@ func (s *APIServer) handleListWallets(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"wallets": response,
-		"count":   len(response),
+		"wallets":         response,
+		"count":           len(response),
+		"default_wallet":  defaultWalletID,
 	})
 }
 
@@ -148,9 +157,9 @@ func (s *APIServer) handleDeleteWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Passphrase is optional - if empty, wallet manager will try to retrieve from keystore
 	if req.Passphrase == "" {
-		http.Error(w, "Passphrase is required", http.StatusBadRequest)
-		return
+		s.logger.Debug(fmt.Sprintf("No passphrase provided for wallet deletion %s - will attempt to use stored passphrase", walletID), "api")
 	}
 
 	// Delete wallet
@@ -224,5 +233,135 @@ func (s *APIServer) handleExportWallet(w http.ResponseWriter, r *http.Request) {
 		"private_key": privateKeyExport,
 		"address":     wallet.Address,
 		"network":     wallet.Network,
+	})
+}
+
+// handleCheckTokenAccount checks if a Solana wallet has a token account initialized
+func (s *APIServer) handleCheckTokenAccount(w http.ResponseWriter, r *http.Request) {
+	walletID := strings.TrimPrefix(r.URL.Path, "/api/wallets/")
+	walletID = strings.TrimSuffix(walletID, "/check-token-account")
+
+	// Get token symbol from query params (default to USDC)
+	tokenSymbol := r.URL.Query().Get("token")
+	if tokenSymbol == "" {
+		tokenSymbol = "USDC"
+	}
+
+	exists, err := s.walletManager.CheckSolanaTokenAccount(walletID, tokenSymbol)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to check token account: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"wallet_id":     walletID,
+		"token":         tokenSymbol,
+		"account_exists": exists,
+	})
+}
+
+// handleInitializeTokenAccount initializes a token account for a Solana wallet
+func (s *APIServer) handleInitializeTokenAccount(w http.ResponseWriter, r *http.Request) {
+	walletID := strings.TrimPrefix(r.URL.Path, "/api/wallets/")
+	walletID = strings.TrimSuffix(walletID, "/initialize-token-account")
+
+	var req struct {
+		Token      string `json:"token"`       // e.g., "USDC"
+		Passphrase string `json:"passphrase"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Default to USDC if not specified
+	if req.Token == "" {
+		req.Token = "USDC"
+	}
+
+	// Passphrase is optional - if empty, wallet manager will try to retrieve from keystore
+	if req.Passphrase == "" {
+		s.logger.Debug(fmt.Sprintf("No passphrase provided for token account initialization %s - will attempt to use stored passphrase", walletID), "api")
+	}
+
+	signature, err := s.walletManager.InitializeSolanaTokenAccount(walletID, req.Token, req.Passphrase)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to initialize token account: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"wallet_id": walletID,
+		"token":     req.Token,
+		"transaction": signature,
+		"message":   fmt.Sprintf("%s token account initialized successfully", req.Token),
+	})
+}
+
+// handleGetTokenAccountAddress returns the Associated Token Account address for a Solana wallet
+func (s *APIServer) handleGetTokenAccountAddress(w http.ResponseWriter, r *http.Request) {
+	walletID := strings.TrimPrefix(r.URL.Path, "/api/wallets/")
+	walletID = strings.TrimSuffix(walletID, "/token-account-address")
+
+	// Get token symbol from query params (default to USDC)
+	tokenSymbol := r.URL.Query().Get("token")
+	if tokenSymbol == "" {
+		tokenSymbol = "USDC"
+	}
+
+	address, err := s.walletManager.GetSolanaTokenAccountAddress(walletID, tokenSymbol)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get token account address: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":              true,
+		"wallet_id":            walletID,
+		"token":                tokenSymbol,
+		"token_account_address": address,
+	})
+}
+
+// handleSetDefaultWallet sets a wallet as the default
+func (s *APIServer) handleSetDefaultWallet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		WalletID string `json:"wallet_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.WalletID == "" {
+		http.Error(w, "wallet_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Set as default
+	if err := s.walletManager.SetDefaultWallet(req.WalletID); err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to set default wallet: %v", err), "api")
+		http.Error(w, fmt.Sprintf("Failed to set default wallet: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info(fmt.Sprintf("Set wallet %s as default via API", req.WalletID), "api")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"default_wallet_id": req.WalletID,
 	})
 }

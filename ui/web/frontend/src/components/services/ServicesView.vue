@@ -354,6 +354,7 @@ import Listbox from 'primevue/listbox'
 import { useServicesStore } from '../../stores/services'
 import { usePeersStore } from '../../stores/peers'
 import { useWorkflowsStore } from '../../stores/workflows'
+import { useWalletsStore } from '../../stores/wallets'
 import { useClipboard } from '../../composables/useClipboard'
 import { useTextUtils } from '../../composables/useTextUtils'
 
@@ -366,6 +367,7 @@ const toast = useToast()
 const servicesStore = useServicesStore() as any // TODO: Fix Pinia typing
 const peersStore = usePeersStore() as any // TODO: Fix Pinia typing
 const workflowsStore = useWorkflowsStore()
+const walletsStore = useWalletsStore()
 const { copyToClipboard } = useClipboard()
 const { shorten } = useTextUtils()
 
@@ -415,6 +417,9 @@ const availableWorkflows = computed(() => {
   // Filter to draft workflows (status is undefined or 'draft')
   return workflowsStore.workflows.filter((w: any) => !w.status || w.status === 'draft')
 })
+
+// Check if user has any wallets (for payment warnings)
+const hasWallets = computed(() => walletsStore.totalWallets > 0)
 
 // Helper functions
 function truncateDescription(description: string | undefined): string {
@@ -570,6 +575,22 @@ function confirmDeleteService(service: any) {
 }
 
 async function addToWorkflow(service: any) {
+  // Check if service is paid but user has no wallets
+  const isPaidService = service.pricing_amount && service.pricing_amount > 0
+  if (isPaidService && !hasWallets.value) {
+    confirm.require({
+      message: 'This is a paid service, but you have no wallet configured. You need a wallet to pay for this service. Would you like to create a wallet now?',
+      header: 'No Wallet Configured',
+      icon: 'pi pi-exclamation-triangle',
+      acceptLabel: 'Create Wallet',
+      rejectLabel: 'Cancel',
+      accept: () => {
+        router.push({ name: 'Wallets' })
+      }
+    })
+    return
+  }
+
   // First ensure workflows are loaded
   if (workflowsStore.workflows.length === 0) {
     await workflowsStore.fetchWorkflows()
@@ -667,6 +688,9 @@ function onRowClick(event: any) {
 onMounted(async () => {
   // Clear remote services to ensure fresh search results (avoid stale/outdated data)
   servicesStore.clearRemoteServices()
+
+  // Fetch wallets for payment warnings
+  await walletsStore.fetchWallets()
 
   // Only fetch local services if not viewing peer-specific services
   if (!isPeerView.value) {

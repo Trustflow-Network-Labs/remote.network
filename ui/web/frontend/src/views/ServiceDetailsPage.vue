@@ -62,9 +62,9 @@
                   {{ service.accepted_payment_networks.map((n: string) => {
                     const network = paymentNetworks.find(pn => pn.value === n)
                     return network ? network.label : n
-                  }).join(', ') }}
+                  }).join(', ') }} (explicit)
                 </p>
-                <p v-else class="text-secondary">{{ $t('message.services.noNetworks') }}</p>
+                <p v-else class="text-secondary">All supported networks (auto-detected from provider wallets)</p>
               </div>
             </template>
 
@@ -125,21 +125,6 @@
                       />
                     </div>
                   </template>
-
-                  <!-- Payment Networks -->
-                  <div class="field" :class="{ 'full-width': pricingForm.pricingType === 'ONE_TIME' }">
-                    <label for="edit-payment-networks">{{ $t('message.services.acceptedPaymentNetworks') }} *</label>
-                    <MultiSelect
-                      id="edit-payment-networks"
-                      v-model="pricingForm.acceptedPaymentNetworks"
-                      :options="paymentNetworks"
-                      optionLabel="label"
-                      optionValue="value"
-                      placeholder="Select blockchain networks"
-                      display="chip"
-                      class="w-full"
-                    />
-                  </div>
 
                   <!-- Action Buttons -->
                   <div class="field full-width pricing-actions">
@@ -348,7 +333,6 @@ import ProgressSpinner from 'primevue/progressspinner'
 import Message from 'primevue/message'
 import InputNumber from 'primevue/inputnumber'
 import Select from 'primevue/select'
-import MultiSelect from 'primevue/multiselect'
 import InterfaceReviewDialog from '../components/services/InterfaceReviewDialog.vue'
 import { api } from '../services/api'
 
@@ -374,8 +358,7 @@ const pricingForm = ref({
   pricingAmount: 0,
   pricingType: 'ONE_TIME' as 'ONE_TIME' | 'RECURRING',
   pricingInterval: 1,
-  pricingUnit: 'MONTHS' as 'SECONDS' | 'MINUTES' | 'HOURS' | 'DAYS' | 'WEEKS' | 'MONTHS' | 'YEARS',
-  acceptedPaymentNetworks: [] as string[]
+  pricingUnit: 'MONTHS' as 'SECONDS' | 'MINUTES' | 'HOURS' | 'DAYS' | 'WEEKS' | 'MONTHS' | 'YEARS'
 })
 
 // Computed
@@ -400,16 +383,41 @@ const pricingUnits = computed(() => [
   { label: t('message.services.years'), value: 'YEARS' }
 ])
 
-const paymentNetworks = computed(() => [
-  { label: 'Base Mainnet', value: 'eip155:8453' },
-  { label: 'Base Sepolia (Testnet)', value: 'eip155:84532' },
-  { label: 'Ethereum Mainnet', value: 'eip155:1' },
-  { label: 'Polygon', value: 'eip155:137' },
-  { label: 'Arbitrum', value: 'eip155:42161' },
-  { label: 'Optimism', value: 'eip155:10' },
-  { label: 'Solana Mainnet', value: 'solana:mainnet-beta' },
-  { label: 'Solana Devnet', value: 'solana:devnet' }
-])
+// Payment networks - fetched dynamically from API (intersection of facilitator and app supported)
+const paymentNetworks = ref<Array<{ label: string; value: string }>>([])
+const loadingNetworks = ref(false)
+
+const fetchAllowedNetworks = async () => {
+  loadingNetworks.value = true
+  try {
+    const data = await api.getAllowedNetworks()
+    if (data.success && data.networks) {
+      // Map API response to dropdown format
+      paymentNetworks.value = data.networks.map((net: { display_name: string; caip2: string }) => ({
+        label: net.display_name,
+        value: net.caip2
+      }))
+    }
+  } catch (error) {
+    console.error('Error fetching allowed networks:', error)
+    toast.add({
+      severity: 'warn',
+      summary: 'Network Options',
+      detail: 'Could not load available networks. Using defaults.',
+      life: 3000
+    })
+    // Fallback to default networks if API call fails
+    paymentNetworks.value = [
+      { label: 'Base Mainnet', value: 'eip155:8453' },
+      { label: 'Base Sepolia', value: 'eip155:84532' },
+      { label: 'Solana Mainnet', value: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' },
+      { label: 'Solana Devnet', value: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' }
+    ]
+  } finally {
+    loadingNetworks.value = false
+  }
+}
+
 
 // Methods
 const goBack = () => {
@@ -668,8 +676,7 @@ const startEditPricing = () => {
     pricingAmount: service.value.pricing_amount || 0,
     pricingType: service.value.pricing_type || 'ONE_TIME',
     pricingInterval: service.value.pricing_interval || 1,
-    pricingUnit: service.value.pricing_unit || 'MONTHS',
-    acceptedPaymentNetworks: service.value.accepted_payment_networks || []
+    pricingUnit: service.value.pricing_unit || 'MONTHS'
   }
   editingPricing.value = true
 }
@@ -690,16 +697,6 @@ const savePricing = async () => {
     return
   }
 
-  if (!pricingForm.value.acceptedPaymentNetworks || pricingForm.value.acceptedPaymentNetworks.length === 0) {
-    toast.add({
-      severity: 'error',
-      summary: t('message.common.error'),
-      detail: t('message.services.networksRequired'),
-      life: 3000
-    })
-    return
-  }
-
   try {
     savingPricing.value = true
 
@@ -707,8 +704,7 @@ const savePricing = async () => {
       pricing_amount: pricingForm.value.pricingAmount,
       pricing_type: pricingForm.value.pricingType,
       pricing_interval: pricingForm.value.pricingInterval,
-      pricing_unit: pricingForm.value.pricingUnit,
-      accepted_payment_networks: pricingForm.value.acceptedPaymentNetworks
+      pricing_unit: pricingForm.value.pricingUnit
     }
 
     await api.updateServicePricing(service.value.id, updateData)
@@ -718,7 +714,6 @@ const savePricing = async () => {
     service.value.pricing_type = pricingForm.value.pricingType
     service.value.pricing_interval = pricingForm.value.pricingInterval
     service.value.pricing_unit = pricingForm.value.pricingUnit
-    service.value.accepted_payment_networks = pricingForm.value.acceptedPaymentNetworks
 
     editingPricing.value = false
 
@@ -742,8 +737,11 @@ const savePricing = async () => {
 }
 
 // Lifecycle
-onMounted(() => {
-  fetchServiceDetails()
+onMounted(async () => {
+  await Promise.all([
+    fetchServiceDetails(),
+    fetchAllowedNetworks()
+  ])
 })
 </script>
 

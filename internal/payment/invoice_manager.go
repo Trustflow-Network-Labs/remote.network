@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gagliardetto/solana-go"
+
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -271,6 +273,37 @@ func (im *InvoiceManager) AcceptInvoice(
 		// Add feePayer to metadata so wallet manager can use it
 		paymentData.Metadata["solana_fee_payer"] = feePayer
 		im.logger.Info(fmt.Sprintf("Using facilitator fee payer for Solana: %s", feePayer), "invoice_manager")
+
+		// Check if recipient has a token account for this currency (e.g., USDC)
+		// If not, ask facilitator to create it (facilitator pays ~0.002 SOL)
+		recipientHasTokenAccount, err := im.walletManager.CheckSolanaTokenAccountByAddress(
+			invoice.FromWalletAddress,
+			normalizedNetwork,
+			invoice.Currency,
+		)
+		if err != nil {
+			im.logger.Warn(fmt.Sprintf("Failed to check if recipient has token account: %v - proceeding anyway", err), "invoice_manager")
+		} else if !recipientHasTokenAccount {
+			im.logger.Info(fmt.Sprintf("Recipient %s does not have %s token account, asking facilitator to create it",
+				invoice.FromWalletAddress[:8], invoice.Currency), "invoice_manager")
+
+			// Ask facilitator to create token account for recipient
+			txSignature, err := im.createTokenAccountViaFacilitator(
+				invoice.FromWalletAddress, // Recipient's address
+				normalizedNetwork,          // Network
+				invoice.Currency,           // Token symbol (e.g., "USDC")
+				feePayer,                   // Facilitator's address (will pay)
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create recipient's token account via facilitator: %v", err)
+			}
+
+			im.logger.Info(fmt.Sprintf("Facilitator created %s token account for recipient %s (tx: %s)",
+				invoice.Currency, invoice.FromWalletAddress[:8], txSignature), "invoice_manager")
+		} else {
+			im.logger.Debug(fmt.Sprintf("Recipient %s already has %s token account",
+				invoice.FromWalletAddress[:8], invoice.Currency), "invoice_manager")
+		}
 	}
 
 	paymentSig, err := im.walletManager.SignPaymentWithFormat(walletID, paymentData, passphrase, signatureFormat)
@@ -560,4 +593,71 @@ func (im *InvoiceManager) getAllNetworksWithLabels(networks map[string]bool) []A
 	}
 
 	return result
+}
+
+// createTokenAccountViaFacilitator creates a Solana token account for a recipient
+// The facilitator signs and broadcasts the transaction, paying for the account creation
+func (im *InvoiceManager) createTokenAccountViaFacilitator(
+	recipientAddress string,
+	network string,
+	tokenSymbol string,
+	facilitatorAddress string,
+) (string, error) {
+	// Get token mint address
+	tokenMint := GetTokenContractAddressFromConfig(im.config, network, tokenSymbol)
+	if tokenMint == "" {
+		return "", fmt.Errorf("%s mint not configured for network: %s", tokenSymbol, network)
+	}
+
+	// Get RPC endpoint
+	rpcURL := GetSolanaRPCEndpoint(network)
+	if rpcURL == "" {
+		return "", fmt.Errorf("no RPC endpoint configured for network: %s", network)
+	}
+
+	// Create signer
+	signer := NewSolanaSPLSigner(rpcURL)
+
+	// Parse addresses
+	recipientPubKey, err := solana.PublicKeyFromBase58(recipientAddress)
+	if err != nil {
+		return "", fmt.Errorf("invalid recipient address: %v", err)
+	}
+
+	facilitatorPubKey, err := solana.PublicKeyFromBase58(facilitatorAddress)
+	if err != nil {
+		return "", fmt.Errorf("invalid facilitator address: %v", err)
+	}
+
+	tokenMintPubKey, err := solana.PublicKeyFromBase58(tokenMint)
+	if err != nil {
+		return "", fmt.Errorf("invalid token mint address: %v", err)
+	}
+
+	// Create the token account creation transaction (unsigned, facilitator will sign)
+	ctx := context.Background()
+	unsignedTx, err := signer.CreateTokenAccountTransactionForFacilitator(
+		ctx,
+		facilitatorPubKey,
+		recipientPubKey,
+		tokenMintPubKey,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create token account transaction: %v", err)
+	}
+
+	// Send to facilitator to sign and broadcast
+	// We'll use the x402 client to send this
+	txSignature, err := im.escrowManager.GetX402Client().CreateTokenAccount(
+		ctx,
+		network,
+		recipientAddress,
+		tokenSymbol,
+		unsignedTx,
+	)
+	if err != nil {
+		return "", fmt.Errorf("facilitator failed to create token account: %v", err)
+	}
+
+	return txSignature, nil
 }

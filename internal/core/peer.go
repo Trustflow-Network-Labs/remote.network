@@ -12,6 +12,7 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/p2p"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/services"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/system"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
@@ -145,6 +146,11 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 	} else {
 		logger.Info(fmt.Sprintf("Gathered system capabilities: platform=%s, arch=%s, cpu_cores=%d, memory=%dMB, gpus=%d",
 			systemCaps.Platform, systemCaps.Architecture, systemCaps.CPUCores, systemCaps.TotalMemoryMB, len(systemCaps.GPUs)), "core")
+
+		// Populate wallet addresses for x402 payments
+		if err := populateWalletCapabilities(systemCaps, config, logger); err != nil {
+			logger.Warn(fmt.Sprintf("Failed to populate wallet capabilities: %v (payments may not work)", err), "core")
+		}
 	}
 
 	// Initialize capabilities handler for on-demand full capabilities fetch via QUIC
@@ -850,9 +856,10 @@ func (pm *PeerManager) InitializeJobSystem() error {
 	pm.quic.SetJobHandler(jobHandler)
 	pm.logger.Info("JobMessageHandler created and set on QUIC peer", "core")
 
-	// Set dependencies for relay forwarding
-	jobHandler.SetDependencies(pm.dbManager, pm.knownPeers, pm.metadataQuery, pm.GetPeerID())
-	pm.logger.Info("JobMessageHandler dependencies set (relay forwarding enabled)", "core")
+	// Set dependencies for relay forwarding and x402 payments
+	escrowManager := pm.jobManager.GetEscrowManager() // Get escrow manager for x402 payments
+	jobHandler.SetDependencies(pm.dbManager, pm.knownPeers, pm.metadataQuery, pm.GetPeerID(), escrowManager)
+	pm.logger.Info("JobMessageHandler dependencies set (relay forwarding and x402 payments enabled)", "core")
 
 	// Set up callbacks for job operations
 	jobHandler.SetCallbacks(
@@ -1923,4 +1930,72 @@ func (pm *PeerManager) fetchPeerCapabilitiesViaRelay(targetPeerID string, relayA
 		targetPeerID[:min(8, len(targetPeerID))], response.Capabilities.Platform, len(response.Capabilities.GPUs)), "core")
 
 	return response.Capabilities, nil
+}
+
+// populateWalletCapabilities populates wallet addresses in system capabilities for x402 payments
+func populateWalletCapabilities(caps *system.SystemCapabilities, config *utils.ConfigManager, logger *utils.LogsManager) error {
+	// Initialize wallet manager to get wallet addresses
+	walletManager, err := payment.NewWalletManager(config)
+	if err != nil {
+		return fmt.Errorf("failed to initialize wallet manager: %v", err)
+	}
+
+	// Get all wallets
+	wallets := walletManager.ListWallets()
+	if len(wallets) == 0 {
+		logger.Debug("No wallets configured - capabilities will not include payment addresses", "core")
+		return nil
+	}
+
+	// Get default wallet ID (may be empty if not set)
+	defaultWalletID, _ := walletManager.GetDefaultWalletID()
+	if defaultWalletID != "" {
+		logger.Debug(fmt.Sprintf("Using default wallet ID for prioritization: %s", defaultWalletID), "core")
+	}
+
+	// Build wallet map: network -> address
+	// For networks with multiple wallets, prefer: default wallet > oldest wallet (first created)
+	caps.Wallets = make(map[string]string)
+	selectedWallets := make(map[string]*payment.Wallet) // network -> selected wallet
+
+	for _, wallet := range wallets {
+		existing, exists := selectedWallets[wallet.Network]
+
+		if !exists {
+			// First wallet for this network - use it
+			selectedWallets[wallet.Network] = wallet
+			logger.Debug(fmt.Sprintf("Selected wallet for network %s: %s (first)", wallet.Network, wallet.Address[:8]+"..."), "core")
+		} else {
+			// Network already has a wallet - decide which to keep
+			useNewWallet := false
+
+			if wallet.ID == defaultWalletID {
+				// New wallet is the default - always use it
+				useNewWallet = true
+				logger.Debug(fmt.Sprintf("Replacing wallet for network %s: new wallet is default (%s)", wallet.Network, wallet.Address[:8]+"..."), "core")
+			} else if existing.ID != defaultWalletID && wallet.CreatedAt < existing.CreatedAt {
+				// Neither is default, but new wallet is older (created earlier) - use it
+				useNewWallet = true
+				logger.Debug(fmt.Sprintf("Replacing wallet for network %s: new wallet is older (%s created at %d vs %d)",
+					wallet.Network, wallet.Address[:8]+"...", wallet.CreatedAt, existing.CreatedAt), "core")
+			} else {
+				logger.Debug(fmt.Sprintf("Keeping existing wallet for network %s: %s (priority: default=%v, older=%v)",
+					wallet.Network, existing.Address[:8]+"...", existing.ID == defaultWalletID, existing.CreatedAt < wallet.CreatedAt), "core")
+			}
+
+			if useNewWallet {
+				selectedWallets[wallet.Network] = wallet
+			}
+		}
+	}
+
+	// Build final capabilities map from selected wallets
+	for network, wallet := range selectedWallets {
+		caps.Wallets[network] = wallet.Address
+		logger.Info(fmt.Sprintf("Advertising wallet for network %s: %s (created: %d, default: %v)",
+			network, wallet.Address[:8]+"...", wallet.CreatedAt, wallet.ID == defaultWalletID), "core")
+	}
+
+	logger.Info(fmt.Sprintf("Populated %d wallet addresses in capabilities", len(caps.Wallets)), "core")
+	return nil
 }

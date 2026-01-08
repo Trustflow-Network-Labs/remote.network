@@ -38,6 +38,7 @@ export interface Service {
   pricing_type?: PricingType
   pricing_interval?: number
   pricing_unit?: PricingUnit
+  accepted_payment_networks?: string[]
   interfaces?: ServiceInterface[]  // Service interfaces defining allowed inputs/outputs
   entrypoint?: string[]  // For DOCKER services - container entrypoint
   cmd?: string[]         // For DOCKER services - container cmd
@@ -271,6 +272,7 @@ export const useServicesStore = defineStore('services', {
       if (payload && payload.services) {
         this.services = payload.services.map((svc: any) => ({
           id: parseInt(svc.id),
+          service_type: svc.service_type,
           type: svc.type,
           endpoint: svc.endpoint || '',
           capabilities: svc.config || {},
@@ -278,6 +280,14 @@ export const useServicesStore = defineStore('services', {
           name: svc.name,
           description: svc.description,
           pricing: svc.pricing || 0,
+          pricing_amount: svc.pricing_amount || 0,
+          pricing_type: svc.pricing_type || 'ONE_TIME',
+          pricing_interval: svc.pricing_interval || 1,
+          pricing_unit: svc.pricing_unit || 'MONTHS',
+          accepted_payment_networks: svc.accepted_payment_networks || [],
+          interfaces: svc.interfaces || [],
+          entrypoint: svc.entrypoint,
+          cmd: svc.cmd,
           created_at: new Date(svc.created_at * 1000).toISOString(),
           updated_at: new Date(svc.updated_at * 1000).toISOString()
         }))
