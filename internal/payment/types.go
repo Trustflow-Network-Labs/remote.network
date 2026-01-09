@@ -14,7 +14,7 @@ type PaymentData struct {
 type SignatureFormat string
 
 const (
-	// SignatureFormatEIP191 uses EIP-191 personal message signing (PayAI compatible)
+	// SignatureFormatEIP191 uses EIP-191 personal message signing
 	SignatureFormatEIP191 SignatureFormat = "eip191"
 	// SignatureFormatEIP712 uses EIP-712 typed structured data signing (x402.org compatible)
 	SignatureFormatEIP712 SignatureFormat = "eip712"

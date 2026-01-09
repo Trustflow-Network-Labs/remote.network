@@ -277,22 +277,41 @@ func (b *BEP44Manager) sendPutQuery(ctx context.Context, addr dht.Addr, targetKe
 	token := string(*getResult.Reply.R.Token)
 	b.logger.Debug(fmt.Sprintf("BEP_44 PUT: Received write token from %s (len=%d)", addr.String(), len(token)), "bep44")
 
+	// Extract current sequence from DHT (if exists)
+	// This ensures we always increment from the actual DHT state, even after restart
+	var dhtSequence int64 = -1
+	if getResult.Reply.R != nil && getResult.Reply.R.Seq != nil {
+		dhtSequence = *getResult.Reply.R.Seq
+		b.logger.Debug(fmt.Sprintf("BEP_44 PUT: DHT has existing data with seq=%d from %s", dhtSequence, addr.String()), "bep44")
+	}
+
+	// Calculate final sequence: use max of our sequence and DHT sequence + 1
+	// This prevents BEP44 rejection when sequence resets on node restart
+	finalSequence := sequence
+	if dhtSequence >= 0 {
+		if sequence <= dhtSequence {
+			finalSequence = dhtSequence + 1
+			b.logger.Info(fmt.Sprintf("BEP_44 PUT: Adjusting sequence from %d to %d (DHT has seq=%d) for %s",
+				sequence, finalSequence, dhtSequence, addr.String()), "bep44")
+		}
+	}
+
 	// Create bep44.Put struct with mutable data
 	// IMPORTANT: Pass raw value (not pre-bencoded), the library handles bencoding
 	put := bep44.Put{
-		V:   value,      // Raw value (will be bencoded by the library)
-		K:   &publicKey, // Ed25519 public key (32 bytes)
-		Seq: sequence,   // Sequence number
+		V:   value,        // Raw value (will be bencoded by the library)
+		K:   &publicKey,   // Ed25519 public key (32 bytes)
+		Seq: finalSequence, // Use adjusted sequence number
 		// Salt and CAS are optional, we don't use them
 	}
 
 	// Use Put.Sign() method to create signature with private key
 	// This is the correct way - the library handles the signature format internally
-	b.logger.Debug(fmt.Sprintf("BEP_44 PUT: Signing Put item with private key (seq=%d)", sequence), "bep44")
+	b.logger.Debug(fmt.Sprintf("BEP_44 PUT: Signing Put item with private key (seq=%d)", finalSequence), "bep44")
 	put.Sign(keyPair.PrivateKey)
 
 	b.logger.Debug(fmt.Sprintf("BEP_44 PUT: Sending put query to %s (seq=%d, sig=%x...)",
-		addr.String(), sequence, put.Sig[:8]), "bep44")
+		addr.String(), finalSequence, put.Sig[:8]), "bep44")
 
 	// Use Server.Put() API to send the put query
 	// Pass dht.QueryRateLimiting{} for rate limiting (empty struct = no rate limiting)

@@ -9,7 +9,7 @@ import (
 )
 
 // SignEIP191 signs payment data using EIP-191 personal message signing
-// This format is used by PayAI facilitator
+// This is a standard Ethereum signing format
 func SignEIP191(privateKey *ecdsa.PrivateKey, sig *PaymentSignature) (string, error) {
 	// Create message hash (EIP-191 format)
 	// Format: Network:Sender:Recipient:Amount:Currency:Nonce:Timestamp

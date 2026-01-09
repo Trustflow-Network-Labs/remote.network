@@ -522,12 +522,33 @@ type AllowedNetwork struct {
 	DisplayName string `json:"display_name"` // Human-readable name (e.g., "Base Mainnet")
 }
 
+// getAppSupportedNetworks returns all networks supported by this application
+func getAppSupportedNetworks() []string {
+	return []string{
+		// Base networks
+		"eip155:8453",
+		"eip155:84532",
+		// Ethereum networks
+		"eip155:1",
+		"eip155:11155111",
+		// Polygon networks
+		"eip155:137",
+		"eip155:80002",
+		// Avalanche networks
+		"eip155:43114",
+		"eip155:43113",
+		// Solana networks
+		"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+		"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+		"solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z",
+	}
+}
+
 // GetAllowedNetworks returns networks that are supported by both the facilitator and the app
 func (im *InvoiceManager) GetAllowedNetworks(ctx context.Context) ([]AllowedNetwork, error) {
-	// Get app-supported networks from NetworkMapper
-	networkMapper := NewNetworkMapper()
+	// Get app-supported networks
 	appSupportedNetworks := make(map[string]bool)
-	for _, network := range networkMapper.GetSupportedNetworks() {
+	for _, network := range getAppSupportedNetworks() {
 		appSupportedNetworks[network] = true
 	}
 

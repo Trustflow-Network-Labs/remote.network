@@ -801,7 +801,7 @@ func (wm *WalletManager) signEVMPaymentWithFormat(wallet *Wallet, sig *PaymentSi
 		// Use EIP-712 typed structured data signing (x402.org, standard x402)
 		return SignEIP712WithConfigAndLogger(wm.config, wm.logger, privateKey, sig)
 	case SignatureFormatEIP191:
-		// Use EIP-191 personal message signing (PayAI)
+		// Use EIP-191 personal message signing
 		return SignEIP191(privateKey, sig)
 	default:
 		return "", fmt.Errorf("unsupported signature format: %s", format)
