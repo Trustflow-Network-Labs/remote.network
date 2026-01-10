@@ -248,7 +248,7 @@ func (rm *RelayManager) SelectAndConnectRelay() error {
 	candidateCount := rm.selector.GetCandidateCount()
 	rm.logger.Info(fmt.Sprintf("🎯 Selecting best relay peer from %d candidates (using existing measurements)...", candidateCount), "relay-manager")
 
-	// Select best relay from existing latency measurements
+	// Select best relay from existing measurements for immediate connection
 	bestRelay := rm.selector.SelectBestRelay()
 	if bestRelay == nil {
 		rm.logger.Warn(fmt.Sprintf("❌ No suitable relay found (had %d candidates)", candidateCount), "relay-manager")
@@ -272,7 +272,73 @@ func (rm *RelayManager) SelectAndConnectRelay() error {
 	}
 
 	// Connect to new relay
-	return rm.ConnectToRelay(bestRelay)
+	err := rm.ConnectToRelay(bestRelay)
+	if err != nil {
+		return err
+	}
+
+	// After initial connection succeeds, check asynchronously if last used relay needs to be discovered
+	// This prevents blocking startup while still respecting last used relay preference
+	go rm.checkAndSwitchToLastUsedRelay()
+
+	return nil
+}
+
+// checkAndSwitchToLastUsedRelay checks if last used relay is in candidates, and if not, rediscovers and switches
+// This runs asynchronously to avoid blocking initial relay connection
+func (rm *RelayManager) checkAndSwitchToLastUsedRelay() {
+	// Wait briefly to ensure initial connection is stable
+	time.Sleep(2 * time.Second)
+
+	relayDB, err := database.NewRelayDB(rm.dbManager.GetDB(), rm.logger)
+	if err != nil {
+		return
+	}
+
+	lastUsedPeerID, err := relayDB.GetLastUsedRelay(rm.keyPair.PeerID())
+	if err != nil || lastUsedPeerID == "" {
+		return
+	}
+
+	// Check if currently connected to last used relay
+	rm.relayMutex.RLock()
+	currentRelay := rm.currentRelay
+	rm.relayMutex.RUnlock()
+
+	if currentRelay != nil && currentRelay.PeerID == lastUsedPeerID {
+		rm.logger.Debug("Already connected to last used relay, no switch needed", "relay-manager")
+		return
+	}
+
+	// Check if last used relay is in candidates
+	candidates := rm.selector.GetCandidates()
+	found := false
+	for _, candidate := range candidates {
+		if candidate.PeerID == lastUsedPeerID {
+			found = true
+			break
+		}
+	}
+
+	// If not found, rediscover from known_peers
+	if !found {
+		rm.logger.Info(fmt.Sprintf("Last used relay %s not in candidates, rediscovering from known_peers...", lastUsedPeerID[:8]), "relay-manager")
+		added := rm.rediscoverRelayCandidates()
+		if added > 0 {
+			rm.logger.Info(fmt.Sprintf("Rediscovered %d relay candidates from known_peers", added), "relay-manager")
+			// Measure the newly discovered candidates
+			rm.selector.MeasureAllCandidates()
+		} else {
+			rm.logger.Warn(fmt.Sprintf("Could not rediscover last used relay %s from known_peers", lastUsedPeerID[:8]), "relay-manager")
+			return
+		}
+	}
+
+	// Try to select and connect to last used relay
+	rm.logger.Info("Checking if should switch to last used relay...", "relay-manager")
+	if err := rm.SelectAndConnectRelay(); err != nil {
+		rm.logger.Debug(fmt.Sprintf("Could not switch to last used relay: %v", err), "relay-manager")
+	}
 }
 
 // EvaluateAndSelectRelay measures all relay candidates, selects the best, and connects
@@ -328,7 +394,13 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 	rm.logger.Info(fmt.Sprintf("Connecting to relay: %s (endpoint: %s, latency: %v)",
 		relay.NodeID, relay.Endpoint, relay.Latency), "relay-manager")
 
+	// Check if we have a previous relay (to determine if this is a switch or initial connection)
+	rm.relayMutex.RLock()
+	hadPreviousRelay := rm.currentRelay != nil
+	rm.relayMutex.RUnlock()
+
 	// Disconnect from current relay if any
+	// DHT publish is now async so no blocking delay
 	rm.DisconnectRelay()
 
 	// Connect via QUIC
@@ -493,6 +565,23 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 	rm.sessionStart = time.Now()
 	rm.relayMutex.Unlock()
 
+	// Persist last used relay to database ONLY when switching relays (not on initial connection)
+	// This preserves the last used relay from before restart until we explicitly switch
+	if hadPreviousRelay {
+		relayDB, err := database.NewRelayDB(rm.dbManager.GetDB(), rm.logger)
+		if err == nil {
+			if err := relayDB.SetLastUsedRelay(rm.keyPair.PeerID(), relay.PeerID); err != nil {
+				rm.logger.Warn(fmt.Sprintf("Failed to persist last used relay: %v", err), "relay-manager")
+			} else {
+				rm.logger.Debug(fmt.Sprintf("Persisted last used relay (relay switch): %s", relay.PeerID[:8]), "relay-manager")
+			}
+		} else {
+			rm.logger.Warn(fmt.Sprintf("Failed to access relay database: %v", err), "relay-manager")
+		}
+	} else {
+		rm.logger.Debug("Skipping last used relay update (initial connection, preserving last used from database)", "relay-manager")
+	}
+
 	// Update LastSeen to prevent this relay from being marked as stale
 	rm.selector.UpdateCandidateLastSeen(relay.PeerID)
 
@@ -506,12 +595,15 @@ func (rm *RelayManager) ConnectToRelay(relay *RelayCandidate) error {
 	rm.egressBytes = 0
 	rm.trafficMutex.Unlock()
 
-	// Update metadata in database to include relay info
+	rm.logger.Info(fmt.Sprintf("Successfully connected to relay %s (session: %s)", relay.NodeID, sessionID), "relay-manager")
+
+	// Update metadata to include relay info
+	// NotifyRelayConnected is now async internally (publishes to DHT in goroutine)
 	if err := rm.updateOurMetadataWithRelay(relay, sessionID); err != nil {
 		rm.logger.Warn(fmt.Sprintf("Failed to update metadata with relay info: %v", err), "relay-manager")
+	} else {
+		rm.logger.Debug("Publishing relay connection to DHT (async)", "relay-manager")
 	}
-
-	rm.logger.Info(fmt.Sprintf("Successfully connected to relay %s (session: %s)", relay.NodeID, sessionID), "relay-manager")
 
 	// Open receive stream for relay to forward messages to us
 	if err := rm.openReceiveStream(conn, sessionID); err != nil {
@@ -843,11 +935,12 @@ func (rm *RelayManager) DisconnectRelay() {
 	}
 
 	// Update metadata to reflect relay disconnection - publish to DHT
+	// This is now async and won't block (updated in metadata_publisher.go)
 	if rm.metadataPublisher != nil {
 		if err := rm.metadataPublisher.NotifyRelayDisconnected(); err != nil {
 			rm.logger.Warn(fmt.Sprintf("Failed to publish relay disconnection to DHT: %v", err), "relay-manager")
 		} else {
-			rm.logger.Info("Published relay disconnection to DHT", "relay-manager")
+			rm.logger.Debug("Publishing relay disconnection to DHT (async)", "relay-manager")
 		}
 	}
 
@@ -940,7 +1033,7 @@ func (rm *RelayManager) sendKeepalives() {
 
 // handleRelayConnectionLoss handles relay connection failures and attempts reconnection
 func (rm *RelayManager) handleRelayConnectionLoss() {
-	rm.logger.Info("⚠️  Relay connection lost, starting immediate reconnection procedure", "relay-manager")
+	rm.logger.Info("⚠️  Relay connection lost, starting immediate reconnection procedure (autonomous switching allowed for unreachable relay)", "relay-manager")
 
 	// Get the failed relay info before disconnecting
 	rm.relayMutex.RLock()
@@ -1097,7 +1190,7 @@ func (rm *RelayManager) periodicRelayEvaluation() {
 	for {
 		select {
 		case <-rm.evaluationTicker.C:
-			rm.logger.Info("⏰ Performing periodic relay evaluation (re-measuring all candidates)...", "relay-manager")
+			rm.logger.Info("⏰ Performing periodic relay evaluation (measuring latencies, autonomous switching disabled)...", "relay-manager")
 
 			// Check if we have relay candidates, if not try to rediscover
 			if rm.selector.GetCandidateCount() == 0 {

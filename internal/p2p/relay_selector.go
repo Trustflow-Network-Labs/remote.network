@@ -364,7 +364,65 @@ func (rs *RelaySelector) SelectBestRelay() *RelayCandidate {
 		}
 	}
 
-	// STEP 2: Fallback to score-based selection
+	// STEP 2: Check for last used relay
+	if err == nil {
+		lastUsedPeerID, err := relayDB.GetLastUsedRelay(rs.myPeerID)
+		if err == nil && lastUsedPeerID != "" {
+			rs.logger.Info(fmt.Sprintf("🔄 Checking for last used relay: %s", lastUsedPeerID[:8]), "relay-selector")
+
+			// Find last used relay in candidates
+			for _, candidate := range rs.candidates {
+				if candidate.PeerID == lastUsedPeerID {
+					// Check if last used relay is available
+					if !candidate.IsAvailable {
+						rs.logger.Warn(fmt.Sprintf("Last used relay %s is unavailable (%s), using fallback selection",
+							lastUsedPeerID[:8], candidate.UnavailableMsg), "relay-selector")
+						break
+					}
+
+					// Check if last used relay meets minimum criteria
+					if candidate.Latency == 0 {
+						rs.logger.Warn(fmt.Sprintf("Last used relay %s has no latency measurement, skipping", lastUsedPeerID[:8]), "relay-selector")
+						break
+					}
+
+					if candidate.Latency > maxLatency {
+						rs.logger.Warn(fmt.Sprintf("Last used relay %s exceeds max latency (%v > %v), using fallback selection",
+							lastUsedPeerID[:8], candidate.Latency, maxLatency), "relay-selector")
+						break
+					}
+
+					if candidate.ReputationScore < minReputation {
+						rs.logger.Warn(fmt.Sprintf("Last used relay %s below min reputation (%.2f < %.2f), using fallback selection",
+							lastUsedPeerID[:8], candidate.ReputationScore, minReputation), "relay-selector")
+						break
+					}
+
+					if candidate.PricingPerGB > maxPricing {
+						rs.logger.Warn(fmt.Sprintf("Last used relay %s exceeds max pricing (%.4f > %.4f), using fallback selection",
+							lastUsedPeerID[:8], candidate.PricingPerGB, maxPricing), "relay-selector")
+						break
+					}
+
+					// Last used relay meets criteria - use it!
+					rs.logger.Info(fmt.Sprintf("✅ Selected LAST USED relay: %s (latency: %v, reputation: %.2f, pricing: %.4f)",
+						lastUsedPeerID[:8], candidate.Latency, candidate.ReputationScore, candidate.PricingPerGB), "relay-selector")
+
+					rs.bestRelayMutex.Lock()
+					rs.bestRelay = candidate
+					rs.bestRelayMutex.Unlock()
+
+					return candidate
+				}
+			}
+
+			if lastUsedPeerID != "" {
+				rs.logger.Warn(fmt.Sprintf("Last used relay %s not found in candidates or doesn't meet criteria, falling back to score-based selection", lastUsedPeerID[:8]), "relay-selector")
+			}
+		}
+	}
+
+	// STEP 3: Fallback to score-based selection
 	var bestCandidate *RelayCandidate
 	var bestScore float64 = -1
 
@@ -448,7 +506,7 @@ func (rs *RelaySelector) ShouldSwitchRelay(currentRelay *RelayCandidate, newRela
 		return false
 	}
 
-	// Check if new relay is the preferred relay - always switch to preferred if available
+	// Check if new relay is the preferred relay or last used relay - always switch to these if available
 	relayDB, err := database.NewRelayDB(rs.dbManager.GetDB(), rs.logger)
 	if err == nil {
 		preferredPeerID, err := relayDB.GetPreferredRelay(rs.myPeerID)
@@ -460,34 +518,36 @@ func (rs *RelaySelector) ShouldSwitchRelay(currentRelay *RelayCandidate, newRela
 				return true
 			}
 
-			// If current relay is already preferred, don't switch unless significantly better
+			// If current relay is already preferred, don't switch
 			if currentRelay.PeerID == preferredPeerID {
 				rs.logger.Debug("Current relay is already preferred, staying connected", "relay-selector")
 				return false
 			}
 		}
+
+		// Check if new relay is the last used relay - allow switching to restore last used relay
+		lastUsedPeerID, err := relayDB.GetLastUsedRelay(rs.myPeerID)
+		if err == nil && lastUsedPeerID != "" {
+			// If new relay is last used and current is not, ALLOW switch (to restore last used after restart)
+			if newRelay.PeerID == lastUsedPeerID && currentRelay.PeerID != lastUsedPeerID {
+				rs.logger.Info(fmt.Sprintf("🔄 Switching to LAST USED relay %s (from %s)",
+					newRelay.PeerID[:8], currentRelay.PeerID[:8]), "relay-selector")
+				return true
+			}
+
+			// If current relay is already last used, don't switch based on performance
+			if currentRelay.PeerID == lastUsedPeerID {
+				rs.logger.Debug("Current relay is already last used, staying connected", "relay-selector")
+				return false
+			}
+		}
 	}
 
-	// Get switch threshold from config (e.g., 20% improvement required)
-	switchThreshold := rs.config.GetConfigFloat64("relay_switch_threshold", 0.2, 0.0, 1.0)
-
-	// Calculate improvement in latency
-	latencyImprovement := float64(currentRelay.Latency-newRelay.Latency) / float64(currentRelay.Latency)
-
-	// Calculate improvement in reputation
-	reputationImprovement := (newRelay.ReputationScore - currentRelay.ReputationScore) / currentRelay.ReputationScore
-
-	// Overall improvement score
-	improvement := (latencyImprovement * 0.7) + (reputationImprovement * 0.3)
-
-	shouldSwitch := improvement > switchThreshold
-
-	if shouldSwitch {
-		rs.logger.Info(fmt.Sprintf("Should switch relay: %.1f%% improvement (latency: %.1f%%, reputation: %.1f%%)",
-			improvement*100, latencyImprovement*100, reputationImprovement*100), "relay-selector")
-	}
-
-	return shouldSwitch
+	// DISABLED: Autonomous switching based on performance improvement
+	// Periodic evaluation will continue to measure latencies, but will NOT
+	// trigger automatic switches unless the user manually switches or current relay fails
+	rs.logger.Debug("Autonomous switching based on performance is disabled - staying with current relay", "relay-selector")
+	return false
 }
 
 // GetCandidates returns all relay candidates

@@ -269,10 +269,11 @@ func (mp *MetadataPublisher) SetNATMetadataPublishedCallback(callback func()) {
 // This is specifically for NAT peers that connect to a relay (Phase 3, Step 12)
 // relayPeerID should be the persistent Ed25519-based peer ID (not the DHT NodeID)
 func (mp *MetadataPublisher) NotifyRelayConnected(relayPeerID, relaySessionID, relayAddress string) error {
+	// Prepare metadata update inside mutex (fast operation)
 	mp.metadataMutex.Lock()
-	defer mp.metadataMutex.Unlock()
 
 	if mp.currentMetadata == nil {
+		mp.metadataMutex.Unlock()
 		return fmt.Errorf("no metadata initialized")
 	}
 
@@ -287,19 +288,31 @@ func (mp *MetadataPublisher) NotifyRelayConnected(relayPeerID, relaySessionID, r
 	mp.currentMetadata.NetworkInfo.RelayAddress = relayAddress
 	mp.currentMetadata.Timestamp = time.Now()
 
-	// Increment sequence and publish
+	// Increment sequence
 	mp.currentSequence++
+
+	// Create snapshot for async publish
+	metadataSnapshot := mp.currentMetadata
+	sequenceSnapshot := mp.currentSequence
+
+	// Release mutex BEFORE slow DHT publish
+	mp.metadataMutex.Unlock()
 
 	// Get topic from config
 	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 	topic := topics[0]
 
-	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.knownPeers, topic)
-	if err != nil {
-		return fmt.Errorf("failed to update metadata with relay info: %v", err)
-	}
-
-	mp.logger.Info(fmt.Sprintf("Successfully updated metadata with relay info (seq: %d)", mp.currentSequence), "metadata-publisher")
+	// Publish to DHT asynchronously (slow operation, 50+ seconds)
+	// BEP44 sequence numbers prevent race conditions - updates with lower sequence are rejected
+	go func() {
+		mp.logger.Debug(fmt.Sprintf("Publishing relay connect to DHT async (seq: %d)...", sequenceSnapshot), "metadata-publisher")
+		err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadataSnapshot, sequenceSnapshot, mp.knownPeers, topic)
+		if err != nil {
+			mp.logger.Warn(fmt.Sprintf("Failed to update metadata with relay info: %v", err), "metadata-publisher")
+		} else {
+			mp.logger.Info(fmt.Sprintf("Successfully updated metadata with relay info (seq: %d)", sequenceSnapshot), "metadata-publisher")
+		}
+	}()
 
 	// Metadata is now stored only in DHT - no local database storage
 
@@ -322,10 +335,11 @@ func (mp *MetadataPublisher) NotifyRelayConnected(relayPeerID, relaySessionID, r
 
 // NotifyRelayDisconnected is a helper function to update metadata when relay connection is lost
 func (mp *MetadataPublisher) NotifyRelayDisconnected() error {
+	// Prepare metadata update inside mutex (fast operation)
 	mp.metadataMutex.Lock()
-	defer mp.metadataMutex.Unlock()
 
 	if mp.currentMetadata == nil {
+		mp.metadataMutex.Unlock()
 		return fmt.Errorf("no metadata initialized")
 	}
 
@@ -338,19 +352,31 @@ func (mp *MetadataPublisher) NotifyRelayDisconnected() error {
 	mp.currentMetadata.NetworkInfo.RelayAddress = ""
 	mp.currentMetadata.Timestamp = time.Now()
 
-	// Increment sequence and publish
+	// Increment sequence
 	mp.currentSequence++
+
+	// Create snapshot for async publish
+	metadataSnapshot := mp.currentMetadata
+	sequenceSnapshot := mp.currentSequence
+
+	// Release mutex BEFORE slow DHT publish
+	mp.metadataMutex.Unlock()
 
 	// Get topic from config
 	topics := mp.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
 	topic := topics[0]
 
-	err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, mp.currentMetadata, mp.currentSequence, mp.knownPeers, topic)
-	if err != nil {
-		return fmt.Errorf("failed to update metadata after relay disconnect: %v", err)
-	}
-
-	mp.logger.Info(fmt.Sprintf("Successfully updated metadata after relay disconnect (seq: %d)", mp.currentSequence), "metadata-publisher")
+	// Publish to DHT asynchronously (slow operation, 50+ seconds)
+	// BEP44 sequence numbers prevent race conditions - updates with lower sequence are rejected
+	go func() {
+		mp.logger.Debug(fmt.Sprintf("Publishing relay disconnect to DHT async (seq: %d)...", sequenceSnapshot), "metadata-publisher")
+		err := mp.bep44Manager.PutMutableWithDiscovery(mp.keyPair, metadataSnapshot, sequenceSnapshot, mp.knownPeers, topic)
+		if err != nil {
+			mp.logger.Warn(fmt.Sprintf("Failed to update metadata after relay disconnect: %v", err), "metadata-publisher")
+		} else {
+			mp.logger.Info(fmt.Sprintf("Successfully updated metadata after relay disconnect (seq: %d)", sequenceSnapshot), "metadata-publisher")
+		}
+	}()
 
 	// Metadata is now stored only in DHT - no local database storage
 	return nil

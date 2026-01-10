@@ -68,6 +68,7 @@ func (rdb *RelayDB) createTables() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		peer_id TEXT NOT NULL UNIQUE,
 		preferred_relay_peer_id TEXT,
+		last_used_relay_peer_id TEXT,
 		created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
 		updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 	);
@@ -76,6 +77,19 @@ func (rdb *RelayDB) createTables() error {
 
 	if _, err := rdb.db.ExecContext(context.Background(), createPreferencesTableSQL); err != nil {
 		return fmt.Errorf("failed to create peer_preferences table: %v", err)
+	}
+
+	// Migration: Add last_used_relay_peer_id column if it doesn't exist (for existing databases)
+	_, err := rdb.db.ExecContext(context.Background(), `
+		ALTER TABLE peer_preferences ADD COLUMN last_used_relay_peer_id TEXT;
+	`)
+	if err != nil {
+		// Ignore error if column already exists (expected on existing databases)
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			rdb.logger.Warn(fmt.Sprintf("Failed to add last_used_relay_peer_id column (may already exist): %v", err), "relay-db")
+		}
+	} else {
+		rdb.logger.Info("Added last_used_relay_peer_id column to peer_preferences table", "relay-db")
 	}
 
 	// Note: relay_service_info table removed - relay discovery uses DHT metadata, not database
@@ -254,6 +268,66 @@ func (rdb *RelayDB) ClearPreferredRelay(peerID string) error {
 
 	rdb.logger.Debug(fmt.Sprintf("Cleared preferred relay for peer %s", peerID), "relay-db")
 	return nil
+}
+
+// SetLastUsedRelay sets the last used relay for a peer
+func (rdb *RelayDB) SetLastUsedRelay(peerID, lastUsedRelayPeerID string) error {
+	query := `
+		INSERT INTO peer_preferences (peer_id, last_used_relay_peer_id, updated_at)
+		VALUES (?, ?, strftime('%s', 'now'))
+		ON CONFLICT(peer_id) DO UPDATE SET
+			last_used_relay_peer_id = excluded.last_used_relay_peer_id,
+			updated_at = excluded.updated_at
+	`
+
+	// Retry logic for handling transient SQLite BUSY errors
+	maxRetries := 3
+	retryDelay := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		_, err := rdb.db.Exec(query, peerID, lastUsedRelayPeerID)
+		if err == nil {
+			rdb.logger.Debug(fmt.Sprintf("Set last used relay for peer %s to %s", peerID, lastUsedRelayPeerID), "relay-db")
+			return nil
+		}
+
+		// Check if it's a BUSY error
+		if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked") {
+			if attempt < maxRetries-1 {
+				rdb.logger.Debug(fmt.Sprintf("Database busy, retrying in %v (attempt %d/%d)", retryDelay, attempt+1, maxRetries), "relay-db")
+				time.Sleep(retryDelay)
+				retryDelay *= 2 // Exponential backoff
+				continue
+			}
+		}
+
+		return fmt.Errorf("failed to set last used relay: %v", err)
+	}
+
+	return fmt.Errorf("failed to set last used relay after %d attempts", maxRetries)
+}
+
+// GetLastUsedRelay gets the last used relay for a peer
+func (rdb *RelayDB) GetLastUsedRelay(peerID string) (string, error) {
+	query := `SELECT last_used_relay_peer_id FROM peer_preferences WHERE peer_id = ?`
+
+	var lastUsedRelayPeerID sql.NullString
+	err := rdb.db.QueryRow(query, peerID).Scan(&lastUsedRelayPeerID)
+
+	if err == sql.ErrNoRows {
+		// No last used relay set
+		return "", nil
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("failed to get last used relay: %v", err)
+	}
+
+	if !lastUsedRelayPeerID.Valid {
+		return "", nil
+	}
+
+	return lastUsedRelayPeerID.String, nil
 }
 
 // Close closes the relay database manager
