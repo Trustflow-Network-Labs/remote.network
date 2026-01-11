@@ -998,6 +998,38 @@ func (pm *PeerManager) GetQUICPeer() *p2p.QUICPeer {
 	return pm.quic
 }
 
+// RefreshWalletCapabilities refreshes the cached wallet capabilities after wallet changes
+// This should be called whenever wallets are added, imported, or deleted
+func (pm *PeerManager) RefreshWalletCapabilities() error {
+	pm.logger.Info("Refreshing wallet capabilities after wallet change", "core")
+
+	// Get current data directory
+	paths := utils.GetAppPaths("")
+
+	// Re-gather system capabilities
+	systemCaps, err := system.GatherSystemCapabilities(paths.DataDir)
+	if err != nil {
+		pm.logger.Warn(fmt.Sprintf("Failed to gather system capabilities during refresh: %v", err), "core")
+		return fmt.Errorf("failed to gather system capabilities: %v", err)
+	}
+
+	// Re-populate wallet capabilities
+	if err := populateWalletCapabilities(systemCaps, pm.config, pm.logger); err != nil {
+		pm.logger.Warn(fmt.Sprintf("Failed to populate wallet capabilities during refresh: %v", err), "core")
+		return fmt.Errorf("failed to populate wallet capabilities: %v", err)
+	}
+
+	// Update the capabilities handler with the new capabilities
+	if pm.quic != nil {
+		pm.quic.UpdateCapabilities(systemCaps)
+		pm.logger.Info(fmt.Sprintf("Updated capabilities with %d wallet networks", len(systemCaps.Wallets)), "core")
+	} else {
+		pm.logger.Warn("QUIC peer not initialized - cannot update capabilities", "core")
+	}
+
+	return nil
+}
+
 // GetMetadataQueryService returns the metadata query service instance
 func (pm *PeerManager) GetMetadataQueryService() *p2p.MetadataQueryService {
 	return pm.metadataQuery

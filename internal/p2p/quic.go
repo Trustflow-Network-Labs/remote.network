@@ -23,6 +23,7 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/system"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
@@ -405,6 +406,14 @@ func (q *QUICPeer) SetServiceQueryHandler(handler *ServiceQueryHandler) {
 // SetCapabilitiesHandler sets the capabilities handler for this QUIC peer
 func (q *QUICPeer) SetCapabilitiesHandler(handler *CapabilitiesHandler) {
 	q.capabilitiesHandler = handler
+}
+
+// UpdateCapabilities updates the capabilities in the capabilities handler
+// This should be called when system capabilities change (e.g., wallets added/removed)
+func (q *QUICPeer) UpdateCapabilities(capabilities *system.SystemCapabilities) {
+	if q.capabilitiesHandler != nil {
+		q.capabilitiesHandler.UpdateCapabilities(capabilities)
+	}
 }
 
 // SetJobHandler sets the job message handler for this QUIC peer

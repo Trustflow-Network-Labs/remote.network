@@ -94,6 +94,13 @@ func (s *APIServer) handleCreateWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refresh wallet capabilities after creating wallet
+	if s.peerManager != nil {
+		if err := s.peerManager.RefreshWalletCapabilities(); err != nil {
+			s.logger.Warn(fmt.Sprintf("Failed to refresh wallet capabilities after create: %v", err), "api")
+		}
+	}
+
 	// Normalize network to full CAIP-2 format for response
 	normalizedNetwork := payment.NormalizeSolanaNetwork(wallet.Network)
 
@@ -132,6 +139,13 @@ func (s *APIServer) handleImportWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refresh wallet capabilities after importing wallet
+	if s.peerManager != nil {
+		if err := s.peerManager.RefreshWalletCapabilities(); err != nil {
+			s.logger.Warn(fmt.Sprintf("Failed to refresh wallet capabilities after import: %v", err), "api")
+		}
+	}
+
 	// Normalize network to full CAIP-2 format for response
 	normalizedNetwork := payment.NormalizeSolanaNetwork(wallet.Network)
 
@@ -166,6 +180,13 @@ func (s *APIServer) handleDeleteWallet(w http.ResponseWriter, r *http.Request) {
 	if err := s.walletManager.DeleteWallet(walletID, req.Passphrase); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to delete wallet: %v", err), http.StatusForbidden)
 		return
+	}
+
+	// Refresh wallet capabilities after deleting wallet
+	if s.peerManager != nil {
+		if err := s.peerManager.RefreshWalletCapabilities(); err != nil {
+			s.logger.Warn(fmt.Sprintf("Failed to refresh wallet capabilities after delete: %v", err), "api")
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -355,6 +376,14 @@ func (s *APIServer) handleSetDefaultWallet(w http.ResponseWriter, r *http.Reques
 		s.logger.Error(fmt.Sprintf("Failed to set default wallet: %v", err), "api")
 		http.Error(w, fmt.Sprintf("Failed to set default wallet: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	// Refresh wallet capabilities after changing default wallet
+	// (default wallet affects which wallet is advertised per network)
+	if s.peerManager != nil {
+		if err := s.peerManager.RefreshWalletCapabilities(); err != nil {
+			s.logger.Warn(fmt.Sprintf("Failed to refresh wallet capabilities after setting default: %v", err), "api")
+		}
 	}
 
 	s.logger.Info(fmt.Sprintf("Set wallet %s as default via API", req.WalletID), "api")
