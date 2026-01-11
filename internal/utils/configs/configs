@@ -194,8 +194,7 @@ invoice_retry_backoff_ms = 1000
 # Signature Format: EIP-712 typed structured data signing (for EVM chains)
 # Examples:
 #   - https://www.x402.org/facilitator (official x402 facilitator)
-#   - http://localhost:34022 (local development instance)
-x402_facilitator_url = http://filmski-grad.ddns.net:34022
+x402_facilitator_url = https://facilitator.remote.network
 x402_verify_endpoint = /verify
 x402_settle_endpoint = /settle
 x402_refund_endpoint = /refund
