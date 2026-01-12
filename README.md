@@ -131,12 +131,60 @@ go build -o remote-network ./
 
 # Start node as a relay (for public IP nodes that can relay traffic for NAT-ed peers)
 ./remote-network start -r
-
-# Access Web UI (HTTPS on port 30069, HTTP fallback on port 36900)
-open https://localhost:30069
-# or use HTTP fallback (localhost only)
-open http://localhost:36900
 ```
+
+### Set Up and Access the Web UI
+
+The Web UI is a separate Vue 3 application located in `ui/web/frontend/` directory. It requires Node.js 18+ and must be set up independently.
+
+#### Install Node.js (if not installed)
+
+```bash
+# Using NodeSource repository
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Verify installation
+node --version  # Should be 18.x or higher
+```
+
+#### Install Web UI Dependencies
+
+```bash
+# Navigate to the web UI directory
+cd ui/web/frontend
+
+# Install dependencies
+npm install
+```
+
+#### Run Web UI - Option 1: Development Mode
+
+```bash
+# Start development server (with hot reload)
+npm run dev
+
+# The UI will be available at http://localhost:5173
+```
+
+**Configure Node Endpoint:** When you open the Web UI login page, enter `https://localhost:30069` in the "Node Endpoint" field if it's not already set. This tells the UI where to find your running node's API server.
+
+#### Run Web UI - Option 2: Production Build
+
+```bash
+# Build for production
+npm run build
+
+# Install a static file server (one-time setup)
+npm install -g http-server
+
+# Serve the built files on port 8080 (avoid port 30069 - used by API server)
+http-server dist -p 8080
+
+# Access at http://localhost:8080
+```
+
+**Quick Access:** After the node is running and the Web UI is served, navigate to `http://localhost:8080` (production build) or `http://localhost:5173` (development mode). You'll need to export your private key to authenticate (see Key Management section).
 
 ### Key Management
 
