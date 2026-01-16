@@ -13,9 +13,11 @@ const (
 	writeWait = 10 * time.Second
 
 	// Time allowed to read the next pong message from the peer
-	pongWait = 60 * time.Second
+	// Increased from 60s to 120s to prevent disconnections during heavy operations like remote search
+	pongWait = 120 * time.Second
 
 	// Send pings to peer with this period (must be less than pongWait)
+	// This will be 108 seconds with the new pongWait
 	pingPeriod = (pongWait * 9) / 10
 
 	// Maximum message size allowed from peer (increased for file upload chunks)
@@ -48,8 +50,8 @@ func NewClient(conn *websocket.Conn, hub *Hub, peerID string, logger *logrus.Log
 	return &Client{
 		conn:    conn,
 		hub:     hub,
-		send:    make(chan *Message, 256),
-		sendRaw: make(chan []byte, 256),
+		send:    make(chan *Message, 2048),    // Increased from 256 to handle heavy search result streaming
+		sendRaw: make(chan []byte, 2048),      // Increased from 256 to handle heavy search result streaming
 		peerID:  peerID,
 		logger:  logger,
 	}
