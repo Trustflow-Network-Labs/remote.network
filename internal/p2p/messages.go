@@ -79,6 +79,10 @@ const (
 	MessageTypeInvoiceResponse MessageType = "invoice_response"
 	MessageTypeInvoiceNotify   MessageType = "invoice_notify"
 
+	// Store-and-forward delivery status
+	MessageTypeDeliveryStatusRequest  MessageType = "delivery_status_request"
+	MessageTypeDeliveryStatusResponse MessageType = "delivery_status_response"
+
 	// Legacy support
 	MessageTypeEcho MessageType = "echo"
 )
@@ -935,5 +939,51 @@ func CreateInvoiceNotify(invoiceID, status, message string) *QUICMessage {
 		InvoiceID: invoiceID,
 		Status:    status,
 		Message:   message,
+	})
+}
+
+// DeliveryStatusRequestData represents a request for message delivery status
+type DeliveryStatusRequestData struct {
+	MessageIDs []string `json:"message_ids"`
+}
+
+// DeliveryStatusResponseData represents message delivery status response
+type DeliveryStatusResponseData struct {
+	Statuses []MessageDeliveryStatus `json:"statuses"`
+}
+
+// MessageDeliveryStatus represents the delivery status of a single message
+type MessageDeliveryStatus struct {
+	MessageID   string    `json:"message_id"`
+	Status      string    `json:"status"` // pending, delivered, expired, not_found
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	DeliveredAt time.Time `json:"delivered_at,omitempty"`
+	MessageType string    `json:"message_type,omitempty"`
+}
+
+// CreateDeliveryStatusRequest creates a delivery status request message
+func CreateDeliveryStatusRequest(messageIDs []string) *QUICMessage {
+	return NewQUICMessage(MessageTypeDeliveryStatusRequest, &DeliveryStatusRequestData{
+		MessageIDs: messageIDs,
+	})
+}
+
+// CreateDeliveryStatusResponse creates a delivery status response message
+func CreateDeliveryStatusResponse(statuses []MessageDeliveryStatus) *QUICMessage {
+	return NewQUICMessage(MessageTypeDeliveryStatusResponse, &DeliveryStatusResponseData{
+		Statuses: statuses,
+	})
+}
+
+// ErrorResponse represents a generic error response
+type ErrorResponse struct {
+	Error string `json:"error"`
+}
+
+// CreateErrorResponse creates a generic error response message
+func CreateErrorResponse(errorMsg string) *QUICMessage {
+	return NewQUICMessage(MessageTypeEcho, &ErrorResponse{
+		Error: errorMsg,
 	})
 }

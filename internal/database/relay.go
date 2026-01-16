@@ -92,6 +92,54 @@ func (rdb *RelayDB) createTables() error {
 		rdb.logger.Info("Added last_used_relay_peer_id column to peer_preferences table", "relay-db")
 	}
 
+	// Store-and-forward: Pending messages table
+	createPendingMessagesTableSQL := `
+	CREATE TABLE IF NOT EXISTS relay_pending_messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		message_id TEXT UNIQUE NOT NULL,
+		correlation_id TEXT,
+		source_peer_id TEXT NOT NULL,
+		target_peer_id TEXT NOT NULL,
+		relay_node_id TEXT NOT NULL,
+		message_type TEXT NOT NULL,
+		payload BLOB NOT NULL,
+		payload_size INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		delivery_attempts INTEGER DEFAULT 0,
+		last_delivery_attempt INTEGER,
+		status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'delivered', 'expired', 'failed')),
+		delivered_at INTEGER,
+		priority INTEGER DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_rpm_target_peer ON relay_pending_messages(target_peer_id, status, expires_at);
+	CREATE INDEX IF NOT EXISTS idx_rpm_expires ON relay_pending_messages(expires_at, status);
+	CREATE INDEX IF NOT EXISTS idx_rpm_message_id ON relay_pending_messages(message_id);
+	CREATE INDEX IF NOT EXISTS idx_rpm_created ON relay_pending_messages(created_at);
+	`
+
+	if _, err := rdb.db.ExecContext(context.Background(), createPendingMessagesTableSQL); err != nil {
+		return fmt.Errorf("failed to create relay_pending_messages table: %v", err)
+	}
+
+	// Store-and-forward: Storage limits tracking table
+	createStorageLimitsTableSQL := `
+	CREATE TABLE IF NOT EXISTS relay_storage_limits (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		peer_id TEXT UNIQUE NOT NULL,
+		message_count INTEGER DEFAULT 0,
+		total_bytes INTEGER DEFAULT 0,
+		max_message_count INTEGER,
+		max_total_bytes INTEGER,
+		updated_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_rsl_peer ON relay_storage_limits(peer_id);
+	`
+
+	if _, err := rdb.db.ExecContext(context.Background(), createStorageLimitsTableSQL); err != nil {
+		return fmt.Errorf("failed to create relay_storage_limits table: %v", err)
+	}
+
 	// Note: relay_service_info table removed - relay discovery uses DHT metadata, not database
 	// Note: relay_sessions table removed - sessions are in-memory only per DHT-only architecture
 	// Note: relay_billing table removed - no billing implementation exists
@@ -333,5 +381,330 @@ func (rdb *RelayDB) GetLastUsedRelay(peerID string) (string, error) {
 // Close closes the relay database manager
 func (rdb *RelayDB) Close() error {
 	// No resources to clean up currently
+	return nil
+}
+
+// ========================================
+// Store-and-Forward Message Storage
+// ========================================
+
+// PendingMessage represents a message waiting for delivery
+type PendingMessage struct {
+	ID                   int64
+	MessageID            string
+	CorrelationID        string
+	SourcePeerID         string
+	TargetPeerID         string
+	RelayNodeID          string
+	MessageType          string
+	Payload              []byte
+	PayloadSize          int64
+	CreatedAt            time.Time
+	ExpiresAt            time.Time
+	DeliveryAttempts     int
+	LastDeliveryAttempt  time.Time
+	Status               string
+	DeliveredAt          time.Time
+	Priority             int
+}
+
+// StorageUsage represents current storage usage for a peer
+type StorageUsage struct {
+	PeerID        string
+	MessageCount  int64
+	TotalBytes    int64
+	MaxMessages   int64
+	MaxBytes      int64
+}
+
+// StorePendingMessage stores a message for later delivery
+func (rdb *RelayDB) StorePendingMessage(msg *PendingMessage) error {
+	query := `
+		INSERT INTO relay_pending_messages (
+			message_id, correlation_id, source_peer_id, target_peer_id, relay_node_id,
+			message_type, payload, payload_size, created_at, expires_at, status, priority
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+
+	_, err := rdb.db.Exec(query,
+		msg.MessageID,
+		msg.CorrelationID,
+		msg.SourcePeerID,
+		msg.TargetPeerID,
+		msg.RelayNodeID,
+		msg.MessageType,
+		msg.Payload,
+		msg.PayloadSize,
+		msg.CreatedAt.Unix(),
+		msg.ExpiresAt.Unix(),
+		msg.Status,
+		msg.Priority,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to store pending message: %v", err)
+	}
+
+	rdb.logger.Debug(fmt.Sprintf("Stored pending message %s (type: %s, size: %d bytes, expires: %s)",
+		msg.MessageID, msg.MessageType, msg.PayloadSize, msg.ExpiresAt.Format(time.RFC3339)), "relay-db")
+
+	return nil
+}
+
+// GetPendingMessagesForPeer retrieves all pending messages for a target peer
+func (rdb *RelayDB) GetPendingMessagesForPeer(targetPeerID string) ([]*PendingMessage, error) {
+	query := `
+		SELECT id, message_id, correlation_id, source_peer_id, target_peer_id, relay_node_id,
+		       message_type, payload, payload_size, created_at, expires_at, delivery_attempts,
+		       last_delivery_attempt, status, delivered_at, priority
+		FROM relay_pending_messages
+		WHERE target_peer_id = ? AND status = 'pending' AND expires_at > ?
+		ORDER BY priority DESC, created_at ASC
+		LIMIT 100
+	`
+
+	now := time.Now().Unix()
+	rows, err := rdb.db.Query(query, targetPeerID, now)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pending messages: %v", err)
+	}
+	defer rows.Close()
+
+	var messages []*PendingMessage
+	for rows.Next() {
+		msg := &PendingMessage{}
+		var createdAt, expiresAt int64
+		var lastDeliveryAttempt, deliveredAt sql.NullInt64
+		var correlationID sql.NullString
+
+		err := rows.Scan(
+			&msg.ID,
+			&msg.MessageID,
+			&correlationID,
+			&msg.SourcePeerID,
+			&msg.TargetPeerID,
+			&msg.RelayNodeID,
+			&msg.MessageType,
+			&msg.Payload,
+			&msg.PayloadSize,
+			&createdAt,
+			&expiresAt,
+			&msg.DeliveryAttempts,
+			&lastDeliveryAttempt,
+			&msg.Status,
+			&deliveredAt,
+			&msg.Priority,
+		)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan pending message: %v", err)
+		}
+
+		if correlationID.Valid {
+			msg.CorrelationID = correlationID.String
+		}
+
+		msg.CreatedAt = time.Unix(createdAt, 0)
+		msg.ExpiresAt = time.Unix(expiresAt, 0)
+
+		if lastDeliveryAttempt.Valid {
+			msg.LastDeliveryAttempt = time.Unix(lastDeliveryAttempt.Int64, 0)
+		}
+
+		if deliveredAt.Valid {
+			msg.DeliveredAt = time.Unix(deliveredAt.Int64, 0)
+		}
+
+		messages = append(messages, msg)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating pending messages: %v", err)
+	}
+
+	return messages, nil
+}
+
+// MarkMessageDelivered marks a message as successfully delivered
+func (rdb *RelayDB) MarkMessageDelivered(messageID string) error {
+	query := `
+		UPDATE relay_pending_messages
+		SET status = 'delivered', delivered_at = ?
+		WHERE message_id = ?
+	`
+
+	_, err := rdb.db.Exec(query, time.Now().Unix(), messageID)
+	if err != nil {
+		return fmt.Errorf("failed to mark message as delivered: %v", err)
+	}
+
+	return nil
+}
+
+// MarkMessageExpired marks a message as expired
+func (rdb *RelayDB) MarkMessageExpired(messageID string) error {
+	query := `
+		UPDATE relay_pending_messages
+		SET status = 'expired'
+		WHERE message_id = ?
+	`
+
+	_, err := rdb.db.Exec(query, messageID)
+	if err != nil {
+		return fmt.Errorf("failed to mark message as expired: %v", err)
+	}
+
+	return nil
+}
+
+// IncrementDeliveryAttempt increments the delivery attempt counter
+func (rdb *RelayDB) IncrementDeliveryAttempt(messageID string) error {
+	query := `
+		UPDATE relay_pending_messages
+		SET delivery_attempts = delivery_attempts + 1,
+		    last_delivery_attempt = ?
+		WHERE message_id = ?
+	`
+
+	_, err := rdb.db.Exec(query, time.Now().Unix(), messageID)
+	if err != nil {
+		return fmt.Errorf("failed to increment delivery attempt: %v", err)
+	}
+
+	return nil
+}
+
+// DeleteExpiredMessages deletes messages that have expired
+func (rdb *RelayDB) DeleteExpiredMessages(now time.Time) (int64, error) {
+	query := `
+		DELETE FROM relay_pending_messages
+		WHERE status = 'pending' AND expires_at < ?
+	`
+
+	result, err := rdb.db.Exec(query, now.Unix())
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete expired messages: %v", err)
+	}
+
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected: %v", err)
+	}
+
+	return deleted, nil
+}
+
+// GetMessageStatus retrieves the status of a specific message
+func (rdb *RelayDB) GetMessageStatus(messageID string) (map[string]interface{}, error) {
+	query := `
+		SELECT message_id, status, created_at, expires_at, delivered_at, message_type
+		FROM relay_pending_messages
+		WHERE message_id = ?
+	`
+
+	var msgID, status, messageType string
+	var createdAt, expiresAt int64
+	var deliveredAt sql.NullInt64
+
+	err := rdb.db.QueryRow(query, messageID).Scan(
+		&msgID, &status, &createdAt, &expiresAt, &deliveredAt, &messageType,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("message not found")
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get message status: %v", err)
+	}
+
+	result := map[string]interface{}{
+		"message_id":   msgID,
+		"status":       status,
+		"created_at":   time.Unix(createdAt, 0),
+		"expires_at":   time.Unix(expiresAt, 0),
+		"message_type": messageType,
+	}
+
+	if deliveredAt.Valid {
+		result["delivered_at"] = time.Unix(deliveredAt.Int64, 0)
+	}
+
+	return result, nil
+}
+
+// GetStorageUsage retrieves current storage usage for a peer
+func (rdb *RelayDB) GetStorageUsage(peerID string) (StorageUsage, error) {
+	query := `SELECT peer_id, message_count, total_bytes, max_message_count, max_total_bytes FROM relay_storage_limits WHERE peer_id = ?`
+
+	var usage StorageUsage
+	var maxMessages, maxBytes sql.NullInt64
+
+	err := rdb.db.QueryRow(query, peerID).Scan(
+		&usage.PeerID,
+		&usage.MessageCount,
+		&usage.TotalBytes,
+		&maxMessages,
+		&maxBytes,
+	)
+
+	if err == sql.ErrNoRows {
+		// No record exists, return zero usage
+		return StorageUsage{
+			PeerID:       peerID,
+			MessageCount: 0,
+			TotalBytes:   0,
+		}, nil
+	}
+
+	if err != nil {
+		return StorageUsage{}, fmt.Errorf("failed to get storage usage: %v", err)
+	}
+
+	if maxMessages.Valid {
+		usage.MaxMessages = maxMessages.Int64
+	}
+
+	if maxBytes.Valid {
+		usage.MaxBytes = maxBytes.Int64
+	}
+
+	return usage, nil
+}
+
+// IncrementStorageUsage increments storage usage counters for a peer
+func (rdb *RelayDB) IncrementStorageUsage(peerID string, messageCount int, bytes int64) error {
+	query := `
+		INSERT INTO relay_storage_limits (peer_id, message_count, total_bytes, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(peer_id) DO UPDATE SET
+			message_count = message_count + excluded.message_count,
+			total_bytes = total_bytes + excluded.total_bytes,
+			updated_at = excluded.updated_at
+	`
+
+	_, err := rdb.db.Exec(query, peerID, messageCount, bytes, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("failed to increment storage usage: %v", err)
+	}
+
+	return nil
+}
+
+// DecrementStorageUsage decrements storage usage counters for a peer
+func (rdb *RelayDB) DecrementStorageUsage(peerID string, messageCount int, bytes int64) error {
+	query := `
+		UPDATE relay_storage_limits
+		SET message_count = MAX(0, message_count - ?),
+		    total_bytes = MAX(0, total_bytes - ?),
+		    updated_at = ?
+		WHERE peer_id = ?
+	`
+
+	_, err := rdb.db.Exec(query, messageCount, bytes, time.Now().Unix(), peerID)
+	if err != nil {
+		return fmt.Errorf("failed to decrement storage usage: %v", err)
+	}
+
 	return nil
 }

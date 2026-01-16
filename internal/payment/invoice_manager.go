@@ -403,15 +403,27 @@ func (im *InvoiceManager) SettleInvoice(invoiceID string) error {
 
 	im.logger.Info(fmt.Sprintf("Invoice %s settled", invoiceID), "invoice_manager")
 
-	// Notify both peers
+	// Notify the other party (not yourself)
 	if im.quicPeer != nil {
-		// Notify the payer (who accepted the invoice)
-		if err := im.sendInvoiceNotification(invoice.ToPeerID, invoiceID, "settled", "Payment settled successfully"); err != nil {
-			im.logger.Warn(fmt.Sprintf("Failed to notify payer of settlement after all retries: %v", err), "invoice_manager")
-		}
-		// Notify the payee (who created the invoice)
-		if err := im.sendInvoiceNotification(invoice.FromPeerID, invoiceID, "settled", "Payment received"); err != nil {
-			im.logger.Warn(fmt.Sprintf("Failed to notify payee of settlement after all retries: %v", err), "invoice_manager")
+		// Determine which peer to notify based on who we are
+		// If we're the payer (ToPeerID), notify the payee (FromPeerID)
+		// If we're the payee (FromPeerID), notify the payer (ToPeerID)
+		// Skip notification if we're somehow neither (shouldn't happen)
+
+		if im.localPeerID == invoice.ToPeerID {
+			// We're the payer - notify the payee
+			if err := im.sendInvoiceNotification(invoice.FromPeerID, invoiceID, "settled", "Payment received"); err != nil {
+				im.logger.Warn(fmt.Sprintf("Failed to notify payee of settlement after all retries: %v", err), "invoice_manager")
+			}
+		} else if im.localPeerID == invoice.FromPeerID {
+			// We're the payee - notify the payer
+			if err := im.sendInvoiceNotification(invoice.ToPeerID, invoiceID, "settled", "Payment settled successfully"); err != nil {
+				im.logger.Warn(fmt.Sprintf("Failed to notify payer of settlement after all retries: %v", err), "invoice_manager")
+			}
+		} else {
+			// Neither party? This shouldn't happen, but log it
+			im.logger.Warn(fmt.Sprintf("Cannot send settlement notification - local peer %s is neither payer nor payee (from=%s, to=%s)",
+				im.localPeerID[:8], invoice.FromPeerID[:8], invoice.ToPeerID[:8]), "invoice_manager")
 		}
 	}
 

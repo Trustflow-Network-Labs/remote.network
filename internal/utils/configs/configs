@@ -102,6 +102,32 @@ relay_batch_interval = 30s
 relay_traffic_batch_size = 100
 relay_capacity = 1000
 
+# Store-and-Forward Configuration
+# Enable message queuing for offline peers (default: true)
+relay_store_enabled = true
+# Maximum messages to store per peer (0 = unlimited, default: 1000)
+relay_store_max_messages = 1000
+# Maximum storage size per peer in bytes (default: 100MB)
+relay_store_max_bytes = 104857600
+# Maximum single message size for store-and-forward in bytes (default: 10MB)
+relay_store_max_message_size = 10485760
+# Cleanup interval for expired messages (default: 1h)
+relay_cleanup_interval = 1h
+# Default TTL for messages without specific TTL (default: 24h)
+relay_ttl_default = 24h
+
+# TTL overrides per message type (optional)
+# Payment messages (7 days)
+relay_ttl_invoice_request = 168h
+relay_ttl_invoice_response = 168h
+relay_ttl_invoice_notify = 168h
+# Job updates (24 hours)
+relay_ttl_job_status_update = 24h
+# Job results (48 hours)
+relay_ttl_job_response = 48h
+relay_ttl_service_response = 48h
+relay_ttl_capabilities_response = 48h
+
 # Relay Selection (for NAT peers)
 # Max latency set to 5s to match ping timeout (allows relays that respond within timeout window)
 relay_max_latency = 5s

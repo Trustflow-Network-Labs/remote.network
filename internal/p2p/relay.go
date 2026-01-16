@@ -127,6 +127,11 @@ func NewRelayPeer(config *utils.ConfigManager, logger *utils.LogsManager, dbMana
 	if isRelayMode {
 		logger.Info(fmt.Sprintf("Relay mode enabled: max_connections=%d, pricing=%.4f/GB, free_coordination=%v",
 			maxConnections, pricingPerGB, freeCoordination), "relay")
+
+		// Start cleanup goroutine for expired messages
+		if config.GetConfigBool("relay_store_enabled", true) {
+			go rp.runMessageCleanup()
+		}
 	}
 
 	return rp
@@ -306,6 +311,9 @@ func (rp *RelayPeer) HandleRelayReceiveStreamReady(msg *QUICMessage, stream *qui
 	rp.logger.Info(fmt.Sprintf("✅ Receive stream registered for peer %s (session: %s)",
 		data.PeerID, data.SessionID), "relay")
 
+	// Trigger pending message delivery in background
+	go rp.deliverPendingMessages(data.PeerID)
+
 	return nil
 }
 
@@ -333,7 +341,47 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 	rp.sessionsMutex.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("session not found: %s", data.SessionID)
+		// Session not found - this happens when:
+		// 1. Target peer reconnected with new session (stale metadata)
+		// 2. Session expired due to inactivity
+		// 3. Relay restarted and lost in-memory sessions
+		// Try to forward directly to target peer, or store-and-forward if offline
+		rp.logger.Debug(fmt.Sprintf("Session %s not found, attempting direct forward to %s",
+			data.SessionID[:8], data.TargetPeerID[:8]), "relay")
+
+		// Prepare the payload (inject source peer ID if needed)
+		forwardPayload := data.Payload
+		if data.MessageType == "job_status_request" || data.MessageType == "job_request" ||
+		   data.MessageType == "job_status_update" || data.MessageType == "job_data_transfer_request" ||
+		   data.MessageType == "capabilities_request" || data.MessageType == "invoice_request" ||
+		   data.MessageType == "invoice_response" || data.MessageType == "invoice_notify" ||
+		   data.MessageType == "service_search" {
+			msg, err := UnmarshalQUICMessage(data.Payload)
+			if err == nil {
+				msg.SourcePeerID = data.SourcePeerID
+				if modifiedPayload, err := msg.Marshal(); err == nil {
+					forwardPayload = modifiedPayload
+				}
+			}
+		}
+
+		// Try to forward to target (will auto-trigger store-and-forward if offline)
+		if err := rp.forwardDataToTarget(data.TargetPeerID, forwardPayload); err != nil {
+			rp.logger.Warn(fmt.Sprintf("Forward failed for session %s: %v", data.SessionID[:8], err), "relay")
+
+			// Send error response back to source
+			errorMsg := fmt.Sprintf("error: %v", err)
+			if stream != nil {
+				(*stream).Write([]byte(errorMsg))
+			}
+			return fmt.Errorf("session not found and forward failed: %v", err)
+		}
+
+		// Forward succeeded (either direct or stored for later)
+		if stream != nil {
+			(*stream).Write([]byte("success"))
+		}
+		return nil
 	}
 
 	// Store the stream for response routing (correlation ID: source->target)
@@ -790,8 +838,10 @@ func (rp *RelayPeer) forwardDataToTarget(targetPeerID string, data []byte) error
 	session, exists := rp.registeredClients[targetPeerID]
 	rp.clientsMutex.RUnlock()
 
+	// Target not registered - try store-and-forward if eligible
 	if !exists {
-		return fmt.Errorf("target client not registered: %s", targetPeerID)
+		err := fmt.Errorf("target client not registered: %s", targetPeerID)
+		return rp.tryStoreAndForward(targetPeerID, data, err)
 	}
 
 	// Get the pre-opened receive stream
@@ -799,8 +849,10 @@ func (rp *RelayPeer) forwardDataToTarget(targetPeerID string, data []byte) error
 	stream := session.ReceiveStream
 	session.mutex.RUnlock()
 
+	// No receive stream - try store-and-forward if eligible
 	if stream == nil {
-		return fmt.Errorf("no receive stream available for target %s (NAT peer must open receive stream after registration)", targetPeerID)
+		err := fmt.Errorf("no receive stream available for target %s (NAT peer must open receive stream after registration)", targetPeerID)
+		return rp.tryStoreAndForward(targetPeerID, data, err)
 	}
 
 	// Write length prefix (4 bytes, big-endian) so receiver knows message boundaries
@@ -817,14 +869,16 @@ func (rp *RelayPeer) forwardDataToTarget(targetPeerID string, data []byte) error
 	if _, err := (*stream).Write(lengthPrefix); err != nil {
 		// Stream may be closed, clear it from session
 		session.ReceiveStream = nil
-		return fmt.Errorf("failed to write length prefix to target %s: %v", targetPeerID, err)
+		writeErr := fmt.Errorf("failed to write length prefix to target %s: %v", targetPeerID, err)
+		return rp.tryStoreAndForward(targetPeerID, data, writeErr)
 	}
 
 	// Write the data to the stream
 	if _, err := (*stream).Write(data); err != nil {
 		// Stream may be closed, clear it from session
 		session.ReceiveStream = nil
-		return fmt.Errorf("failed to write data to target %s: %v", targetPeerID, err)
+		writeErr := fmt.Errorf("failed to write data to target %s: %v", targetPeerID, err)
+		return rp.tryStoreAndForward(targetPeerID, data, writeErr)
 	}
 
 	// Update egress bytes for billing
@@ -832,6 +886,197 @@ func (rp *RelayPeer) forwardDataToTarget(targetPeerID string, data []byte) error
 
 	rp.logger.Debug(fmt.Sprintf("Forwarded %d bytes to %s via receive stream", len(data), targetPeerID), "relay")
 	return nil
+}
+
+// tryStoreAndForward attempts to store a message for later delivery if eligible
+// Returns nil if successfully stored, otherwise returns the original error
+func (rp *RelayPeer) tryStoreAndForward(targetPeerID string, data []byte, originalErr error) error {
+	// Log the original forward failure
+	rp.logger.Debug(fmt.Sprintf("Forward failed: %v, checking store-and-forward eligibility", originalErr), "relay")
+
+	// Try to unmarshal to check message type
+	msg, parseErr := UnmarshalQUICMessage(data)
+	if parseErr != nil {
+		rp.logger.Debug(fmt.Sprintf("Cannot parse message for store-and-forward: %v", parseErr), "relay")
+		return originalErr // Not a valid QUIC message, return original error
+	}
+
+	// Check if message type is eligible for store-and-forward
+	if !rp.isEligibleForStore(string(msg.Type)) {
+		rp.logger.Debug(fmt.Sprintf("Message type %s not eligible for store-and-forward", msg.Type), "relay")
+		return originalErr // Not eligible, return original error
+	}
+
+	// Attempt to store the message
+	if storeErr := rp.storeMessage(targetPeerID, msg, data); storeErr != nil {
+		rp.logger.Warn(fmt.Sprintf("Failed to store message for offline peer %s: %v", targetPeerID[:8], storeErr), "relay")
+		return originalErr // Storage failed, return original error
+	}
+
+	// Successfully stored - return nil to indicate success
+	rp.logger.Info(fmt.Sprintf("Message queued for offline peer %s (type: %s)", targetPeerID[:8], msg.Type), "relay")
+	return nil
+}
+
+// deliverPendingMessages delivers all pending messages to a peer that just came online
+func (rp *RelayPeer) deliverPendingMessages(targetPeerID string) {
+	rp.logger.Info(fmt.Sprintf("📬 Checking pending messages for peer %s", targetPeerID[:8]), "relay")
+
+	// Retrieve pending messages from database
+	messages, err := rp.dbManager.Relay.GetPendingMessagesForPeer(targetPeerID)
+	if err != nil {
+		rp.logger.Error(fmt.Sprintf("Failed to retrieve pending messages for %s: %v", targetPeerID[:8], err), "relay")
+		return
+	}
+
+	if len(messages) == 0 {
+		rp.logger.Debug(fmt.Sprintf("No pending messages for peer %s", targetPeerID[:8]), "relay")
+		return
+	}
+
+	rp.logger.Info(fmt.Sprintf("📤 Delivering %d pending messages to peer %s", len(messages), targetPeerID[:8]), "relay")
+
+	delivered := 0
+	totalBytes := int64(0)
+	failed := 0
+
+	for _, msg := range messages {
+		// Check if message expired
+		if time.Now().After(msg.ExpiresAt) {
+			rp.logger.Warn(fmt.Sprintf("Message %s expired, marking as expired", msg.MessageID[:8]), "relay")
+			rp.dbManager.Relay.MarkMessageExpired(msg.MessageID)
+			continue
+		}
+
+		// Attempt delivery
+		err := rp.forwardDataToTarget(targetPeerID, msg.Payload)
+		if err != nil {
+			failed++
+			rp.logger.Warn(fmt.Sprintf("Failed to deliver message %s: %v", msg.MessageID[:8], err), "relay")
+
+			// Update delivery attempt counter
+			rp.dbManager.Relay.IncrementDeliveryAttempt(msg.MessageID)
+
+			// If peer disconnected during delivery, stop
+			if !rp.isPeerConnected(targetPeerID) {
+				rp.logger.Warn(fmt.Sprintf("Peer %s disconnected during delivery, stopping", targetPeerID[:8]), "relay")
+				break
+			}
+			continue
+		}
+
+		// Mark as delivered
+		if err := rp.dbManager.Relay.MarkMessageDelivered(msg.MessageID); err != nil {
+			rp.logger.Warn(fmt.Sprintf("Failed to mark message %s as delivered: %v", msg.MessageID[:8], err), "relay")
+		}
+
+		delivered++
+		totalBytes += msg.PayloadSize
+
+		rp.logger.Debug(fmt.Sprintf("✅ Delivered message %s to peer %s (type: %s)",
+			msg.MessageID[:8], targetPeerID[:8], msg.MessageType), "relay")
+	}
+
+	// Update storage usage (decrement by delivered count and bytes)
+	if delivered > 0 {
+		if err := rp.dbManager.Relay.DecrementStorageUsage(targetPeerID, delivered, totalBytes); err != nil {
+			rp.logger.Warn(fmt.Sprintf("Failed to update storage usage: %v", err), "relay")
+		}
+
+		rp.logger.Info(fmt.Sprintf("✅ Delivery complete for peer %s: %d delivered (%d bytes), %d failed",
+			targetPeerID[:8], delivered, totalBytes, failed), "relay")
+	} else if failed > 0 {
+		rp.logger.Warn(fmt.Sprintf("Delivery failed for peer %s: %d messages could not be delivered", targetPeerID[:8], failed), "relay")
+	}
+}
+
+// runMessageCleanup runs a periodic cleanup of expired messages
+func (rp *RelayPeer) runMessageCleanup() {
+	cleanupInterval := rp.config.GetConfigDuration("relay_cleanup_interval", 1*time.Hour)
+	ticker := time.NewTicker(cleanupInterval)
+	defer ticker.Stop()
+
+	rp.logger.Info(fmt.Sprintf("🧹 Started message cleanup goroutine (interval: %v)", cleanupInterval), "relay")
+
+	for {
+		select {
+		case <-ticker.C:
+			rp.cleanupExpiredMessages()
+		case <-rp.ctx.Done():
+			rp.logger.Info("Stopping message cleanup goroutine", "relay")
+			return
+		}
+	}
+}
+
+// cleanupExpiredMessages deletes expired messages from the database
+func (rp *RelayPeer) cleanupExpiredMessages() {
+	rp.logger.Debug("Running expired message cleanup", "relay")
+
+	startTime := time.Now()
+	expired, err := rp.dbManager.Relay.DeleteExpiredMessages(time.Now())
+	if err != nil {
+		rp.logger.Error(fmt.Sprintf("Cleanup failed: %v", err), "relay")
+		return
+	}
+
+	if expired > 0 {
+		rp.logger.Info(fmt.Sprintf("🧹 Cleaned up %d expired messages (took %v)",
+			expired, time.Since(startTime)), "relay")
+	}
+}
+
+// HandleDeliveryStatusQuery processes delivery status query requests
+func (rp *RelayPeer) HandleDeliveryStatusQuery(msg *QUICMessage) *QUICMessage {
+	var request DeliveryStatusRequestData
+	if err := msg.GetDataAs(&request); err != nil {
+		rp.logger.Error(fmt.Sprintf("Failed to parse delivery status request: %v", err), "relay")
+		return CreateErrorResponse("invalid request")
+	}
+
+	rp.logger.Debug(fmt.Sprintf("Delivery status query for %d messages", len(request.MessageIDs)), "relay")
+
+	var statuses []MessageDeliveryStatus
+
+	for _, msgID := range request.MessageIDs {
+		statusMap, err := rp.dbManager.Relay.GetMessageStatus(msgID)
+		if err != nil {
+			// Message not found
+			statuses = append(statuses, MessageDeliveryStatus{
+				MessageID: msgID,
+				Status:    "not_found",
+			})
+			continue
+		}
+
+		// Convert map to MessageDeliveryStatus struct
+		status := MessageDeliveryStatus{
+			MessageID: statusMap["message_id"].(string),
+			Status:    statusMap["status"].(string),
+		}
+
+		if createdAt, ok := statusMap["created_at"].(time.Time); ok {
+			status.CreatedAt = createdAt
+		}
+
+		if expiresAt, ok := statusMap["expires_at"].(time.Time); ok {
+			status.ExpiresAt = expiresAt
+		}
+
+		if deliveredAt, ok := statusMap["delivered_at"].(time.Time); ok {
+			status.DeliveredAt = deliveredAt
+		}
+
+		if messageType, ok := statusMap["message_type"].(string); ok {
+			status.MessageType = messageType
+		}
+
+		statuses = append(statuses, status)
+	}
+
+	rp.logger.Debug(fmt.Sprintf("Returning status for %d messages", len(statuses)), "relay")
+
+	return CreateDeliveryStatusResponse(statuses)
 }
 
 // forwardHolePunchToTarget forwards hole punch coordination to target
@@ -1027,4 +1272,155 @@ func (rp *RelayPeer) UpdateSessionKeepalive(sessionID string) {
 	rp.logger.Debug(fmt.Sprintf("Updated keepalive for session %s (client: %s)", sessionID, session.ClientNodeID), "relay")
 
 	// Note: Keepalive updated in-memory only (no database record to update)
+}
+
+// ========================================
+// Store-and-Forward Configuration and Helpers
+// ========================================
+
+// MessageTypeTTLs defines TTL (time-to-live) for each message type
+var MessageTypeTTLs = map[string]time.Duration{
+	// HIGH PRIORITY - Payment related (7 days)
+	"invoice_request":  7 * 24 * time.Hour,
+	"invoice_response": 7 * 24 * time.Hour,
+	"invoice_notify":   7 * 24 * time.Hour,
+
+	// HIGH PRIORITY - Job updates (24 hours)
+	"job_status_update": 24 * time.Hour,
+
+	// MEDIUM PRIORITY - Results (48 hours)
+	"job_response":          48 * time.Hour,
+	"service_response":      48 * time.Hour,
+	"capabilities_response": 48 * time.Hour,
+}
+
+// DefaultMessageTTL is the default TTL for message types not explicitly configured
+const DefaultMessageTTL = 24 * time.Hour
+
+// getMessageTTL returns the TTL for a given message type
+// Checks config overrides first, then hardcoded defaults, then fallback
+func (rp *RelayPeer) getMessageTTL(messageType string) time.Duration {
+	// Check config override first
+	configKey := fmt.Sprintf("relay_ttl_%s", messageType)
+	if ttl := rp.config.GetConfigDuration(configKey, 0); ttl > 0 {
+		return ttl
+	}
+
+	// Use hardcoded mapping
+	if ttl, exists := MessageTypeTTLs[messageType]; exists {
+		return ttl
+	}
+
+	// Fallback to default
+	return DefaultMessageTTL
+}
+
+// isEligibleForStore checks if a message type is eligible for store-and-forward
+func (rp *RelayPeer) isEligibleForStore(messageType string) bool {
+	eligibleTypes := map[string]bool{
+		"invoice_request":         true,
+		"invoice_response":        true,
+		"invoice_notify":          true,
+		"job_status_update":       true,
+		"job_response":            true,
+		"service_response":        true,
+		"capabilities_response":   true,
+	}
+
+	return eligibleTypes[messageType]
+}
+
+// canStoreMessage checks if a message can be stored given current storage limits
+func (rp *RelayPeer) canStoreMessage(targetPeerID string, messageSize int64) (bool, string) {
+	// Get storage limits from configuration
+	maxMessages := rp.config.GetConfigInt64("relay_store_max_messages", 1000, 0, 1000000)
+	maxBytes := rp.config.GetConfigInt64("relay_store_max_bytes", 100*1024*1024, 0, 10*1024*1024*1024)
+
+	// Check per-message size limit
+	maxMessageSize := rp.config.GetConfigInt64("relay_store_max_message_size", 10*1024*1024, 0, 100*1024*1024)
+	if messageSize > maxMessageSize {
+		return false, "message size exceeds maximum"
+	}
+
+	// Get current usage from database
+	usage, err := rp.dbManager.Relay.GetStorageUsage(targetPeerID)
+	if err != nil {
+		rp.logger.Warn(fmt.Sprintf("Failed to check storage usage: %v", err), "relay")
+		return false, "storage check failed"
+	}
+
+	// Check message count limit
+	if maxMessages > 0 && usage.MessageCount >= maxMessages {
+		return false, "message count limit exceeded"
+	}
+
+	// Check total bytes limit
+	if maxBytes > 0 && (usage.TotalBytes+messageSize) > maxBytes {
+		return false, "storage size limit exceeded"
+	}
+
+	return true, ""
+}
+
+// isPeerConnected checks if a peer is currently connected to this relay
+func (rp *RelayPeer) isPeerConnected(peerID string) bool {
+	rp.clientsMutex.RLock()
+	_, exists := rp.registeredClients[peerID]
+	rp.clientsMutex.RUnlock()
+	return exists
+}
+
+// getOwnNodeID returns this relay's node ID (would be set elsewhere, placeholder for now)
+func (rp *RelayPeer) getOwnNodeID() string {
+	// TODO: Get from actual node ID source
+	return "relay-node"
+}
+
+// storeMessage stores a message for later delivery when target peer is offline
+func (rp *RelayPeer) storeMessage(targetPeerID string, msg *QUICMessage, payload []byte) error {
+	// Check if store-and-forward is enabled
+	if !rp.config.GetConfigBool("relay_store_enabled", true) {
+		return fmt.Errorf("store-and-forward disabled")
+	}
+
+	// Check storage limits
+	canStore, reason := rp.canStoreMessage(targetPeerID, int64(len(payload)))
+	if !canStore {
+		return fmt.Errorf("storage limit: %s", reason)
+	}
+
+	// Calculate expiration based on message type
+	ttl := rp.getMessageTTL(string(msg.Type))
+	expiresAt := time.Now().Add(ttl)
+
+	// Create pending message
+	messageID := uuid.New().String()
+	pendingMsg := &database.PendingMessage{
+		MessageID:    messageID,
+		SourcePeerID: msg.SourcePeerID,
+		TargetPeerID: targetPeerID,
+		RelayNodeID:  rp.getOwnNodeID(),
+		MessageType:  string(msg.Type),
+		Payload:      payload,
+		PayloadSize:  int64(len(payload)),
+		CreatedAt:    time.Now(),
+		ExpiresAt:    expiresAt,
+		Status:       "pending",
+	}
+
+	// Store in database
+	err := rp.dbManager.Relay.StorePendingMessage(pendingMsg)
+	if err != nil {
+		return fmt.Errorf("database error: %v", err)
+	}
+
+	// Update storage usage tracking
+	if err := rp.dbManager.Relay.IncrementStorageUsage(targetPeerID, 1, int64(len(payload))); err != nil {
+		rp.logger.Warn(fmt.Sprintf("Failed to update storage usage: %v", err), "relay")
+	}
+
+	rp.logger.Info(fmt.Sprintf("Stored message %s for offline peer %s (type: %s, size: %d bytes, TTL: %v)",
+		messageID[:8], targetPeerID[:8], msg.Type, len(payload), ttl), "relay")
+
+	return nil
 }
