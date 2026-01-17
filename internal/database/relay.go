@@ -574,24 +574,45 @@ func (rdb *RelayDB) IncrementDeliveryAttempt(messageID string) error {
 	return nil
 }
 
-// DeleteExpiredMessages deletes messages that have expired
-func (rdb *RelayDB) DeleteExpiredMessages(now time.Time) (int64, error) {
-	query := `
+// DeleteExpiredMessages deletes messages that have expired or been delivered/expired beyond retention period
+// Returns: (expiredPending, deliveredOld, expiredOld, error)
+func (rdb *RelayDB) DeleteExpiredMessages(now time.Time, deliveredRetention time.Duration) (int64, int64, int64, error) {
+	// 1. Delete expired pending messages (current behavior)
+	queryExpiredPending := `
 		DELETE FROM relay_pending_messages
 		WHERE status = 'pending' AND expires_at < ?
 	`
-
-	result, err := rdb.db.Exec(query, now.Unix())
+	result1, err := rdb.db.Exec(queryExpiredPending, now.Unix())
 	if err != nil {
-		return 0, fmt.Errorf("failed to delete expired messages: %v", err)
+		return 0, 0, 0, fmt.Errorf("failed to delete expired pending messages: %v", err)
 	}
+	expiredPending, _ := result1.RowsAffected()
 
-	deleted, err := result.RowsAffected()
+	// 2. Delete delivered messages older than retention period (privacy/disk space)
+	retentionCutoff := now.Add(-deliveredRetention).Unix()
+	queryDelivered := `
+		DELETE FROM relay_pending_messages
+		WHERE status = 'delivered' AND delivered_at < ?
+	`
+	result2, err := rdb.db.Exec(queryDelivered, retentionCutoff)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get rows affected: %v", err)
+		return expiredPending, 0, 0, fmt.Errorf("failed to delete old delivered messages: %v", err)
 	}
+	deliveredOld, _ := result2.RowsAffected()
 
-	return deleted, nil
+	// 3. Delete expired messages older than retention period (privacy/disk space)
+	// Use expires_at as proxy for when message was marked expired
+	queryExpiredOld := `
+		DELETE FROM relay_pending_messages
+		WHERE status = 'expired' AND expires_at < ?
+	`
+	result3, err := rdb.db.Exec(queryExpiredOld, retentionCutoff)
+	if err != nil {
+		return expiredPending, deliveredOld, 0, fmt.Errorf("failed to delete old expired messages: %v", err)
+	}
+	expiredOld, _ := result3.RowsAffected()
+
+	return expiredPending, deliveredOld, expiredOld, nil
 }
 
 // GetMessageStatus retrieves the status of a specific message

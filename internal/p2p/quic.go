@@ -68,6 +68,8 @@ type QUICPeer struct {
 	// Invoice handler for P2P invoice payments
 	invoiceHandler        *InvoiceHandler
 	invoiceMessageHandler *InvoiceMessageHandler
+	// Local store-and-forward for public peers
+	localStoreForward *LocalStoreForward
 	// Callback for relay peer discovery
 	onRelayDiscovered func(*database.PeerMetadata)
 	// Callback for connection failures
@@ -430,6 +432,11 @@ func (q *QUICPeer) SetInvoiceMessageHandler(handler *InvoiceMessageHandler) {
 	q.invoiceMessageHandler = handler
 }
 
+// SetLocalStoreForward sets the local store-and-forward service for this QUIC peer
+func (q *QUICPeer) SetLocalStoreForward(lsf *LocalStoreForward) {
+	q.localStoreForward = lsf
+}
+
 // GetJobHandler returns the job message handler
 func (q *QUICPeer) GetJobHandler() *JobMessageHandler {
 	return q.jobHandler
@@ -530,6 +537,11 @@ func (q *QUICPeer) handleConnection(conn *quic.Conn, remoteAddr string) {
 		// Notify that connection is ready (server-side)
 		if q.onConnectionReady != nil {
 			go q.onConnectionReady(remotePeer.PeerID, remoteAddr)
+		}
+
+		// Trigger local store-and-forward delivery
+		if q.localStoreForward != nil {
+			go q.localStoreForward.OnPeerConnected(remotePeer.PeerID, remoteAddr)
 		}
 	} else {
 		q.logger.Warn(fmt.Sprintf("Identity exchanger not set, skipping identity exchange for %s", remoteAddr), "quic")
@@ -928,6 +940,11 @@ func (q *QUICPeer) ConnectToPeer(addr string) (*quic.Conn, error) {
 		if q.onConnectionReady != nil {
 			go q.onConnectionReady(remotePeer.PeerID, addr)
 		}
+
+		// Trigger local store-and-forward delivery
+		if q.localStoreForward != nil {
+			go q.localStoreForward.OnPeerConnected(remotePeer.PeerID, addr)
+		}
 	} else {
 		q.logger.Warn(fmt.Sprintf("Identity exchanger not set, connection to %s not authenticated", addr), "quic")
 
@@ -1123,6 +1140,16 @@ func (q *QUICPeer) GetConnectionByPeerID(peerID string) (*quic.Conn, error) {
 func (q *QUICPeer) SendMessageToPeer(peerID string, message []byte) error {
 	addr, exists := q.GetAddressByPeerID(peerID)
 	if !exists {
+		// Try local store-and-forward for public peers
+		if q.localStoreForward != nil {
+			storeErr := q.localStoreForward.TryStoreMessage(peerID, message)
+			if storeErr == nil {
+				// Message queued successfully
+				return nil
+			}
+			// Log failure but continue to return original error
+			q.logger.Debug(fmt.Sprintf("Local store-and-forward failed for peer %s: %v", peerID[:8], storeErr), "quic")
+		}
 		return fmt.Errorf("no connection found for peer ID %s", peerID[:8])
 	}
 

@@ -87,7 +87,17 @@ func (imh *InvoiceMessageHandler) SendInvoiceRequestWithRetry(
 		imh.logger.Debug(fmt.Sprintf("Direct send failed for invoice %s to peer %s: %v",
 			invoiceID, toPeerID[:8], err), "invoice_message_handler")
 
-		// Try via relay if direct fails
+		// Check if peer is public (don't try relay for public peers)
+		if imh.quicPeer.localStoreForward != nil {
+			isPublic, typeErr := imh.quicPeer.localStoreForward.IsPublicPeer(toPeerID)
+			if typeErr == nil && isPublic {
+				imh.logger.Debug(fmt.Sprintf("Peer %s is public, invoice queued for local store-and-forward", toPeerID[:8]), "invoice_message_handler")
+				lastErr = err
+				continue
+			}
+		}
+
+		// Try via relay if direct fails (for NAT peers only)
 		relayErr := imh.sendInvoiceRequestViaRelay(toPeerID, invoiceData)
 		if relayErr == nil {
 			imh.logger.Info(fmt.Sprintf("Invoice %s sent via relay to peer %s (attempt %d)",
@@ -129,7 +139,17 @@ func (imh *InvoiceMessageHandler) SendInvoiceResponseWithRetry(
 			return nil
 		}
 
-		// Try via relay
+		// Check if peer is public (don't try relay for public peers)
+		if imh.quicPeer.localStoreForward != nil {
+			isPublic, typeErr := imh.quicPeer.localStoreForward.IsPublicPeer(toPeerID)
+			if typeErr == nil && isPublic {
+				imh.logger.Debug(fmt.Sprintf("Peer %s is public, response queued for local store-and-forward", toPeerID[:8]), "invoice_message_handler")
+				lastErr = err
+				continue
+			}
+		}
+
+		// Try via relay (for NAT peers only)
 		relayErr := imh.sendInvoiceResponseViaRelay(toPeerID, invoiceID, accepted, message)
 		if relayErr == nil {
 			return nil
@@ -165,7 +185,19 @@ func (imh *InvoiceMessageHandler) SendInvoiceNotificationWithRetry(
 			return nil
 		}
 
-		// Try via relay
+		// Check if peer is public (don't try relay for public peers)
+		// For public peers, the message is already queued locally by SendMessageToPeer
+		if imh.quicPeer.localStoreForward != nil {
+			isPublic, typeErr := imh.quicPeer.localStoreForward.IsPublicPeer(toPeerID)
+			if typeErr == nil && isPublic {
+				// Message already queued for later delivery
+				imh.logger.Debug(fmt.Sprintf("Peer %s is public, message queued for local store-and-forward", toPeerID[:8]), "invoice_message_handler")
+				lastErr = err
+				continue
+			}
+		}
+
+		// Try via relay (for NAT peers only)
 		relayErr := imh.sendInvoiceNotificationViaRelay(toPeerID, invoiceID, status, message)
 		if relayErr == nil {
 			return nil

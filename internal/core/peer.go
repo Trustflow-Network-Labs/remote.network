@@ -33,15 +33,16 @@ type PeerManager struct {
 	config                *utils.ConfigManager
 	logger                *utils.LogsManager
 	keyPair               *crypto.KeyPair
-	dht                   *p2p.DHTPeer
-	quic                  *p2p.QUICPeer
-	relayPeer             *p2p.RelayPeer
-	relayManager          *p2p.RelayManager
-	trafficMonitor        *p2p.RelayTrafficMonitor
-	natDetector           *p2p.NATDetector
-	topologyMgr           *p2p.NATTopologyManager
-	networkStateMonitor   *p2p.NetworkStateMonitor
-	holePuncher           *p2p.HolePuncher
+	dht                     *p2p.DHTPeer
+	quic                    *p2p.QUICPeer
+	relayPeer               *p2p.RelayPeer
+	relayManager            *p2p.RelayManager
+	trafficMonitor          *p2p.RelayTrafficMonitor
+	localStoreForward       *p2p.LocalStoreForward
+	natDetector             *p2p.NATDetector
+	topologyMgr             *p2p.NATTopologyManager
+	networkStateMonitor     *p2p.NetworkStateMonitor
+	holePuncher             *p2p.HolePuncher
 	// Phase 4: DHT-based metadata services (replaces MetadataBroadcaster)
 	metadataPublisher       *p2p.MetadataPublisher
 	metadataFetcher         *p2p.MetadataFetcher
@@ -202,6 +203,19 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 	networkStateMonitor := p2p.NewNetworkStateMonitor(config, logger, natDetector, topologyMgr, metadataPublisher, relayManager)
 	logger.Info("Network state monitor initialized (IP/NAT change detection)", "core")
 
+	// Initialize local store-and-forward for public peers
+	// This handles message queueing for all eligible message types (invoice, job, service, capabilities)
+	localStoreForward := p2p.NewLocalStoreForward(
+		config,
+		logger,
+		dbManager,
+		quic,
+		knownPeers,
+		metadataQuery,
+		keyPair.PeerID(),
+	)
+	logger.Info("Local store-and-forward initialized for public peers", "core")
+
 	pm := &PeerManager{
 		config:                  config,
 		logger:                  logger,
@@ -211,6 +225,7 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 		relayPeer:               relayPeer,
 		relayManager:            relayManager,
 		trafficMonitor:          trafficMonitor,
+		localStoreForward:       localStoreForward,
 		natDetector:             natDetector,
 		topologyMgr:             topologyMgr,
 		networkStateMonitor:     networkStateMonitor,
@@ -233,6 +248,11 @@ func NewPeerManager(config *utils.ConfigManager, logger *utils.LogsManager, keyP
 
 	// Set dependencies on QUIC peer
 	quic.SetDependencies(dht, dbManager, relayPeer)
+
+	// Link local store-and-forward to QUIC peer and start background tasks
+	quic.SetLocalStoreForward(localStoreForward)
+	go localStoreForward.Start()
+	logger.Info("Local store-and-forward background tasks started", "core")
 
 	// Initialize and set hole puncher if not in relay mode
 	if !config.GetConfigBool("relay_mode", false) && config.GetConfigBool("hole_punch_enabled", true) {
@@ -938,6 +958,8 @@ func (pm *PeerManager) SetupInvoiceHandler(invoiceManager interface{}, eventEmit
 	pm.quic.SetInvoiceMessageHandler(invoiceMessageHandler)
 	pm.logger.Info("Invoice message handler created with retry and relay support", "core")
 
+	// Note: Local store-and-forward is initialized in NewPeerManager() and available for all message types
+
 	// Set dependencies on invoice manager (connect QUIC peer to invoice manager)
 	type InvoiceManagerWithDeps interface {
 		SetDependencies(quicPeer interface{}, localPeerID string)
@@ -1272,6 +1294,12 @@ func (pm *PeerManager) Stop() error {
 	}
 	if pm.trafficMonitor != nil {
 		pm.trafficMonitor.Stop()
+	}
+
+	// Stop local store-and-forward
+	if pm.localStoreForward != nil {
+		pm.localStoreForward.Stop()
+		pm.logger.Info("Local store-and-forward stopped", "core")
 	}
 
 	// Stop hole puncher

@@ -1011,18 +1011,26 @@ func (rp *RelayPeer) runMessageCleanup() {
 
 // cleanupExpiredMessages deletes expired messages from the database
 func (rp *RelayPeer) cleanupExpiredMessages() {
-	rp.logger.Debug("Running expired message cleanup", "relay")
+	rp.logger.Debug("Running message cleanup (expired pending, old delivered, old expired)", "relay")
+
+	// Get retention period from config (default: 24 hours)
+	retentionHours := rp.config.GetConfigInt("relay_delivered_retention_hours", 24, 1, 720) // 1 hour to 30 days
+	retentionDuration := time.Duration(retentionHours) * time.Hour
 
 	startTime := time.Now()
-	expired, err := rp.dbManager.Relay.DeleteExpiredMessages(time.Now())
+	expiredPending, deliveredOld, expiredOld, err := rp.dbManager.Relay.DeleteExpiredMessages(time.Now(), retentionDuration)
 	if err != nil {
 		rp.logger.Error(fmt.Sprintf("Cleanup failed: %v", err), "relay")
 		return
 	}
 
-	if expired > 0 {
-		rp.logger.Info(fmt.Sprintf("🧹 Cleaned up %d expired messages (took %v)",
-			expired, time.Since(startTime)), "relay")
+	totalDeleted := expiredPending + deliveredOld + expiredOld
+
+	if totalDeleted > 0 {
+		rp.logger.Info(fmt.Sprintf("🧹 Cleaned up %d messages (expired pending: %d, old delivered: %d, old expired: %d) in %v",
+			totalDeleted, expiredPending, deliveredOld, expiredOld, time.Since(startTime)), "relay")
+	} else {
+		rp.logger.Debug("No messages to clean up", "relay")
 	}
 }
 

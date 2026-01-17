@@ -1105,6 +1105,15 @@ func (jmh *JobMessageHandler) SendJobStatusUpdate(peerID string, update *types.J
 	// Try direct connection first, fallback to relay
 	err = jmh.quicPeer.SendMessageToPeer(peerID, msgBytes)
 	if err != nil {
+		// Check if peer is public (don't try relay for public peers)
+		if jmh.quicPeer.localStoreForward != nil {
+			isPublic, typeErr := jmh.quicPeer.localStoreForward.IsPublicPeer(peerID)
+			if typeErr == nil && isPublic {
+				jmh.logger.Debug(fmt.Sprintf("Peer %s is public, job status update queued for local store-and-forward", peerID[:8]), "job_handler")
+				return err // Message already queued, return original error
+			}
+		}
+
 		// Fallback to relay for NAT peers
 		return jmh.sendMessageViaRelay(peerID, msgBytes, "job_status_update")
 	}

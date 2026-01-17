@@ -115,6 +115,9 @@ relay_store_max_message_size = 10485760
 relay_cleanup_interval = 1h
 # Default TTL for messages without specific TTL (default: 24h)
 relay_ttl_default = 24h
+# Retention period for delivered/expired messages before deletion (default: 24h)
+# After this period, delivered messages are permanently deleted to preserve privacy and disk space
+relay_delivered_retention_hours = 24
 
 # TTL overrides per message type (optional)
 # Payment messages (7 days)
@@ -255,3 +258,34 @@ x402_min_payment_amount = 0.01
 
 # Fail Mode (if facilitator unavailable)
 x402_fail_mode = closed
+
+[local_store]
+# Local Store-and-Forward Configuration (for public peers)
+# When sending messages to public peers that are temporarily offline, messages are stored
+# locally on the sending peer (not on relay servers) for later delivery when the peer reconnects.
+local_store_enabled = true
+# Maximum messages to store per peer (default: 1000)
+local_store_max_messages = 1000
+# Maximum storage size per peer in bytes (default: 100 MB)
+local_store_max_bytes = 104857600
+# Maximum single message size in bytes (default: 10 MB)
+local_store_max_message_size = 10485760
+# Cleanup interval in minutes (default: 60 minutes / 1 hour)
+local_store_cleanup_interval_minutes = 60
+# Retry interval in minutes for stalled messages (default: 5 minutes)
+local_store_retry_interval_minutes = 5
+# Maximum delivery attempts before marking message as failed (default: 10)
+local_store_max_delivery_attempts = 10
+# Retention period for delivered messages before deletion (default: 24h)
+# After this period, delivered messages are permanently deleted to preserve privacy and disk space
+local_store_delivered_retention_hours = 24
+
+# TTL overrides (optional, reuses relay TTL config if not set)
+# Uncomment to override specific message type TTLs for local storage
+# local_store_ttl_invoice_request = 168
+# local_store_ttl_invoice_response = 168
+# local_store_ttl_invoice_notify = 168
+# local_store_ttl_job_status_update = 24
+# local_store_ttl_job_response = 48
+# local_store_ttl_service_response = 48
+# local_store_ttl_capabilities_response = 48

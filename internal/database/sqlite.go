@@ -21,7 +21,8 @@ type SQLiteManager struct {
 	logger *utils.LogsManager
 
 	// Specialized managers
-	Relay *RelayDB
+	Relay      *RelayDB
+	LocalStore *LocalStoreDB
 }
 
 // NewSQLiteManager creates a new enhanced SQLite manager with peer metadata support
@@ -165,6 +166,12 @@ func (sqlm *SQLiteManager) initializeManagers() error {
 		return fmt.Errorf("failed to initialize relay database manager: %v", err)
 	}
 
+	// Initialize local store database manager
+	sqlm.LocalStore, err = NewLocalStoreDB(sqlm.db, logsManager)
+	if err != nil {
+		return fmt.Errorf("failed to initialize local store database manager: %v", err)
+	}
+
 	logsManager.Info("Database managers initialized successfully", "database")
 	return nil
 }
@@ -187,6 +194,12 @@ func (sqlm *SQLiteManager) Close() error {
 	if sqlm.Relay != nil {
 		if err := sqlm.Relay.Close(); err != nil {
 			return fmt.Errorf("failed to close relay manager: %v", err)
+		}
+	}
+
+	if sqlm.LocalStore != nil {
+		if err := sqlm.LocalStore.Close(); err != nil {
+			return fmt.Errorf("failed to close local store manager: %v", err)
 		}
 	}
 
