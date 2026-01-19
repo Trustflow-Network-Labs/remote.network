@@ -81,6 +81,26 @@ func NewSQLiteManager(cm *utils.ConfigManager) (*SQLiteManager, error) {
 		return nil, fmt.Errorf("failed to init payment_invoices table: %w", err)
 	}
 
+	// Initialize chat tables
+	if err := sqlm.InitChatConversationsTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize chat_conversations table: %v", err)
+	}
+	if err := sqlm.InitChatMessagesTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize chat_messages table: %v", err)
+	}
+	if err := sqlm.InitChatRatchetStateTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize chat_ratchet_state table: %v", err)
+	}
+	if err := sqlm.InitChatSkippedKeysTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize chat_skipped_keys table: %v", err)
+	}
+	if err := sqlm.InitChatGroupMembersTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize chat_group_members table: %v", err)
+	}
+	if err := sqlm.InitChatSenderKeysTable(); err != nil {
+		return nil, fmt.Errorf("failed to initialize chat_sender_keys table: %v", err)
+	}
+
 	// Initialize app settings table
 	if err := sqlm.InitAppSettingsTable(); err != nil {
 		return nil, fmt.Errorf("failed to initialize app settings table: %v", err)

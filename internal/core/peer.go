@@ -975,6 +975,90 @@ func (pm *PeerManager) SetupInvoiceHandler(invoiceManager interface{}, eventEmit
 	return nil
 }
 
+// SetupChatHandler initializes and configures the chat handler
+// This should be called after the chat manager is created
+func (pm *PeerManager) SetupChatHandler(chatManager interface{}, eventEmitter p2p.ChatEventEmitter) error {
+	pm.logger.Info("Setting up chat handler for P2P encrypted messaging", "core")
+
+	// Create crypto manager
+	cryptoManager, err := crypto.NewChatCryptoManager(pm.keyPair)
+	if err != nil {
+		return fmt.Errorf("failed to create chat crypto manager: %v", err)
+	}
+	pm.logger.Info("Chat crypto manager created (X25519 + Double Ratchet)", "core")
+
+	// Create chat message handler for outgoing messages with retry and relay support
+	chatMessageHandler := p2p.NewChatMessageHandler(
+		pm.logger,
+		pm.config,
+		pm.quic,
+		cryptoManager,
+	)
+
+	// Set dependencies for relay forwarding
+	if pm.metadataQuery != nil {
+		chatMessageHandler.SetDependencies(
+			pm.dbManager,
+			pm.knownPeers,
+			pm.metadataQuery,
+			pm.keyPair.PeerID(),
+		)
+		pm.logger.Info("Chat message handler dependencies set (relay support enabled)", "core")
+	} else {
+		pm.logger.Warn("Metadata query service not available, chat relay support disabled", "core")
+	}
+
+	// Register key exchange ACK handler with local store-and-forward
+	// This ensures key exchanges queued for offline peers complete properly when delivered
+	if lsf := pm.quic.GetLocalStoreForward(); lsf != nil {
+		lsf.SetKeyExchangeAckHandler(chatMessageHandler.HandleKeyExchangeAck)
+		pm.logger.Info("Key exchange ACK handler registered with local store-and-forward", "core")
+	}
+
+	pm.logger.Info("Chat message handler created with retry and relay support", "core")
+
+	// Create chat handler for incoming messages
+	chatHandler := p2p.NewChatHandler(
+		pm.dbManager,
+		pm.logger,
+		pm.keyPair.PeerID(),
+		eventEmitter,
+		cryptoManager,
+	)
+
+	// Wire chat handler to chat message handler for sending delivery confirmations
+	chatHandler.SetChatMessageHandler(chatMessageHandler)
+
+	// Set chat handler and known peers manager on QUIC peer
+	pm.quic.SetChatHandler(chatHandler)
+	pm.quic.SetKnownPeersManager(pm.knownPeers)
+	pm.logger.Info("Chat handler created and set on QUIC peer", "core")
+
+	// Set dependencies on chat manager (connect QUIC peer to chat manager)
+	type ChatManagerWithDeps interface {
+		SetDependencies(cryptoManager *crypto.ChatCryptoManager, chatMessageHandler *p2p.ChatMessageHandler, knownPeers *p2p.KnownPeersManager)
+	}
+
+	if cm, ok := chatManager.(ChatManagerWithDeps); ok {
+		cm.SetDependencies(cryptoManager, chatMessageHandler, pm.knownPeers)
+		pm.logger.Info("Chat manager dependencies set (QUIC peer connected)", "core")
+	} else {
+		pm.logger.Warn("Chat manager does not support SetDependencies", "core")
+	}
+
+	// Start cleanup routine
+	type ChatManagerWithCleanup interface {
+		StartCleanupRoutine()
+	}
+
+	if cm, ok := chatManager.(ChatManagerWithCleanup); ok {
+		go cm.StartCleanupRoutine()
+		pm.logger.Info("Chat cleanup routine started (TTL-based message deletion)", "core")
+	}
+
+	return nil
+}
+
 // StartJobSystem starts the job and workflow management system
 func (pm *PeerManager) StartJobSystem() error {
 	if pm.jobManager == nil || pm.workflowManager == nil {

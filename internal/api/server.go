@@ -16,6 +16,7 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api/events"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/api/middleware"
 	ws "github.com/Trustflow-Network-Labs/remote-network-node/internal/api/websocket"
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/chat"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/core"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
@@ -60,6 +61,7 @@ type APIServer struct {
 	standaloneService  *services.StandaloneService
 	walletManager      *payment.WalletManager
 	invoiceManager     *payment.InvoiceManager
+	chatManager        *chat.ChatManager
 	localPeerID        string
 	startTime          time.Time
 }
@@ -215,6 +217,24 @@ func NewAPIServer(
 		logger.Info("Invoice handler setup complete", "api")
 	}
 
+	// Initialize chat manager
+	chatManager := chat.NewChatManager(
+		dbManager,
+		logger,
+		config,
+		keyPair.PeerID(),
+	)
+	logger.Info("Chat manager initialized", "api")
+
+	// Setup chat handler and connect to QUIC peer
+	// Pass event emitter adapter to bridge events to WebSocket
+	chatEventAdapter := events.NewChatEmitterAdapter(eventEmitter)
+	if err := peerManager.SetupChatHandler(chatManager, chatEventAdapter); err != nil {
+		logger.Error(fmt.Sprintf("Failed to setup chat handler: %v", err), "api")
+	} else {
+		logger.Info("Chat handler setup complete", "api")
+	}
+
 	return &APIServer{
 		ctx:               ctx,
 		cancel:            cancel,
@@ -236,6 +256,7 @@ func NewAPIServer(
 		standaloneService: standaloneService,
 		walletManager:     walletManager,
 		invoiceManager:    invoiceManager,
+		chatManager:       chatManager,
 		localPeerID:       keyPair.PeerID(),
 		startTime:         time.Now(),
 	}
@@ -767,6 +788,92 @@ func (s *APIServer) registerRoutes(mux *http.ServeMux) {
 		}
 	})))
 
+	// Chat routes (protected with JWT authentication)
+	mux.Handle("/api/chat/conversations", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleListConversations(w, r)
+		case http.MethodPost:
+			s.handleCreateConversation(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/chat/conversations/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check for message-related endpoints
+		if strings.Contains(r.URL.Path, "/messages") {
+			switch r.Method {
+			case http.MethodGet:
+				s.handleListMessages(w, r)
+			case http.MethodPost:
+				s.handleSendMessage(w, r)
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		// Check for read endpoint
+		if strings.HasSuffix(r.URL.Path, "/read") {
+			if r.Method == http.MethodPost {
+				s.handleMarkConversationRead(w, r)
+			} else {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		// Default conversation CRUD operations
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetConversation(w, r)
+		case http.MethodDelete:
+			s.handleDeleteConversation(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/chat/messages/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/read") && r.Method == http.MethodPost {
+			s.handleMarkMessageRead(w, r)
+		} else {
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
+	})))
+	mux.Handle("/api/chat/groups", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.handleCreateGroup(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/chat/groups/", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/messages") && r.Method == http.MethodPost:
+			s.handleSendGroupMessage(w, r)
+		case strings.HasSuffix(r.URL.Path, "/invite") && r.Method == http.MethodPost:
+			s.handleInviteToGroup(w, r)
+		case strings.HasSuffix(r.URL.Path, "/leave") && r.Method == http.MethodPost:
+			s.handleLeaveGroup(w, r)
+		case strings.HasSuffix(r.URL.Path, "/members") && r.Method == http.MethodGet:
+			s.handleGetGroupMembers(w, r)
+		default:
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
+	})))
+	mux.Handle("/api/chat/key-exchange", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.handleInitiateKeyExchange(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/chat/unread-count", s.jwtManager.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.handleGetUnreadCount(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+
 	// WebSocket endpoint
 	mux.HandleFunc("/api/ws", s.handleWebSocket)
 
@@ -813,6 +920,12 @@ func (s *APIServer) Stop() error {
 // GetPort returns the port the server is listening on
 func (s *APIServer) GetPort() string {
 	return s.port
+}
+
+// SetChatManager sets the chat manager after construction
+func (s *APIServer) SetChatManager(chatManager *chat.ChatManager) {
+	s.chatManager = chatManager
+	s.logger.Info("Chat manager set for API server", "api")
 }
 
 // parsePortList parses a comma-separated list of ports

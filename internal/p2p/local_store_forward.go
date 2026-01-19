@@ -12,6 +12,9 @@ import (
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
 
+// KeyExchangeAckHandler is called when a key exchange ACK is received during store-and-forward delivery
+type KeyExchangeAckHandler func(conversationID string, toPeerID string, ackData []byte) error
+
 // LocalStoreForward handles local store-and-forward for messages to public peers
 type LocalStoreForward struct {
 	config        *utils.ConfigManager
@@ -31,6 +34,10 @@ type LocalStoreForward struct {
 	retryInterval          time.Duration
 	maxDeliveryAttempts    int
 	deliveredRetention     time.Duration
+
+	// Key exchange ACK handler (registered by chat handler)
+	keyExchangeAckHandler   KeyExchangeAckHandler
+	keyExchangeAckHandlerMu sync.RWMutex
 
 	// Peer type cache (peerID -> isPublic, timestamp)
 	peerTypeCache   map[string]*peerTypeInfo
@@ -107,6 +114,16 @@ func (lsf *LocalStoreForward) Stop() {
 	lsf.logger.Info("Stopping local store-and-forward", "local-store-forward")
 	lsf.cancel()
 	lsf.wg.Wait()
+}
+
+// SetKeyExchangeAckHandler registers a handler for processing key exchange ACKs
+// during store-and-forward delivery. This allows the chat handler to complete
+// key exchanges that were queued for offline peers.
+func (lsf *LocalStoreForward) SetKeyExchangeAckHandler(handler KeyExchangeAckHandler) {
+	lsf.keyExchangeAckHandlerMu.Lock()
+	defer lsf.keyExchangeAckHandlerMu.Unlock()
+	lsf.keyExchangeAckHandler = handler
+	lsf.logger.Info("Key exchange ACK handler registered for store-and-forward", "local-store-forward")
 }
 
 // ========================================
@@ -206,13 +223,22 @@ func (lsf *LocalStoreForward) IsPublicPeer(peerID string) (bool, error) {
 // IsEligibleForStore checks if a message type is eligible for store-and-forward
 func (lsf *LocalStoreForward) IsEligibleForStore(messageType string) bool {
 	eligibleTypes := map[string]bool{
-		"invoice_request":         true,
-		"invoice_response":        true,
-		"invoice_notify":          true,
-		"job_status_update":       true,
-		"job_response":            true,
-		"service_response":        true,
-		"capabilities_response":   true,
+		"invoice_request":            true,
+		"invoice_response":           true,
+		"invoice_notify":             true,
+		"job_status_update":          true,
+		"job_response":               true,
+		"service_response":           true,
+		"capabilities_response":      true,
+		// Chat messages
+		"chat_key_exchange":          true,
+		"chat_key_exchange_ack":      true,
+		"chat_message":               true,
+		"chat_delivery_confirmation": true,
+		"chat_read_receipt":          true,
+		"chat_group_create":          true,
+		"chat_group_invite":          true,
+		"chat_group_message":         true,
 	}
 
 	return eligibleTypes[messageType]
@@ -382,10 +408,17 @@ func (lsf *LocalStoreForward) DeliverPendingMessages(targetPeerID string) {
 		}
 
 		// Try to deliver the message
-		err := lsf.quicPeer.SendMessageToPeer(targetPeerID, msg.Payload)
-		if err != nil {
+		// For key exchange messages, use SendMessageWithResponse to get the ACK
+		var deliveryErr error
+		if msg.MessageType == "chat_key_exchange" {
+			deliveryErr = lsf.deliverKeyExchangeMessage(targetPeerID, msg)
+		} else {
+			deliveryErr = lsf.quicPeer.SendMessageToPeer(targetPeerID, msg.Payload)
+		}
+
+		if deliveryErr != nil {
 			lsf.logger.Debug(fmt.Sprintf("Failed to deliver message %s to peer %s: %v",
-				msg.MessageID, targetPeerID[:8], err), "local-store-forward")
+				msg.MessageID, targetPeerID[:8], deliveryErr), "local-store-forward")
 			failedCount++
 
 			// Check peer type after 5 failed attempts (peer might have changed to NAT)
@@ -427,6 +460,55 @@ func (lsf *LocalStoreForward) DeliverPendingMessages(targetPeerID string) {
 func (lsf *LocalStoreForward) isPeerConnected(peerID string) bool {
 	_, exists := lsf.quicPeer.GetAddressByPeerID(peerID)
 	return exists
+}
+
+// deliverKeyExchangeMessage delivers a key exchange message using request/response
+// pattern to receive the ACK and complete the key exchange on the sender side
+func (lsf *LocalStoreForward) deliverKeyExchangeMessage(targetPeerID string, msg *database.LocalPendingMessage) error {
+	// Use SendMessageWithResponse to get the ACK
+	responseBytes, err := lsf.quicPeer.SendMessageWithResponse(targetPeerID, msg.Payload)
+	if err != nil {
+		return fmt.Errorf("failed to send key exchange: %v", err)
+	}
+
+	// Parse the ACK response
+	ackMsg, err := UnmarshalQUICMessage(responseBytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse key exchange ACK: %v", err)
+	}
+
+	if ackMsg.Type != MessageTypeChatKeyExchangeAck {
+		return fmt.Errorf("unexpected response type: %s (expected chat_key_exchange_ack)", ackMsg.Type)
+	}
+
+	// Extract conversation ID from original message for the handler
+	origMsg, err := UnmarshalQUICMessage(msg.Payload)
+	if err != nil {
+		return fmt.Errorf("failed to parse original key exchange message: %v", err)
+	}
+
+	var keyExchangeData ChatKeyExchangeData
+	if err := origMsg.GetDataAs(&keyExchangeData); err != nil {
+		return fmt.Errorf("failed to parse key exchange data: %v", err)
+	}
+
+	// Call the registered ACK handler to complete the key exchange
+	lsf.keyExchangeAckHandlerMu.RLock()
+	handler := lsf.keyExchangeAckHandler
+	lsf.keyExchangeAckHandlerMu.RUnlock()
+
+	if handler != nil {
+		if err := handler(keyExchangeData.ConversationID, targetPeerID, responseBytes); err != nil {
+			lsf.logger.Warn(fmt.Sprintf("Key exchange ACK handler failed for peer %s: %v", targetPeerID[:8], err), "local-store-forward")
+			// Don't return error - the message was delivered, just ACK processing failed
+		} else {
+			lsf.logger.Info(fmt.Sprintf("🔑 Key exchange completed via store-and-forward for peer %s", targetPeerID[:8]), "local-store-forward")
+		}
+	} else {
+		lsf.logger.Warn("No key exchange ACK handler registered, key exchange may be incomplete", "local-store-forward")
+	}
+
+	return nil
 }
 
 // ========================================

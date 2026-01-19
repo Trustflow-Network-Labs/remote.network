@@ -325,7 +325,17 @@ func (rp *RelayPeer) HandleRelayForward(msg *QUICMessage, remoteAddr string, str
 	}
 
 	// Check if this is a response (coming back from target to source)
-	if data.MessageType == "service_response" {
+	// Response types: responses to previous requests that should be routed back
+	isResponse := data.MessageType == "service_response" ||
+		data.MessageType == "capabilities_response" ||
+		data.MessageType == "chat_key_exchange_ack" ||
+		data.MessageType == "chat_delivery_confirmation" ||
+		data.MessageType == "chat_read_receipt" ||
+		data.MessageType == "job_response" ||
+		data.MessageType == "job_data_transfer_response" ||
+		data.MessageType == "job_start_response"
+
+	if isResponse {
 		return rp.handleRelayResponse(&data, stream)
 	}
 
@@ -355,7 +365,11 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 		   data.MessageType == "job_status_update" || data.MessageType == "job_data_transfer_request" ||
 		   data.MessageType == "capabilities_request" || data.MessageType == "invoice_request" ||
 		   data.MessageType == "invoice_response" || data.MessageType == "invoice_notify" ||
-		   data.MessageType == "service_search" {
+		   data.MessageType == "service_search" ||
+		   data.MessageType == "chat_key_exchange" || data.MessageType == "chat_key_exchange_ack" ||
+		   data.MessageType == "chat_message" || data.MessageType == "chat_delivery_confirmation" ||
+		   data.MessageType == "chat_read_receipt" || data.MessageType == "chat_group_create" ||
+		   data.MessageType == "chat_group_invite" || data.MessageType == "chat_group_message" {
 			msg, err := UnmarshalQUICMessage(data.Payload)
 			if err == nil {
 				msg.SourcePeerID = data.SourcePeerID
@@ -465,12 +479,16 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 		}
 	}
 
-	// For job status requests and updates, and invoice messages, inject source peer ID so target knows who to respond to
+	// For job status requests and updates, invoice messages, and chat messages, inject source peer ID so target knows who to respond to
 	// This is critical for relay forwarding where the connection context is lost
 	if data.MessageType == "job_status_request" || data.MessageType == "job_request" ||
 	   data.MessageType == "job_status_update" || data.MessageType == "job_data_transfer_request" ||
 	   data.MessageType == "capabilities_request" || data.MessageType == "invoice_request" ||
-	   data.MessageType == "invoice_response" || data.MessageType == "invoice_notify" {
+	   data.MessageType == "invoice_response" || data.MessageType == "invoice_notify" ||
+	   data.MessageType == "chat_key_exchange" || data.MessageType == "chat_key_exchange_ack" ||
+	   data.MessageType == "chat_message" || data.MessageType == "chat_delivery_confirmation" ||
+	   data.MessageType == "chat_read_receipt" || data.MessageType == "chat_group_create" ||
+	   data.MessageType == "chat_group_invite" || data.MessageType == "chat_group_message" {
 		msg, err := UnmarshalQUICMessage(data.Payload)
 		if err == nil {
 			// Inject source peer ID into message envelope
@@ -499,12 +517,15 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 
 	// Determine if this is a request-response pattern (stream must stay open for response)
 	// or one-way message (can confirm with "success")
+	// chat_key_exchange is request-response - the ACK must be routed back through the same
+	// relay stream so the sender can complete the key exchange
 	isRequestResponse := data.MessageType == "service_search" ||
 		data.MessageType == "capabilities_request" ||
 		data.MessageType == "job_status_request" ||
 		data.MessageType == "job_request" ||
 		data.MessageType == "job_data_transfer_request" ||
-		data.MessageType == "job_start"
+		data.MessageType == "job_start" ||
+		data.MessageType == "chat_key_exchange"
 
 	// For one-way messages (invoice notifications, job updates, etc.), send delivery confirmation
 	// For request-response messages, keep stream open - response will be routed back later
@@ -1293,6 +1314,22 @@ var MessageTypeTTLs = map[string]time.Duration{
 	"invoice_response": 7 * 24 * time.Hour,
 	"invoice_notify":   7 * 24 * time.Hour,
 
+	// HIGH PRIORITY - Chat messages (7 days for messages, shorter for protocol)
+	"chat_message":       7 * 24 * time.Hour, // User messages - same priority as invoices
+	"chat_group_message": 7 * 24 * time.Hour, // Group messages - same as 1-on-1
+
+	// MEDIUM PRIORITY - Chat protocol (3 days)
+	"chat_group_create": 3 * 24 * time.Hour, // Group creation
+	"chat_group_invite": 3 * 24 * time.Hour, // Group invitations
+
+	// LOW PRIORITY - Chat ephemeral (24 hours)
+	"chat_delivery_confirmation": 24 * time.Hour, // Delivery receipts
+	"chat_read_receipt":          24 * time.Hour, // Read receipts
+
+	// TIME-SENSITIVE - Key exchange (1 hour - expire quickly to force retry)
+	"chat_key_exchange":     1 * time.Hour, // Initial key exchange must happen quickly
+	"chat_key_exchange_ack": 1 * time.Hour, // Key exchange acknowledgment
+
 	// HIGH PRIORITY - Job updates (24 hours)
 	"job_status_update": 24 * time.Hour,
 
@@ -1326,13 +1363,28 @@ func (rp *RelayPeer) getMessageTTL(messageType string) time.Duration {
 // isEligibleForStore checks if a message type is eligible for store-and-forward
 func (rp *RelayPeer) isEligibleForStore(messageType string) bool {
 	eligibleTypes := map[string]bool{
+		// Invoice messages
 		"invoice_request":         true,
 		"invoice_response":        true,
 		"invoice_notify":          true,
+
+		// Job messages
 		"job_status_update":       true,
 		"job_response":            true,
+
+		// Service/capability messages
 		"service_response":        true,
 		"capabilities_response":   true,
+
+		// Chat messages
+		"chat_key_exchange":          true,
+		"chat_key_exchange_ack":      true,
+		"chat_message":               true,
+		"chat_delivery_confirmation": true,
+		"chat_read_receipt":          true,
+		"chat_group_create":          true,
+		"chat_group_invite":          true,
+		"chat_group_message":         true,
 	}
 
 	return eligibleTypes[messageType]

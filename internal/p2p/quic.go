@@ -68,6 +68,10 @@ type QUICPeer struct {
 	// Invoice handler for P2P invoice payments
 	invoiceHandler        *InvoiceHandler
 	invoiceMessageHandler *InvoiceMessageHandler
+	// Chat handler for encrypted P2P chat
+	chatHandler *ChatHandler
+	// Known peers manager for peer lookups
+	knownPeers *KnownPeersManager
 	// Local store-and-forward for public peers
 	localStoreForward *LocalStoreForward
 	// Callback for relay peer discovery
@@ -432,9 +436,22 @@ func (q *QUICPeer) SetInvoiceMessageHandler(handler *InvoiceMessageHandler) {
 	q.invoiceMessageHandler = handler
 }
 
+func (q *QUICPeer) SetChatHandler(handler *ChatHandler) {
+	q.chatHandler = handler
+}
+
+func (q *QUICPeer) SetKnownPeersManager(knownPeers *KnownPeersManager) {
+	q.knownPeers = knownPeers
+}
+
 // SetLocalStoreForward sets the local store-and-forward service for this QUIC peer
 func (q *QUICPeer) SetLocalStoreForward(lsf *LocalStoreForward) {
 	q.localStoreForward = lsf
+}
+
+// GetLocalStoreForward returns the local store-and-forward service
+func (q *QUICPeer) GetLocalStoreForward() *LocalStoreForward {
+	return q.localStoreForward
 }
 
 // GetJobHandler returns the job message handler
@@ -769,6 +786,95 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 			q.invoiceHandler.HandleInvoiceNotify(msg, remoteAddr, peerID)
 		} else {
 			q.logger.Warn("Received invoice_notify but invoice handler is not initialized", "quic")
+		}
+	case MessageTypeChatKeyExchange:
+		// Chat key exchange (Double Ratchet initialization)
+		if q.chatHandler != nil {
+			peerID := remoteAddr
+			var peerPubKey ed25519.PublicKey
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+				if q.knownPeers != nil {
+					if peer, err := q.knownPeers.GetKnownPeer(peerID, "remote-network-mesh"); err == nil && peer != nil {
+						peerPubKey = peer.PublicKey
+					}
+				}
+			}
+			response = q.chatHandler.HandleChatKeyExchange(msg, peerID, peerPubKey)
+		} else {
+			q.logger.Warn("Received chat_key_exchange but chat handler is not initialized", "quic")
+		}
+	case MessageTypeChatKeyExchangeAck:
+		// Chat key exchange acknowledgment
+		if q.chatHandler != nil {
+			peerID := remoteAddr
+			var peerPubKey ed25519.PublicKey
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+				if q.knownPeers != nil {
+					if peer, err := q.knownPeers.GetKnownPeer(peerID, "remote-network-mesh"); err == nil && peer != nil {
+						peerPubKey = peer.PublicKey
+					}
+				}
+			}
+			q.chatHandler.HandleChatKeyExchangeAck(msg, peerID, peerPubKey)
+		} else {
+			q.logger.Warn("Received chat_key_exchange_ack but chat handler is not initialized", "quic")
+		}
+	case MessageTypeChatMessage:
+		// Encrypted chat message
+		if q.chatHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.chatHandler.HandleChatMessage(msg, peerID)
+		} else {
+			q.logger.Warn("Received chat_message but chat handler is not initialized", "quic")
+		}
+	case MessageTypeChatDeliveryConfirmation:
+		// Chat message delivery confirmation
+		if q.chatHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.chatHandler.HandleChatDeliveryConfirmation(msg, peerID)
+		} else {
+			q.logger.Warn("Received chat_delivery_confirmation but chat handler is not initialized", "quic")
+		}
+	case MessageTypeChatReadReceipt:
+		// Chat message read receipt
+		if q.chatHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.chatHandler.HandleChatReadReceipt(msg, peerID)
+		} else {
+			q.logger.Warn("Received chat_read_receipt but chat handler is not initialized", "quic")
+		}
+	case MessageTypeChatGroupCreate:
+		// Group chat creation
+		if q.chatHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.chatHandler.HandleChatGroupCreate(msg, peerID)
+		} else {
+			q.logger.Warn("Received chat_group_create but chat handler is not initialized", "quic")
+		}
+	case MessageTypeChatGroupInvite:
+		// Group chat invitation
+		if q.chatHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.chatHandler.HandleChatGroupInvite(msg, peerID)
+		} else {
+			q.logger.Warn("Received chat_group_invite but chat handler is not initialized", "quic")
 		}
 	default:
 		q.logger.Warn(fmt.Sprintf("Unknown message type %s from %s", msg.Type, remoteAddr), "quic")
@@ -1553,6 +1659,86 @@ func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage, sourcePeerID string) *
 		} else {
 			q.logger.Warn("Received invoice_notify via relay but invoice handler not initialized", "quic")
 		}
+		return nil
+
+	case MessageTypeChatKeyExchange:
+		// Chat key exchange forwarded via relay
+		if q.chatHandler != nil {
+			var peerPubKey ed25519.PublicKey
+			if q.knownPeers != nil {
+				if peer, err := q.knownPeers.GetKnownPeer(sourcePeerID, "remote-network-mesh"); err == nil && peer != nil {
+					peerPubKey = peer.PublicKey
+				}
+			}
+			return q.chatHandler.HandleChatKeyExchange(msg, sourcePeerID, peerPubKey)
+		}
+		q.logger.Warn("Received chat_key_exchange via relay but chat handler not initialized", "quic")
+		return nil
+
+	case MessageTypeChatKeyExchangeAck:
+		// Chat key exchange ACK forwarded via relay
+		if q.chatHandler != nil {
+			var peerPubKey ed25519.PublicKey
+			if q.knownPeers != nil {
+				if peer, err := q.knownPeers.GetKnownPeer(sourcePeerID, "remote-network-mesh"); err == nil && peer != nil {
+					peerPubKey = peer.PublicKey
+				}
+			}
+			q.chatHandler.HandleChatKeyExchangeAck(msg, sourcePeerID, peerPubKey)
+		} else {
+			q.logger.Warn("Received chat_key_exchange_ack via relay but chat handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeChatMessage:
+		// Chat message forwarded via relay
+		if q.chatHandler != nil {
+			q.chatHandler.HandleChatMessage(msg, sourcePeerID)
+		} else {
+			q.logger.Warn("Received chat_message via relay but chat handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeChatDeliveryConfirmation:
+		// Chat delivery confirmation forwarded via relay
+		if q.chatHandler != nil {
+			q.chatHandler.HandleChatDeliveryConfirmation(msg, sourcePeerID)
+		} else {
+			q.logger.Warn("Received chat_delivery_confirmation via relay but chat handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeChatReadReceipt:
+		// Chat read receipt forwarded via relay
+		if q.chatHandler != nil {
+			q.chatHandler.HandleChatReadReceipt(msg, sourcePeerID)
+		} else {
+			q.logger.Warn("Received chat_read_receipt via relay but chat handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeChatGroupCreate:
+		// Group creation forwarded via relay
+		if q.chatHandler != nil {
+			q.chatHandler.HandleChatGroupCreate(msg, sourcePeerID)
+		} else {
+			q.logger.Warn("Received chat_group_create via relay but chat handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeChatGroupInvite:
+		// Group invitation forwarded via relay
+		if q.chatHandler != nil {
+			q.chatHandler.HandleChatGroupInvite(msg, sourcePeerID)
+		} else {
+			q.logger.Warn("Received chat_group_invite via relay but chat handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeChatGroupMessage:
+		// Group message forwarded via relay
+		// TODO: Implement group message handler when group functionality is added
+		q.logger.Debug("Received chat_group_message via relay (not yet implemented)", "quic")
 		return nil
 
 	case MessageTypeRelayHolePunch:

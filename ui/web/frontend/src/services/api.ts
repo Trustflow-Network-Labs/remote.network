@@ -774,6 +774,119 @@ class APIClient {
     const response = await this.client.get('/api/allowed-networks')
     return response.data
   }
+
+  // ===== Chat Management =====
+
+  /**
+   * List conversations
+   */
+  async listConversations(limit: number = 50, offset: number = 0): Promise<{ conversations: ChatConversation[]; limit: number; offset: number }> {
+    const response = await this.client.get('/api/chat/conversations', {
+      params: { limit, offset }
+    })
+    return response.data
+  }
+
+  /**
+   * Create or get 1-on-1 conversation
+   */
+  async createConversation(peerID: string): Promise<ChatConversation> {
+    const response = await this.client.post('/api/chat/conversations', {
+      peer_id: peerID
+    })
+    return response.data
+  }
+
+  /**
+   * Get conversation details
+   */
+  async getConversation(conversationID: string): Promise<ChatConversation> {
+    const response = await this.client.get(`/api/chat/conversations/${conversationID}`)
+    return response.data
+  }
+
+  /**
+   * Delete conversation
+   */
+  async deleteConversation(conversationID: string): Promise<{ message: string }> {
+    const response = await this.client.delete(`/api/chat/conversations/${conversationID}`)
+    return response.data
+  }
+
+  /**
+   * List messages in a conversation
+   */
+  async listMessages(conversationID: string, limit: number = 50, offset: number = 0): Promise<{ messages: ChatMessage[]; limit: number; offset: number }> {
+    const response = await this.client.get(`/api/chat/conversations/${conversationID}/messages`, {
+      params: { limit, offset }
+    })
+    return response.data
+  }
+
+  /**
+   * Send message in conversation
+   */
+  async sendMessage(conversationID: string, content: string): Promise<{ message_id: string; message: ChatMessage }> {
+    const response = await this.client.post(`/api/chat/conversations/${conversationID}/messages`, {
+      content
+    })
+    return response.data
+  }
+
+  /**
+   * Mark message as read
+   */
+  async markMessageAsRead(messageID: string): Promise<{ message: string }> {
+    const response = await this.client.post(`/api/chat/messages/${messageID}/read`)
+    return response.data
+  }
+
+  /**
+   * Mark all messages in conversation as read
+   */
+  async markConversationAsRead(conversationID: string): Promise<{ message: string }> {
+    const response = await this.client.post(`/api/chat/conversations/${conversationID}/read`)
+    return response.data
+  }
+
+  /**
+   * Create group chat
+   */
+  async createGroup(groupName: string, members: string[]): Promise<ChatConversation> {
+    const response = await this.client.post('/api/chat/groups', {
+      group_name: groupName,
+      members
+    })
+    return response.data
+  }
+
+  /**
+   * Send group message
+   */
+  async sendGroupMessage(groupID: string, content: string): Promise<{ message_id: string }> {
+    const response = await this.client.post(`/api/chat/groups/${groupID}/messages`, {
+      content
+    })
+    return response.data
+  }
+
+  /**
+   * Manually initiate key exchange
+   */
+  async initiateKeyExchange(peerID: string): Promise<{ message: string }> {
+    const response = await this.client.post('/api/chat/key-exchange', {
+      peer_id: peerID
+    })
+    return response.data
+  }
+
+  /**
+   * Get unread message count
+   */
+  async getUnreadCount(): Promise<{ unread_count: number }> {
+    const response = await this.client.get('/api/chat/unread-count')
+    return response.data
+  }
 }
 
 // Create default instance for localhost
@@ -825,6 +938,37 @@ export interface Invoice {
   accepted_at?: number
   rejected_at?: number
   settled_at?: number
+}
+
+/**
+ * Chat message
+ */
+export interface ChatMessage {
+  message_id: string
+  conversation_id: string
+  sender_peer_id: string
+  content: string  // Decrypted content for display
+  status: string   // 'pending', 'sent', 'delivered', 'read', 'failed'
+  timestamp: number
+  message_number: number
+  sent_at?: number
+  delivered_at?: number
+  read_at?: number
+}
+
+/**
+ * Chat conversation
+ */
+export interface ChatConversation {
+  conversation_id: string
+  conversation_type: '1on1' | 'group'
+  peer_id?: string
+  group_name?: string
+  last_message_at?: number
+  unread_count: number
+  last_message?: ChatMessage
+  created_at: number
+  updated_at: number
 }
 
 /**

@@ -556,6 +556,7 @@ export default {
       services: 'Services',
       wallets: 'Wallets',
       invoices: 'Invoices',
+      chat: 'Chat',
       restartPeer: 'Restart Peer',
       logout: 'Logout',
       restartSuccess: 'Node restart initiated. Logging out...',

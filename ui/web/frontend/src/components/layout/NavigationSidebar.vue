@@ -76,6 +76,13 @@ const menuItems = computed(() => {
       key: 'invoices',
       command: () => router.push('/invoices'),
       class: currentPath === '/invoices' ? 'active-menu-item' : ''
+    },
+    {
+      icon: 'pi pi-comments',
+      label: t('message.navigation.chat', 'Chat'),
+      key: 'chat',
+      command: () => router.push('/chat'),
+      class: currentPath === '/chat' ? 'active-menu-item' : ''
     }
   ]
 })

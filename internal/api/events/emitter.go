@@ -743,3 +743,118 @@ func (e *Emitter) EmitInvoiceSettled(invoiceID string) {
 		e.logger.WithError(err).Error("Failed to emit invoice settled")
 	}
 }
+
+// EmitChatMessageReceived sends notification when a chat message is received
+func (e *Emitter) EmitChatMessageReceived(message *database.ChatMessage) {
+	payload := ws.ChatMessagePayload{
+		MessageID:      message.MessageID,
+		ConversationID: message.ConversationID,
+		SenderPeerID:   message.SenderPeerID,
+		Content:        message.DecryptedContent, // Use decrypted content for display
+		Status:         message.Status,
+		Timestamp:      message.Timestamp,
+		MessageNumber:  message.MessageNumber,
+		SentAt:         message.SentAt,
+		DeliveredAt:    message.DeliveredAt,
+		ReadAt:         message.ReadAt,
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeChatMessageReceived, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit chat message received")
+	}
+}
+
+// EmitChatMessageSent sends notification when a chat message is sent
+func (e *Emitter) EmitChatMessageSent(message *database.ChatMessage) {
+	payload := ws.ChatMessagePayload{
+		MessageID:      message.MessageID,
+		ConversationID: message.ConversationID,
+		SenderPeerID:   message.SenderPeerID,
+		Content:        message.DecryptedContent,
+		Status:         message.Status,
+		Timestamp:      message.Timestamp,
+		MessageNumber:  message.MessageNumber,
+		SentAt:         message.SentAt,
+		DeliveredAt:    message.DeliveredAt,
+		ReadAt:         message.ReadAt,
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeChatMessageSent, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit chat message sent")
+	}
+}
+
+// EmitChatMessageStatusUpdate sends message status update (delivered/read/failed)
+func (e *Emitter) EmitChatMessageStatusUpdate(messageID, conversationID, status string, timestamp int64) {
+	payload := ws.ChatMessageStatusPayload{
+		MessageID:      messageID,
+		ConversationID: conversationID,
+		Status:         status,
+		Timestamp:      timestamp,
+	}
+
+	var msgType ws.MessageType
+	switch status {
+	case "delivered":
+		msgType = ws.MessageTypeChatMessageDelivered
+	case "read":
+		msgType = ws.MessageTypeChatMessageRead
+	case "failed":
+		msgType = ws.MessageTypeChatMessageFailed
+	default:
+		return
+	}
+
+	if err := e.hub.BroadcastPayload(msgType, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit chat message status update")
+	}
+}
+
+// EmitChatConversationCreated sends notification when a conversation is created
+func (e *Emitter) EmitChatConversationCreated(conversation *database.ChatConversation) {
+	payload := ws.ChatConversationPayload{
+		ConversationID:   conversation.ConversationID,
+		ConversationType: conversation.ConversationType,
+		PeerID:           conversation.PeerID,
+		GroupName:        conversation.GroupName,
+		UnreadCount:      conversation.UnreadCount,
+		LastMessageAt:    conversation.LastMessageAt,
+		CreatedAt:        conversation.CreatedAt,
+		UpdatedAt:        conversation.UpdatedAt,
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeChatConversationCreated, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit chat conversation created")
+	}
+}
+
+// EmitChatConversationUpdated sends notification when a conversation is updated
+func (e *Emitter) EmitChatConversationUpdated(conversation *database.ChatConversation) {
+	payload := ws.ChatConversationPayload{
+		ConversationID:   conversation.ConversationID,
+		ConversationType: conversation.ConversationType,
+		PeerID:           conversation.PeerID,
+		GroupName:        conversation.GroupName,
+		UnreadCount:      conversation.UnreadCount,
+		LastMessageAt:    conversation.LastMessageAt,
+		CreatedAt:        conversation.CreatedAt,
+		UpdatedAt:        conversation.UpdatedAt,
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeChatConversationUpdated, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit chat conversation updated")
+	}
+}
+
+// EmitChatKeyExchangeComplete sends notification when key exchange completes
+func (e *Emitter) EmitChatKeyExchangeComplete(conversationID, peerID string) {
+	payload := ws.ChatKeyExchangeCompletePayload{
+		ConversationID: conversationID,
+		PeerID:         peerID,
+		Timestamp:      time.Now().Unix(),
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeChatKeyExchangeComplete, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit chat key exchange complete")
+	}
+}

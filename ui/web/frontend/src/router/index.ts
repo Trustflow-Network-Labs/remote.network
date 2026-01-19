@@ -83,6 +83,12 @@ const routes: RouteRecordRaw[] = [
     name: 'Invoices',
     component: () => import('../components/invoices/InvoicesView.vue'),
     meta: { requiresAuth: true }
+  },
+  {
+    path: '/chat',
+    name: 'Chat',
+    component: () => import('../components/chat/ChatView.vue'),
+    meta: { requiresAuth: true }
   }
 ]
 

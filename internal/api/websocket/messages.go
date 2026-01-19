@@ -35,6 +35,18 @@ const (
 	MessageTypeInvoiceExpired  MessageType = "invoice.expired"
 	MessageTypeInvoicesUpdated MessageType = "invoices.updated"
 
+	// Chat message types
+	MessageTypeChatMessageReceived     MessageType = "chat.message.received"
+	MessageTypeChatMessageSent         MessageType = "chat.message.sent"
+	MessageTypeChatMessageDelivered    MessageType = "chat.message.delivered"
+	MessageTypeChatMessageRead         MessageType = "chat.message.read"
+	MessageTypeChatMessageFailed       MessageType = "chat.message.failed"
+	MessageTypeChatConversationCreated MessageType = "chat.conversation.created"
+	MessageTypeChatConversationUpdated MessageType = "chat.conversation.updated"
+	MessageTypeChatConversationsUpdated MessageType = "chat.conversations.updated"
+	MessageTypeChatGroupInvite         MessageType = "chat.group.invite"
+	MessageTypeChatKeyExchangeComplete MessageType = "chat.key_exchange.complete"
+
 	// File upload message types
 	MessageTypeFileUploadStart    MessageType = "file.upload.start"
 	MessageTypeFileUploadChunk    MessageType = "file.upload.chunk"
@@ -445,4 +457,61 @@ type InvoicePayload struct {
 // InvoicesPayload contains list of invoices
 type InvoicesPayload struct {
 	Invoices []InvoicePayload `json:"invoices"`
+}
+
+// ChatMessagePayload contains chat message information
+type ChatMessagePayload struct {
+	MessageID        string `json:"message_id"`
+	ConversationID   string `json:"conversation_id"`
+	SenderPeerID     string `json:"sender_peer_id"`
+	Content          string `json:"content"` // Decrypted content for display
+	Status           string `json:"status"`  // pending, sent, delivered, read, failed
+	Timestamp        int64  `json:"timestamp"`
+	MessageNumber    int    `json:"message_number"`
+	SentAt           int64  `json:"sent_at,omitempty"`
+	DeliveredAt      int64  `json:"delivered_at,omitempty"`
+	ReadAt           int64  `json:"read_at,omitempty"`
+}
+
+// ChatConversationPayload contains conversation information
+type ChatConversationPayload struct {
+	ConversationID   string             `json:"conversation_id"`
+	ConversationType string             `json:"conversation_type"` // 1on1, group
+	PeerID           string             `json:"peer_id,omitempty"`
+	GroupName        string             `json:"group_name,omitempty"`
+	LastMessageAt    int64              `json:"last_message_at,omitempty"`
+	UnreadCount      int                `json:"unread_count"`
+	LastMessage      *ChatMessagePayload `json:"last_message,omitempty"`
+	CreatedAt        int64              `json:"created_at"`
+	UpdatedAt        int64              `json:"updated_at"`
+}
+
+// ChatConversationsPayload contains list of conversations
+type ChatConversationsPayload struct {
+	Conversations []ChatConversationPayload `json:"conversations"`
+	TotalUnread   int                       `json:"total_unread"`
+}
+
+// ChatMessageStatusPayload contains message status update
+type ChatMessageStatusPayload struct {
+	MessageID      string `json:"message_id"`
+	ConversationID string `json:"conversation_id"`
+	Status         string `json:"status"`
+	Timestamp      int64  `json:"timestamp"`
+}
+
+// ChatGroupInvitePayload contains group invitation information
+type ChatGroupInvitePayload struct {
+	GroupID       string   `json:"group_id"`
+	GroupName     string   `json:"group_name"`
+	InviterPeerID string   `json:"inviter_peer_id"`
+	Members       []string `json:"members"`
+	CreatedAt     int64    `json:"created_at"`
+}
+
+// ChatKeyExchangeCompletePayload signals successful key exchange
+type ChatKeyExchangeCompletePayload struct {
+	ConversationID string `json:"conversation_id"`
+	PeerID         string `json:"peer_id"`
+	Timestamp      int64  `json:"timestamp"`
 }

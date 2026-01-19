@@ -751,6 +751,46 @@ func (rm *RelayManager) handleRelayedMessage(msg *QUICMessage) error {
 			if err := msg.GetDataAs(&request); err == nil {
 				sourcePeerID = request.SourcePeerID
 			}
+		case MessageTypeChatKeyExchange:
+			var data ChatKeyExchangeData
+			if err := msg.GetDataAs(&data); err == nil {
+				sourcePeerID = data.FromPeerID
+			}
+		case MessageTypeChatKeyExchangeAck:
+			var data ChatKeyExchangeAckData
+			if err := msg.GetDataAs(&data); err == nil {
+				sourcePeerID = data.FromPeerID
+			}
+		case MessageTypeChatMessage:
+			var data ChatMessageData
+			if err := msg.GetDataAs(&data); err == nil {
+				sourcePeerID = data.SenderPeerID
+			}
+		case MessageTypeChatDeliveryConfirmation:
+			var data ChatDeliveryConfirmationData
+			if err := msg.GetDataAs(&data); err == nil {
+				sourcePeerID = data.RecipientPeerID
+			}
+		case MessageTypeChatReadReceipt:
+			var data ChatReadReceiptData
+			if err := msg.GetDataAs(&data); err == nil {
+				sourcePeerID = data.ReaderPeerID
+			}
+		case MessageTypeChatGroupCreate:
+			var data ChatGroupCreateData
+			if err := msg.GetDataAs(&data); err == nil {
+				sourcePeerID = data.CreatorPeerID
+			}
+		case MessageTypeChatGroupInvite:
+			var data ChatGroupInviteData
+			if err := msg.GetDataAs(&data); err == nil {
+				sourcePeerID = data.InviterPeerID
+			}
+		case MessageTypeChatGroupMessage:
+			var data ChatGroupMessageData
+			if err := msg.GetDataAs(&data); err == nil {
+				sourcePeerID = data.SenderPeerID
+			}
 		}
 	}
 

@@ -37,6 +37,18 @@ export enum MessageType {
   INVOICE_EXPIRED = 'invoice.expired',
   INVOICES_UPDATED = 'invoices.updated',
 
+  // Chat messages
+  CHAT_MESSAGE_RECEIVED = 'chat.message.received',
+  CHAT_MESSAGE_SENT = 'chat.message.sent',
+  CHAT_MESSAGE_DELIVERED = 'chat.message.delivered',
+  CHAT_MESSAGE_READ = 'chat.message.read',
+  CHAT_MESSAGE_FAILED = 'chat.message.failed',
+  CHAT_CONVERSATION_CREATED = 'chat.conversation.created',
+  CHAT_CONVERSATION_UPDATED = 'chat.conversation.updated',
+  CHAT_CONVERSATIONS_UPDATED = 'chat.conversations.updated',
+  CHAT_GROUP_INVITE = 'chat.group.invite',
+  CHAT_KEY_EXCHANGE_COMPLETE = 'chat.key_exchange.complete',
+
   // File upload messages
   FILE_UPLOAD_START = 'file.upload.start',
   FILE_UPLOAD_CHUNK = 'file.upload.chunk',

@@ -79,6 +79,16 @@ const (
 	MessageTypeInvoiceResponse MessageType = "invoice_response"
 	MessageTypeInvoiceNotify   MessageType = "invoice_notify"
 
+	// P2P Encrypted Chat
+	MessageTypeChatKeyExchange            MessageType = "chat_key_exchange"
+	MessageTypeChatKeyExchangeAck         MessageType = "chat_key_exchange_ack"
+	MessageTypeChatMessage                MessageType = "chat_message"
+	MessageTypeChatDeliveryConfirmation   MessageType = "chat_delivery_confirmation"
+	MessageTypeChatReadReceipt            MessageType = "chat_read_receipt"
+	MessageTypeChatGroupCreate            MessageType = "chat_group_create"
+	MessageTypeChatGroupInvite            MessageType = "chat_group_invite"
+	MessageTypeChatGroupMessage           MessageType = "chat_group_message"
+
 	// Store-and-forward delivery status
 	MessageTypeDeliveryStatusRequest  MessageType = "delivery_status_request"
 	MessageTypeDeliveryStatusResponse MessageType = "delivery_status_response"
@@ -940,6 +950,134 @@ func CreateInvoiceNotify(invoiceID, status, message string) *QUICMessage {
 		Status:    status,
 		Message:   message,
 	})
+}
+
+// ChatKeyExchangeData represents a Double Ratchet key exchange message
+type ChatKeyExchangeData struct {
+	ConversationID    string `json:"conversation_id"`
+	FromPeerID        string `json:"from_peer_id"`
+	ToPeerID          string `json:"to_peer_id"`
+	EphemeralPubKey   []byte `json:"ephemeral_pub_key"`   // X25519 public key (32 bytes)
+	IdentitySignature []byte `json:"identity_signature"`  // Ed25519 signature
+	Timestamp         int64  `json:"timestamp"`
+}
+
+// ChatKeyExchangeAckData represents acknowledgment of key exchange
+type ChatKeyExchangeAckData struct {
+	ConversationID    string `json:"conversation_id"`
+	FromPeerID        string `json:"from_peer_id"`
+	ToPeerID          string `json:"to_peer_id"`
+	EphemeralPubKey   []byte `json:"ephemeral_pub_key"`   // X25519 public key (32 bytes)
+	IdentitySignature []byte `json:"identity_signature"`  // Ed25519 signature
+	Timestamp         int64  `json:"timestamp"`
+}
+
+// ChatMessageData represents an encrypted chat message
+type ChatMessageData struct {
+	MessageID        string `json:"message_id"`
+	ConversationID   string `json:"conversation_id"`
+	SenderPeerID     string `json:"sender_peer_id"`
+	EncryptedContent []byte `json:"encrypted_content"`  // NaCl secretbox output
+	Nonce            []byte `json:"nonce"`              // 24 bytes
+	MessageNumber    int    `json:"message_number"`     // Ratchet counter
+	DHPubKey         []byte `json:"dh_pub_key"`         // Sender's current DH public key (32 bytes)
+	Timestamp        int64  `json:"timestamp"`
+}
+
+// ChatDeliveryConfirmationData represents delivery confirmation
+type ChatDeliveryConfirmationData struct {
+	MessageID      string `json:"message_id"`
+	ConversationID string `json:"conversation_id"`
+	RecipientPeerID string `json:"recipient_peer_id"`
+	DeliveredAt    int64  `json:"delivered_at"`
+}
+
+// ChatReadReceiptData represents read receipt
+type ChatReadReceiptData struct {
+	MessageID      string `json:"message_id"`
+	ConversationID string `json:"conversation_id"`
+	ReaderPeerID   string `json:"reader_peer_id"`
+	ReadAt         int64  `json:"read_at"`
+}
+
+// ChatGroupCreateData represents group creation
+type ChatGroupCreateData struct {
+	ConversationID string   `json:"conversation_id"`
+	GroupName      string   `json:"group_name"`
+	CreatorPeerID  string   `json:"creator_peer_id"`
+	MemberPeerIDs  []string `json:"member_peer_ids"`
+	Timestamp      int64    `json:"timestamp"`
+}
+
+// ChatGroupInviteData represents group invitation
+type ChatGroupInviteData struct {
+	ConversationID string   `json:"conversation_id"`
+	GroupName      string   `json:"group_name"`
+	InviterPeerID  string   `json:"inviter_peer_id"`
+	InviteePeerIDs []string `json:"invitee_peer_ids"`
+	Timestamp      int64    `json:"timestamp"`
+}
+
+// ChatGroupMessageData represents an encrypted group message
+type ChatGroupMessageData struct {
+	MessageID        string `json:"message_id"`
+	ConversationID   string `json:"conversation_id"`
+	SenderPeerID     string `json:"sender_peer_id"`
+	EncryptedContent []byte `json:"encrypted_content"` // Encrypted with Sender Keys
+	Nonce            []byte `json:"nonce"`             // 24 bytes
+	MessageNumber    int    `json:"message_number"`    // Sender's chain counter
+	Signature        []byte `json:"signature"`         // Ed25519 signature
+	Timestamp        int64  `json:"timestamp"`
+}
+
+// CreateChatKeyExchange creates a key exchange message
+func CreateChatKeyExchange(data *ChatKeyExchangeData) *QUICMessage {
+	return NewQUICMessage(MessageTypeChatKeyExchange, data)
+}
+
+// CreateChatKeyExchangeAck creates a key exchange acknowledgment message
+func CreateChatKeyExchangeAck(data *ChatKeyExchangeAckData) *QUICMessage {
+	return NewQUICMessage(MessageTypeChatKeyExchangeAck, data)
+}
+
+// CreateChatMessage creates an encrypted chat message
+func CreateChatMessage(data *ChatMessageData) *QUICMessage {
+	return NewQUICMessage(MessageTypeChatMessage, data)
+}
+
+// CreateChatDeliveryConfirmation creates a delivery confirmation message
+func CreateChatDeliveryConfirmation(messageID, conversationID, recipientPeerID string, deliveredAt int64) *QUICMessage {
+	return NewQUICMessage(MessageTypeChatDeliveryConfirmation, &ChatDeliveryConfirmationData{
+		MessageID:       messageID,
+		ConversationID:  conversationID,
+		RecipientPeerID: recipientPeerID,
+		DeliveredAt:     deliveredAt,
+	})
+}
+
+// CreateChatReadReceipt creates a read receipt message
+func CreateChatReadReceipt(messageID, conversationID, readerPeerID string, readAt int64) *QUICMessage {
+	return NewQUICMessage(MessageTypeChatReadReceipt, &ChatReadReceiptData{
+		MessageID:      messageID,
+		ConversationID: conversationID,
+		ReaderPeerID:   readerPeerID,
+		ReadAt:         readAt,
+	})
+}
+
+// CreateChatGroupCreate creates a group creation message
+func CreateChatGroupCreate(data *ChatGroupCreateData) *QUICMessage {
+	return NewQUICMessage(MessageTypeChatGroupCreate, data)
+}
+
+// CreateChatGroupInvite creates a group invitation message
+func CreateChatGroupInvite(data *ChatGroupInviteData) *QUICMessage {
+	return NewQUICMessage(MessageTypeChatGroupInvite, data)
+}
+
+// CreateChatGroupMessage creates an encrypted group message
+func CreateChatGroupMessage(data *ChatGroupMessageData) *QUICMessage {
+	return NewQUICMessage(MessageTypeChatGroupMessage, data)
 }
 
 // DeliveryStatusRequestData represents a request for message delivery status
