@@ -248,6 +248,10 @@ http-server dist -p 8080
 - [Docker Dependencies](docs/DOCKER_DEPENDENCIES.md) - Docker dependency management and platform setup
 - [Workflow Creation and Execution](docs/workflow-creation-and-execution.md) - Multi-job workflow orchestration
 
+### Communication
+
+- [Chat Messaging](docs/CHAT_MESSAGING.md) - End-to-end encrypted P2P chat (1-on-1 and group chats)
+
 ### Networking & P2P
 
 - [Hole Punching Protocol](docs/hole-punching-protocol.md) - NAT traversal and direct peer connections
