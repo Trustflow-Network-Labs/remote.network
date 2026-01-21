@@ -36,6 +36,7 @@ const (
 	MessageTypeInvoicesUpdated MessageType = "invoices.updated"
 
 	// Chat message types
+	MessageTypeChatMessageCreated      MessageType = "chat.message.created"
 	MessageTypeChatMessageReceived     MessageType = "chat.message.received"
 	MessageTypeChatMessageSent         MessageType = "chat.message.sent"
 	MessageTypeChatMessageDelivered    MessageType = "chat.message.delivered"

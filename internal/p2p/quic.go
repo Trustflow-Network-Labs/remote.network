@@ -876,6 +876,28 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		} else {
 			q.logger.Warn("Received chat_group_invite but chat handler is not initialized", "quic")
 		}
+	case MessageTypeChatGroupMessage:
+		// Group chat message
+		if q.chatHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.chatHandler.HandleChatGroupMessage(msg, peerID)
+		} else {
+			q.logger.Warn("Received chat_group_message but chat handler is not initialized", "quic")
+		}
+	case MessageTypeChatSenderKeyDistribution:
+		// Sender key distribution for group encryption
+		if q.chatHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.chatHandler.HandleChatSenderKeyDistribution(msg, peerID)
+		} else {
+			q.logger.Warn("Received chat_sender_key_distribution but chat handler is not initialized", "quic")
+		}
 	default:
 		q.logger.Warn(fmt.Sprintf("Unknown message type %s from %s", msg.Type, remoteAddr), "quic")
 		return
@@ -1737,8 +1759,20 @@ func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage, sourcePeerID string) *
 
 	case MessageTypeChatGroupMessage:
 		// Group message forwarded via relay
-		// TODO: Implement group message handler when group functionality is added
-		q.logger.Debug("Received chat_group_message via relay (not yet implemented)", "quic")
+		if q.chatHandler != nil {
+			q.chatHandler.HandleChatGroupMessage(msg, sourcePeerID)
+		} else {
+			q.logger.Warn("Received chat_group_message via relay but chat handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeChatSenderKeyDistribution:
+		// Sender key distribution forwarded via relay
+		if q.chatHandler != nil {
+			q.chatHandler.HandleChatSenderKeyDistribution(msg, sourcePeerID)
+		} else {
+			q.logger.Warn("Received chat_sender_key_distribution via relay but chat handler not initialized", "quic")
+		}
 		return nil
 
 	case MessageTypeRelayHolePunch:

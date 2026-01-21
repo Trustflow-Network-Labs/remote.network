@@ -16,6 +16,7 @@
         :message="message"
         :is-sent="message.sender_peer_id === localPeerId"
         :show-timestamp="shouldShowTimestamp(index)"
+        :is-group="isGroup"
       />
     </div>
   </div>
@@ -31,6 +32,7 @@ interface Props {
   messages: ChatMessage[]
   localPeerId: string
   loading: boolean
+  isGroup?: boolean
 }
 
 const props = defineProps<Props>()

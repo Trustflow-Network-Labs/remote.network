@@ -19,23 +19,29 @@ func NewChatEmitterAdapter(emitter *Emitter) *ChatEmitterAdapter {
 	}
 }
 
+// EmitMessageCreated emits a message created event (status: created)
+// This is called immediately after storing the message, before sending to recipient
+func (cea *ChatEmitterAdapter) EmitMessageCreated(message *database.ChatMessage) {
+	cea.emitter.EmitMessageCreated(message)
+}
+
 // EmitMessageReceived emits a message received event
 func (cea *ChatEmitterAdapter) EmitMessageReceived(message *database.ChatMessage) {
 	cea.emitter.EmitChatMessageReceived(message)
 }
 
 // EmitMessageDelivered emits a message delivered event
-func (cea *ChatEmitterAdapter) EmitMessageDelivered(messageID string) {
+func (cea *ChatEmitterAdapter) EmitMessageDelivered(messageID, conversationID string) {
 	// Get current timestamp for delivered event
 	timestamp := time.Now().Unix()
-	cea.emitter.EmitChatMessageStatusUpdate(messageID, "", "delivered", timestamp)
+	cea.emitter.EmitChatMessageStatusUpdate(messageID, conversationID, "delivered", timestamp)
 }
 
 // EmitMessageRead emits a message read event
-func (cea *ChatEmitterAdapter) EmitMessageRead(messageID string) {
+func (cea *ChatEmitterAdapter) EmitMessageRead(messageID, conversationID string) {
 	// Get current timestamp for read event
 	timestamp := time.Now().Unix()
-	cea.emitter.EmitChatMessageStatusUpdate(messageID, "", "read", timestamp)
+	cea.emitter.EmitChatMessageStatusUpdate(messageID, conversationID, "read", timestamp)
 }
 
 // EmitConversationCreated emits a conversation created event

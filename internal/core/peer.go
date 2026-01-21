@@ -1029,6 +1029,9 @@ func (pm *PeerManager) SetupChatHandler(chatManager interface{}, eventEmitter p2
 	// Wire chat handler to chat message handler for sending delivery confirmations
 	chatHandler.SetChatMessageHandler(chatMessageHandler)
 
+	// Set known peers manager on chat handler for public key lookups (group messages)
+	chatHandler.SetKnownPeers(pm.knownPeers)
+
 	// Set chat handler and known peers manager on QUIC peer
 	pm.quic.SetChatHandler(chatHandler)
 	pm.quic.SetKnownPeersManager(pm.knownPeers)

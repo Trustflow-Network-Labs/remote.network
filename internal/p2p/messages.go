@@ -88,6 +88,7 @@ const (
 	MessageTypeChatGroupCreate            MessageType = "chat_group_create"
 	MessageTypeChatGroupInvite            MessageType = "chat_group_invite"
 	MessageTypeChatGroupMessage           MessageType = "chat_group_message"
+	MessageTypeChatSenderKeyDistribution  MessageType = "chat_sender_key_distribution"
 
 	// Store-and-forward delivery status
 	MessageTypeDeliveryStatusRequest  MessageType = "delivery_status_request"
@@ -1030,6 +1031,15 @@ type ChatGroupMessageData struct {
 	Timestamp        int64  `json:"timestamp"`
 }
 
+// ChatSenderKeyDistributionData represents a sender key distribution message
+type ChatSenderKeyDistributionData struct {
+	ConversationID string `json:"conversation_id"`
+	SenderPeerID   string `json:"sender_peer_id"`
+	ChainKey       []byte `json:"chain_key"`       // 32 bytes - current chain key
+	MessageNumber  int    `json:"message_number"`  // Current message counter
+	Timestamp      int64  `json:"timestamp"`
+}
+
 // CreateChatKeyExchange creates a key exchange message
 func CreateChatKeyExchange(data *ChatKeyExchangeData) *QUICMessage {
 	return NewQUICMessage(MessageTypeChatKeyExchange, data)
@@ -1078,6 +1088,11 @@ func CreateChatGroupInvite(data *ChatGroupInviteData) *QUICMessage {
 // CreateChatGroupMessage creates an encrypted group message
 func CreateChatGroupMessage(data *ChatGroupMessageData) *QUICMessage {
 	return NewQUICMessage(MessageTypeChatGroupMessage, data)
+}
+
+// CreateChatSenderKeyDistribution creates a sender key distribution message
+func CreateChatSenderKeyDistribution(data *ChatSenderKeyDistributionData) *QUICMessage {
+	return NewQUICMessage(MessageTypeChatSenderKeyDistribution, data)
 }
 
 // DeliveryStatusRequestData represents a request for message delivery status

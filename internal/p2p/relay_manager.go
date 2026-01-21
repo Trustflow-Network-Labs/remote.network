@@ -791,6 +791,11 @@ func (rm *RelayManager) handleRelayedMessage(msg *QUICMessage) error {
 			if err := msg.GetDataAs(&data); err == nil {
 				sourcePeerID = data.SenderPeerID
 			}
+		case MessageTypeChatSenderKeyDistribution:
+			var data ChatSenderKeyDistributionData
+			if err := msg.GetDataAs(&data); err == nil {
+				sourcePeerID = data.SenderPeerID
+			}
 		}
 	}
 

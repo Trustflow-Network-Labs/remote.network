@@ -91,9 +91,9 @@ func (cm *ChatManager) SendMessage(conversationID, plaintextContent string) (str
 		return "", fmt.Errorf("conversation not found")
 	}
 
-	// Only support 1-on-1 for now
-	if conv.ConversationType != "1on1" {
-		return "", fmt.Errorf("group messages not yet implemented")
+	// Route to appropriate handler based on conversation type
+	if conv.ConversationType == "group" {
+		return cm.SendGroupMessage(conversationID, plaintextContent)
 	}
 
 	// Check if we have a ratchet state (key exchange completed)
@@ -242,9 +242,18 @@ func (cm *ChatManager) DeleteConversation(conversationID string) error {
 
 // CreateGroup creates a new group conversation
 func (cm *ChatManager) CreateGroup(groupName string, memberPeerIDs []string) (string, error) {
-	// Validate member list
+	// Filter out ourselves from member list (creator is added automatically)
+	filteredMembers := make([]string, 0, len(memberPeerIDs))
+	for _, memberID := range memberPeerIDs {
+		if memberID != cm.localPeerID {
+			filteredMembers = append(filteredMembers, memberID)
+		}
+	}
+	memberPeerIDs = filteredMembers
+
+	// Validate member list (need at least 2 other members besides creator for a group)
 	if len(memberPeerIDs) < 2 {
-		return "", fmt.Errorf("group must have at least 2 members")
+		return "", fmt.Errorf("group must have at least 2 other members besides creator")
 	}
 
 	// Create conversation
@@ -290,17 +299,146 @@ func (cm *ChatManager) CreateGroup(groupName string, memberPeerIDs []string) (st
 		return "", fmt.Errorf("failed to create group sender keys: %v", err)
 	}
 
+	// Save our sender key to database for persistence
+	chainKey, messageNum, err := cm.cryptoManager.GetOurSenderKeyState(conversationID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get sender key state: %v", err)
+	}
+	encryptedKey, nonce, err := cm.cryptoManager.EncryptSenderKeyForStorage(chainKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt sender key: %v", err)
+	}
+	senderKeyRecord := &database.ChatSenderKey{
+		ConversationID:    conversationID,
+		SenderPeerID:      cm.localPeerID,
+		EncryptedChainKey: encryptedKey,
+		Nonce:             nonce[:],
+		MessageNumber:     messageNum,
+	}
+	if err := cm.db.StoreSenderKey(senderKeyRecord); err != nil {
+		cm.logger.Warn(fmt.Sprintf("Failed to save sender key to DB: %v", err), "chat_manager")
+	}
+
 	cm.logger.Info(fmt.Sprintf("👥 Created group '%s' (%s) with %d members", groupName, conversationID[:8], len(memberPeerIDs)+1), "chat_manager")
 
-	// TODO: Send group creation messages to all members
+	// Send group creation messages to all members
+	allMembers := append([]string{cm.localPeerID}, memberPeerIDs...)
+	groupCreateData := &p2p.ChatGroupCreateData{
+		ConversationID: conversationID,
+		GroupName:      groupName,
+		CreatorPeerID:  cm.localPeerID,
+		MemberPeerIDs:  allMembers,
+		Timestamp:      time.Now().Unix(),
+	}
+
+	for _, memberID := range memberPeerIDs {
+		if memberID == cm.localPeerID {
+			continue // Don't send to ourselves
+		}
+
+		if err := cm.chatMessageHandler.SendGroupCreate(memberID, groupCreateData); err != nil {
+			cm.logger.Warn(fmt.Sprintf("Failed to send group creation to member %s: %v", memberID[:8], err), "chat_manager")
+			// Continue trying to notify other members
+		} else {
+			cm.logger.Debug(fmt.Sprintf("Sent group creation to member %s", memberID[:8]), "chat_manager")
+		}
+	}
+
+	// Distribute our sender key to all members (reuse chainKey and messageNum from above)
+	senderKeyData := &p2p.ChatSenderKeyDistributionData{
+		ConversationID: conversationID,
+		SenderPeerID:   cm.localPeerID,
+		ChainKey:       chainKey[:],
+		MessageNumber:  messageNum,
+		Timestamp:      time.Now().Unix(),
+	}
+
+	for _, memberID := range memberPeerIDs {
+		if memberID == cm.localPeerID {
+			continue
+		}
+
+		if err := cm.chatMessageHandler.SendSenderKeyDistribution(memberID, senderKeyData); err != nil {
+			cm.logger.Warn(fmt.Sprintf("Failed to send sender key to member %s: %v", memberID[:8], err), "chat_manager")
+		} else {
+			cm.logger.Debug(fmt.Sprintf("Sent sender key to member %s", memberID[:8]), "chat_manager")
+		}
+	}
 
 	return conversationID, nil
 }
 
 // SendGroupMessage sends a message to a group
 func (cm *ChatManager) SendGroupMessage(groupID, plaintextContent string) (string, error) {
-	// TODO: Implement group message sending with Sender Keys
-	return "", fmt.Errorf("group messages not yet implemented")
+	// Get conversation to verify it's a group
+	conv, err := cm.db.GetConversation(groupID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get conversation: %v", err)
+	}
+	if conv == nil {
+		return "", fmt.Errorf("group not found")
+	}
+	if conv.ConversationType != "group" {
+		return "", fmt.Errorf("conversation is not a group")
+	}
+
+	// Check if we have sender keys in memory for this group
+	if !cm.cryptoManager.HasGroupSenderKeys(groupID) {
+		// Not in memory, try to load from database
+		senderKey, err := cm.db.GetSenderKey(groupID, cm.localPeerID)
+		if err != nil {
+			return "", fmt.Errorf("failed to check sender key: %v", err)
+		}
+
+		if senderKey != nil {
+			// Load existing key from database into memory
+			var nonce [24]byte
+			copy(nonce[:], senderKey.Nonce)
+			chainKey, err := cm.cryptoManager.DecryptSenderKeyFromStorage(senderKey.EncryptedChainKey, nonce)
+			if err != nil {
+				return "", fmt.Errorf("failed to decrypt sender key: %v", err)
+			}
+			if err := cm.cryptoManager.LoadGroupSenderKey(groupID, cm.localPeerID, chainKey, senderKey.MessageNumber, true, nil); err != nil {
+				return "", fmt.Errorf("failed to load sender key: %v", err)
+			}
+			cm.logger.Debug(fmt.Sprintf("Loaded sender keys from DB for group %s", groupID[:8]), "chat_manager")
+
+			// Also load other members' sender keys from DB
+			allKeys, err := cm.db.GetAllSenderKeys(groupID)
+			if err != nil {
+				cm.logger.Warn(fmt.Sprintf("Failed to load all sender keys: %v", err), "chat_manager")
+			} else {
+				for _, key := range allKeys {
+					if key.SenderPeerID == cm.localPeerID {
+						continue // Already loaded our own key
+					}
+					var keyNonce [24]byte
+					copy(keyNonce[:], key.Nonce)
+					memberChainKey, err := cm.cryptoManager.DecryptSenderKeyFromStorage(key.EncryptedChainKey, keyNonce)
+					if err != nil {
+						cm.logger.Warn(fmt.Sprintf("Failed to decrypt sender key for %s: %v", key.SenderPeerID[:8], err), "chat_manager")
+						continue
+					}
+					if err := cm.cryptoManager.LoadGroupSenderKey(groupID, key.SenderPeerID, memberChainKey, key.MessageNumber, false, nil); err != nil {
+						cm.logger.Warn(fmt.Sprintf("Failed to load sender key for %s: %v", key.SenderPeerID[:8], err), "chat_manager")
+					}
+				}
+			}
+		} else {
+			// No key in DB either, this is an error - should have been created when joining group
+			return "", fmt.Errorf("sender keys not found for group %s", groupID[:8])
+		}
+	}
+
+	// Send encrypted message to all group members
+	messageID, err := cm.chatMessageHandler.SendGroupMessageWithRetry(groupID, plaintextContent)
+	if err != nil {
+		return "", fmt.Errorf("failed to send group message: %v", err)
+	}
+
+	cm.logger.Info(fmt.Sprintf("👥 Sent group message %s in group %s", messageID[:8], groupID[:8]), "chat_manager")
+
+	return messageID, nil
 }
 
 // InviteToGroup invites a peer to an existing group

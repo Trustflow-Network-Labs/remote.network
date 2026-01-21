@@ -8,14 +8,15 @@ import (
 
 // ChatConversation represents a chat conversation (1-on-1 or group)
 type ChatConversation struct {
-	ConversationID  string `json:"conversation_id"`
-	ConversationType string `json:"conversation_type"` // '1on1' or 'group'
-	PeerID          string `json:"peer_id,omitempty"`  // For 1-on-1 chats
-	GroupName       string `json:"group_name,omitempty"` // For group chats
-	CreatedAt       int64  `json:"created_at"`
-	UpdatedAt       int64  `json:"updated_at"`
-	LastMessageAt   int64  `json:"last_message_at"`
-	UnreadCount     int    `json:"unread_count"`
+	ConversationID   string       `json:"conversation_id"`
+	ConversationType string       `json:"conversation_type"` // '1on1' or 'group'
+	PeerID           string       `json:"peer_id,omitempty"`  // For 1-on-1 chats
+	GroupName        string       `json:"group_name,omitempty"` // For group chats
+	CreatedAt        int64        `json:"created_at"`
+	UpdatedAt        int64        `json:"updated_at"`
+	LastMessageAt    int64        `json:"last_message_at"`
+	UnreadCount      int          `json:"unread_count"`
+	LastMessage      *ChatMessage `json:"last_message,omitempty"` // Most recent message (populated on list)
 }
 
 // InitChatConversationsTable creates the chat_conversations table
@@ -203,7 +204,68 @@ func (sqlm *SQLiteManager) ListConversations(limit, offset int) ([]*ChatConversa
 		conversations = append(conversations, &conv)
 	}
 
+	// Populate LastMessage for each conversation
+	for _, conv := range conversations {
+		lastMsg, err := sqlm.GetLastMessageForConversation(conv.ConversationID)
+		if err == nil && lastMsg != nil {
+			conv.LastMessage = lastMsg
+		}
+	}
+
 	return conversations, nil
+}
+
+// GetLastMessageForConversation retrieves the most recent message for a conversation
+func (sqlm *SQLiteManager) GetLastMessageForConversation(conversationID string) (*ChatMessage, error) {
+	query := `
+	SELECT message_id, conversation_id, sender_peer_id, encrypted_content, nonce,
+	       message_number, timestamp, status, sent_at, delivered_at, read_at, decrypted_content
+	FROM chat_messages
+	WHERE conversation_id = ?
+	ORDER BY timestamp DESC
+	LIMIT 1
+	`
+
+	var msg ChatMessage
+	var sentAt, deliveredAt, readAt sql.NullInt64
+	var decryptedContent sql.NullString
+
+	err := sqlm.db.QueryRow(query, conversationID).Scan(
+		&msg.MessageID,
+		&msg.ConversationID,
+		&msg.SenderPeerID,
+		&msg.EncryptedContent,
+		&msg.Nonce,
+		&msg.MessageNumber,
+		&msg.Timestamp,
+		&msg.Status,
+		&sentAt,
+		&deliveredAt,
+		&readAt,
+		&decryptedContent,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil // No messages in this conversation
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get last message: %v", err)
+	}
+
+	if sentAt.Valid {
+		msg.SentAt = sentAt.Int64
+	}
+	if deliveredAt.Valid {
+		msg.DeliveredAt = deliveredAt.Int64
+	}
+	if readAt.Valid {
+		msg.ReadAt = readAt.Int64
+	}
+	if decryptedContent.Valid {
+		msg.DecryptedContent = decryptedContent.String
+	}
+
+	return &msg, nil
 }
 
 // UpdateConversation updates a conversation's metadata

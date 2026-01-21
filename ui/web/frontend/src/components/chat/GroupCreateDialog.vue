@@ -112,9 +112,9 @@ function addMember() {
     return
   }
 
-  // Validate peer ID format (64 hex chars)
-  if (!/^[a-fA-F0-9]{64}$/.test(memberId)) {
-    errorMessage.value = 'Invalid peer ID format'
+  // Validate peer ID format (40 hex chars - SHA1 of public key)
+  if (!/^[a-fA-F0-9]{40}$/.test(memberId)) {
+    errorMessage.value = 'Invalid peer ID format (expected 40 hex characters)'
     return
   }
 

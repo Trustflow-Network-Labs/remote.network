@@ -60,6 +60,26 @@ func NewSenderKey(signingKey []byte) (*SenderKey, error) {
 	return sk, nil
 }
 
+// NewGroupSenderKeysWithExistingKey creates a group sender keys manager with an existing key
+// Used when loading sender keys from database
+func NewGroupSenderKeysWithExistingKey(groupID, peerID string, signingKey []byte, chainKey [32]byte, messageNumber int) (*GroupSenderKeys, error) {
+	gsk := &GroupSenderKeys{
+		GroupID:       groupID,
+		SenderKeys:    make(map[string]*SenderKey),
+		OurPeerID:     peerID,
+		OurSigningKey: signingKey,
+	}
+
+	// Add the sender key
+	gsk.SenderKeys[peerID] = &SenderKey{
+		ChainKey:      chainKey,
+		SigningKey:    signingKey,
+		MessageNumber: messageNumber,
+	}
+
+	return gsk, nil
+}
+
 // EncryptGroupMessage encrypts a message for a group using our sender key
 // Returns: (ciphertext, nonce, messageNumber, signature, error)
 func (gsk *GroupSenderKeys) EncryptGroupMessage(plaintext []byte) ([]byte, [24]byte, int, []byte, error) {

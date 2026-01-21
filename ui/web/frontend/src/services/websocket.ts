@@ -38,6 +38,7 @@ export enum MessageType {
   INVOICES_UPDATED = 'invoices.updated',
 
   // Chat messages
+  CHAT_MESSAGE_CREATED = 'chat.message.created',
   CHAT_MESSAGE_RECEIVED = 'chat.message.received',
   CHAT_MESSAGE_SENT = 'chat.message.sent',
   CHAT_MESSAGE_DELIVERED = 'chat.message.delivered',

@@ -871,6 +871,14 @@ class APIClient {
   }
 
   /**
+   * Get group members
+   */
+  async getGroupMembers(groupID: string): Promise<{ members: ChatGroupMember[] }> {
+    const response = await this.client.get(`/api/chat/groups/${groupID}/members`)
+    return response.data
+  }
+
+  /**
    * Manually initiate key exchange
    */
   async initiateKeyExchange(peerID: string): Promise<{ message: string }> {
@@ -969,6 +977,17 @@ export interface ChatConversation {
   last_message?: ChatMessage
   created_at: number
   updated_at: number
+}
+
+/**
+ * Chat group member
+ */
+export interface ChatGroupMember {
+  conversation_id: string
+  peer_id: string
+  joined_at: number
+  is_admin: boolean
+  left_at: number
 }
 
 /**

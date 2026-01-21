@@ -846,6 +846,28 @@ func (e *Emitter) EmitChatConversationUpdated(conversation *database.ChatConvers
 	}
 }
 
+// EmitMessageCreated sends notification when a chat message is created (status: created)
+// This is emitted immediately after storing the message, before sending to recipient
+// This method satisfies the ChatEventEmitter interface
+func (e *Emitter) EmitMessageCreated(message *database.ChatMessage) {
+	payload := ws.ChatMessagePayload{
+		MessageID:      message.MessageID,
+		ConversationID: message.ConversationID,
+		SenderPeerID:   message.SenderPeerID,
+		Content:        message.DecryptedContent, // Use decrypted content for display
+		Status:         message.Status,
+		Timestamp:      message.Timestamp,
+		MessageNumber:  message.MessageNumber,
+		SentAt:         message.SentAt,
+		DeliveredAt:    message.DeliveredAt,
+		ReadAt:         message.ReadAt,
+	}
+
+	if err := e.hub.BroadcastPayload(ws.MessageTypeChatMessageCreated, payload); err != nil {
+		e.logger.WithError(err).Error("Failed to emit chat message created")
+	}
+}
+
 // EmitChatKeyExchangeComplete sends notification when key exchange completes
 func (e *Emitter) EmitChatKeyExchangeComplete(conversationID, peerID string) {
 	payload := ws.ChatKeyExchangeCompletePayload{

@@ -326,11 +326,12 @@ func (rp *RelayPeer) HandleRelayForward(msg *QUICMessage, remoteAddr string, str
 
 	// Check if this is a response (coming back from target to source)
 	// Response types: responses to previous requests that should be routed back
+	// NOTE: chat_delivery_confirmation and chat_read_receipt are NOT responses -
+	// they are asynchronous notifications sent independently after the original
+	// chat_message was already delivered. They should be forwarded as requests.
 	isResponse := data.MessageType == "service_response" ||
 		data.MessageType == "capabilities_response" ||
 		data.MessageType == "chat_key_exchange_ack" ||
-		data.MessageType == "chat_delivery_confirmation" ||
-		data.MessageType == "chat_read_receipt" ||
 		data.MessageType == "job_response" ||
 		data.MessageType == "job_data_transfer_response" ||
 		data.MessageType == "job_start_response"
@@ -369,7 +370,8 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 		   data.MessageType == "chat_key_exchange" || data.MessageType == "chat_key_exchange_ack" ||
 		   data.MessageType == "chat_message" || data.MessageType == "chat_delivery_confirmation" ||
 		   data.MessageType == "chat_read_receipt" || data.MessageType == "chat_group_create" ||
-		   data.MessageType == "chat_group_invite" || data.MessageType == "chat_group_message" {
+		   data.MessageType == "chat_group_invite" || data.MessageType == "chat_group_message" ||
+		   data.MessageType == "chat_sender_key_distribution" {
 			msg, err := UnmarshalQUICMessage(data.Payload)
 			if err == nil {
 				msg.SourcePeerID = data.SourcePeerID
@@ -488,7 +490,8 @@ func (rp *RelayPeer) handleRelayRequest(data *RelayForwardData, stream *quic.Str
 	   data.MessageType == "chat_key_exchange" || data.MessageType == "chat_key_exchange_ack" ||
 	   data.MessageType == "chat_message" || data.MessageType == "chat_delivery_confirmation" ||
 	   data.MessageType == "chat_read_receipt" || data.MessageType == "chat_group_create" ||
-	   data.MessageType == "chat_group_invite" || data.MessageType == "chat_group_message" {
+	   data.MessageType == "chat_group_invite" || data.MessageType == "chat_group_message" ||
+	   data.MessageType == "chat_sender_key_distribution" {
 		msg, err := UnmarshalQUICMessage(data.Payload)
 		if err == nil {
 			// Inject source peer ID into message envelope
@@ -1319,8 +1322,9 @@ var MessageTypeTTLs = map[string]time.Duration{
 	"chat_group_message": 7 * 24 * time.Hour, // Group messages - same as 1-on-1
 
 	// MEDIUM PRIORITY - Chat protocol (3 days)
-	"chat_group_create": 3 * 24 * time.Hour, // Group creation
-	"chat_group_invite": 3 * 24 * time.Hour, // Group invitations
+	"chat_group_create":              3 * 24 * time.Hour, // Group creation
+	"chat_group_invite":              3 * 24 * time.Hour, // Group invitations
+	"chat_sender_key_distribution":   3 * 24 * time.Hour, // Sender key distribution for group encryption
 
 	// LOW PRIORITY - Chat ephemeral (24 hours)
 	"chat_delivery_confirmation": 24 * time.Hour, // Delivery receipts
@@ -1377,14 +1381,15 @@ func (rp *RelayPeer) isEligibleForStore(messageType string) bool {
 		"capabilities_response":   true,
 
 		// Chat messages
-		"chat_key_exchange":          true,
-		"chat_key_exchange_ack":      true,
-		"chat_message":               true,
-		"chat_delivery_confirmation": true,
-		"chat_read_receipt":          true,
-		"chat_group_create":          true,
-		"chat_group_invite":          true,
-		"chat_group_message":         true,
+		"chat_key_exchange":             true,
+		"chat_key_exchange_ack":         true,
+		"chat_message":                  true,
+		"chat_delivery_confirmation":    true,
+		"chat_read_receipt":             true,
+		"chat_group_create":             true,
+		"chat_group_invite":             true,
+		"chat_group_message":            true,
+		"chat_sender_key_distribution":  true,
 	}
 
 	return eligibleTypes[messageType]

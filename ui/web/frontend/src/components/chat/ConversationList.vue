@@ -17,19 +17,19 @@
     </div>
 
     <div class="conversations-scroll">
-      <div v-if="!conversations.length" class="empty-list">
+      <div v-if="!groupedConversations.length" class="empty-list">
         <i class="pi pi-inbox"></i>
         <p>No conversations yet</p>
       </div>
 
       <div v-else class="conversations">
-        <ConversationItem
-          v-for="conv in filteredConversations"
-          :key="conv.conversation_id"
-          :conversation="conv"
-          :is-active="conv.conversation_id === activeConversationId"
-          @select="$emit('select-conversation', conv.conversation_id)"
-          @delete="$emit('delete-conversation', conv.conversation_id)"
+        <GroupedConversationItem
+          v-for="grouped in filteredConversations"
+          :key="grouped.peer_id"
+          :grouped="grouped"
+          :is-active="grouped.peer_id === activePeerId"
+          @select="$emit('select-peer', grouped.peer_id)"
+          @delete="$emit('delete-peer', grouped.peer_id)"
         />
       </div>
     </div>
@@ -38,37 +38,37 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { ChatConversation } from '../../services/api'
-import ConversationItem from './ConversationItem.vue'
+import type { GroupedConversation } from '../../stores/chat'
+import GroupedConversationItem from './GroupedConversationItem.vue'
 import InputText from 'primevue/inputtext'
 import Badge from 'primevue/badge'
 
 interface Props {
-  conversations: ChatConversation[]
-  activeConversationId: string | null
+  groupedConversations: GroupedConversation[]
+  activePeerId: string | null
   totalUnread: number
 }
 
 const props = defineProps<Props>()
 
 defineEmits<{
-  'select-conversation': [conversationId: string]
-  'delete-conversation': [conversationId: string]
+  'select-peer': [peerId: string]
+  'delete-peer': [peerId: string]
 }>()
 
 const searchQuery = ref('')
 
 const filteredConversations = computed(() => {
   if (!searchQuery.value) {
-    return props.conversations
+    return props.groupedConversations
   }
 
   const query = searchQuery.value.toLowerCase()
-  return props.conversations.filter(conv => {
-    if (conv.conversation_type === 'group') {
-      return conv.group_name?.toLowerCase().includes(query)
+  return props.groupedConversations.filter(grouped => {
+    if (grouped.conversation_type === 'group') {
+      return grouped.group_name?.toLowerCase().includes(query)
     } else {
-      return conv.peer_id?.toLowerCase().includes(query)
+      return grouped.peer_id?.toLowerCase().includes(query)
     }
   })
 })

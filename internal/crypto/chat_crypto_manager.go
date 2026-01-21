@@ -405,6 +405,130 @@ func (ccm *ChatCryptoManager) DecryptGroupMessage(
 	return gsk.DecryptGroupMessage(senderPeerID, ciphertext, nonce, messageNum, signature, senderPublicKey)
 }
 
+// AddGroupSenderKey adds a sender key for a group member (for decryption)
+func (ccm *ChatCryptoManager) AddGroupSenderKey(groupID, senderPeerID string, chainKey [32]byte, messageNumber int) error {
+	ccm.groupMu.Lock()
+	defer ccm.groupMu.Unlock()
+
+	gsk, exists := ccm.groupKeys[groupID]
+	if !exists {
+		return errors.New("group sender keys not found")
+	}
+
+	return gsk.AddSenderKey(senderPeerID, chainKey, messageNumber)
+}
+
+// GetOurSenderKeyState returns our current sender key state for distribution to other members
+func (ccm *ChatCryptoManager) GetOurSenderKeyState(groupID string) ([32]byte, int, error) {
+	ccm.groupMu.RLock()
+	defer ccm.groupMu.RUnlock()
+
+	gsk, exists := ccm.groupKeys[groupID]
+	if !exists {
+		return [32]byte{}, 0, errors.New("group sender keys not found")
+	}
+
+	return gsk.GetOurSenderKeyState()
+}
+
+// GetSenderKeyState returns the current sender key state for any peer in a group
+// This is used to persist the updated state after decryption
+func (ccm *ChatCryptoManager) GetSenderKeyState(groupID, peerID string) ([32]byte, int, error) {
+	ccm.groupMu.RLock()
+	defer ccm.groupMu.RUnlock()
+
+	gsk, exists := ccm.groupKeys[groupID]
+	if !exists {
+		return [32]byte{}, 0, errors.New("group sender keys not found")
+	}
+
+	senderKey, exists := gsk.SenderKeys[peerID]
+	if !exists {
+		return [32]byte{}, 0, fmt.Errorf("sender key for peer %s not found", peerID)
+	}
+
+	return senderKey.ChainKey, senderKey.MessageNumber, nil
+}
+
+// HasGroupSenderKeys checks if sender keys exist in memory for a group
+func (ccm *ChatCryptoManager) HasGroupSenderKeys(groupID string) bool {
+	ccm.groupMu.RLock()
+	defer ccm.groupMu.RUnlock()
+	_, exists := ccm.groupKeys[groupID]
+	return exists
+}
+
+// EncryptSenderKeyForStorage encrypts a sender key chain key for storage in DB
+func (ccm *ChatCryptoManager) EncryptSenderKeyForStorage(chainKey [32]byte) ([]byte, [24]byte, error) {
+	// Generate nonce
+	var nonce [24]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, [24]byte{}, fmt.Errorf("failed to generate nonce: %v", err)
+	}
+
+	// Encrypt chain key with master key
+	ciphertext := secretbox.Seal(nil, chainKey[:], &nonce, &ccm.masterKey)
+
+	return ciphertext, nonce, nil
+}
+
+// DecryptSenderKeyFromStorage decrypts a sender key chain key from DB storage
+func (ccm *ChatCryptoManager) DecryptSenderKeyFromStorage(ciphertext []byte, nonce [24]byte) ([32]byte, error) {
+	// Decrypt with master key
+	plaintext, ok := secretbox.Open(nil, ciphertext, &nonce, &ccm.masterKey)
+	if !ok {
+		return [32]byte{}, errors.New("failed to decrypt sender key")
+	}
+
+	if len(plaintext) != 32 {
+		return [32]byte{}, errors.New("invalid sender key size")
+	}
+
+	var chainKey [32]byte
+	copy(chainKey[:], plaintext)
+
+	return chainKey, nil
+}
+
+// LoadGroupSenderKey loads a sender key from DB into memory
+func (ccm *ChatCryptoManager) LoadGroupSenderKey(groupID, senderPeerID string, chainKey [32]byte, messageNumber int, isOurKey bool, signingKey []byte) error {
+	ccm.groupMu.Lock()
+	defer ccm.groupMu.Unlock()
+
+	gsk, exists := ccm.groupKeys[groupID]
+	if !exists {
+		// Create new group sender keys structure
+		var privKey ed25519.PrivateKey
+		if isOurKey {
+			privKey = ccm.keyPair.PrivateKey
+		}
+		var err error
+		gsk, err = NewGroupSenderKeysWithExistingKey(groupID, senderPeerID, privKey, chainKey, messageNumber)
+		if err != nil {
+			return err
+		}
+		ccm.groupKeys[groupID] = gsk
+	} else if isOurKey {
+		// Update our own sender key in existing group
+		gsk.OurPeerID = senderPeerID
+		gsk.OurSigningKey = ccm.keyPair.PrivateKey
+		gsk.SenderKeys[senderPeerID] = &SenderKey{
+			ChainKey:      chainKey,
+			MessageNumber: messageNumber,
+			SigningKey:    ccm.keyPair.PrivateKey,
+		}
+	} else {
+		// Add other member's sender key to existing group
+		gsk.SenderKeys[senderPeerID] = &SenderKey{
+			ChainKey:      chainKey,
+			MessageNumber: messageNumber,
+			SigningKey:    nil,
+		}
+	}
+
+	return nil
+}
+
 // ed25519PublicKeyToCurve25519 converts an Ed25519 public key to X25519/Curve25519
 // using the proper birational map between Edwards and Montgomery curves.
 // This is the mathematically correct conversion that preserves the key relationship.

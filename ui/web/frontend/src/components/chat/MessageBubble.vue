@@ -5,6 +5,10 @@
     </div>
 
     <div class="message-bubble" :class="{ sent: isSent, failed: message.status === 'failed' }">
+      <!-- Show sender name for received messages in group chats -->
+      <div v-if="isGroup && !isSent" class="sender-name">
+        {{ senderDisplayName }}
+      </div>
       <div class="message-content">
         {{ message.content }}
       </div>
@@ -12,13 +16,13 @@
       <div class="message-meta">
         <span class="time">{{ formatTime(message.timestamp) }}</span>
         <span v-if="isSent" class="status-indicator">
-          <!-- Pending: clock icon -->
-          <i v-if="message.status === 'pending'" class="pi pi-clock" v-tooltip.left="'Sending...'" />
+          <!-- Created: clock icon (message stored, sending in progress) -->
+          <i v-if="message.status === 'created'" class="pi pi-clock" v-tooltip.left="'Sending...'" />
 
-          <!-- Sent: single check -->
-          <i v-else-if="message.status === 'sent'" class="pi pi-check" v-tooltip.left="'Sent'" />
+          <!-- Sent: single check (relay confirmed for NAT peers) -->
+          <i v-else-if="message.status === 'sent'" class="pi pi-check" v-tooltip.left="'Sent to relay'" />
 
-          <!-- Delivered: double check -->
+          <!-- Delivered: double check (recipient confirmed) -->
           <i
             v-else-if="message.status === 'delivered'"
             class="pi pi-check-circle"
@@ -46,15 +50,24 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { ChatMessage } from '../../services/api'
 
 interface Props {
   message: ChatMessage
   isSent: boolean
   showTimestamp: boolean
+  isGroup?: boolean
 }
 
-defineProps<Props>()
+const props = defineProps<Props>()
+
+// Shorten peer ID for display
+const senderDisplayName = computed(() => {
+  const id = props.message.sender_peer_id
+  if (!id) return 'Unknown'
+  return id.length > 12 ? `${id.slice(0, 6)}...${id.slice(-4)}` : id
+})
 
 function formatTime(timestamp: number): string {
   const date = new Date(timestamp * 1000)
@@ -176,6 +189,13 @@ function formatTimestamp(timestamp: number): string {
     background: rgba(239, 68, 68, 0.1);
     border-color: var(--red-500);
   }
+}
+
+.sender-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: vars.$color-primary;
+  margin-bottom: 0.25rem;
 }
 
 .message-content {

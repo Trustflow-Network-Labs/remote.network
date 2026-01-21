@@ -2,10 +2,22 @@ import { defineStore } from 'pinia'
 import { api, type ChatConversation, type ChatMessage } from '../services/api'
 import { getWebSocketService, MessageType } from '../services/websocket'
 
+// Grouped conversation represents all conversations with a single peer (or group)
+export interface GroupedConversation {
+  peer_id: string  // For 1on1: peer_id, for groups: group conversation_id
+  conversation_type: '1on1' | 'group'
+  group_name?: string
+  conversation_ids: string[]  // All conversation IDs with this peer
+  last_message_at: number
+  unread_count: number
+  last_message?: ChatMessage
+}
+
 export interface ChatState {
   conversations: ChatConversation[]
   messages: Record<string, ChatMessage[]> // conversationID -> messages[]
-  activeConversationID: string | null
+  activeConversationID: string | null  // Still track by conversation_id for compatibility
+  activePeerID: string | null  // Track active peer for grouped view
   loading: boolean
   error: string | null
   totalUnreadCount: number
@@ -19,17 +31,115 @@ export const useChatStore = defineStore('chat', {
     conversations: [],
     messages: {},
     activeConversationID: null,
+    activePeerID: null,
     loading: false,
     error: null,
     totalUnreadCount: 0
   }),
 
   getters: {
+    // Group conversations by peer_id (for 1on1) or keep separate (for groups)
+    groupedConversations: (state): GroupedConversation[] => {
+      const grouped = new Map<string, GroupedConversation>()
+
+      // Helper to get the last message for a conversation from stored messages
+      const getLastMessage = (conversationId: string): ChatMessage | undefined => {
+        const msgs = state.messages[conversationId]
+        if (!msgs || msgs.length === 0) return undefined
+        // Messages are sorted by timestamp, get the last one
+        return msgs[msgs.length - 1]
+      }
+
+      for (const conv of state.conversations) {
+        const lastMessageAt = conv.last_message_at || 0
+        const lastMessage = conv.last_message || getLastMessage(conv.conversation_id)
+
+        if (conv.conversation_type === '1on1' && conv.peer_id) {
+          // Group by peer_id for 1on1 conversations
+          const existing = grouped.get(conv.peer_id)
+          if (existing) {
+            existing.conversation_ids.push(conv.conversation_id)
+            existing.unread_count += conv.unread_count
+            // Update last message if this conversation is more recent
+            const existingLastMsgTime = existing.last_message?.timestamp || 0
+            const thisLastMsgTime = lastMessage?.timestamp || 0
+            if (lastMessageAt > existing.last_message_at || thisLastMsgTime > existingLastMsgTime) {
+              existing.last_message_at = Math.max(lastMessageAt, existing.last_message_at)
+              if (thisLastMsgTime > existingLastMsgTime) {
+                existing.last_message = lastMessage
+              }
+            }
+          } else {
+            grouped.set(conv.peer_id, {
+              peer_id: conv.peer_id,
+              conversation_type: '1on1',
+              conversation_ids: [conv.conversation_id],
+              last_message_at: lastMessageAt,
+              unread_count: conv.unread_count,
+              last_message: lastMessage
+            })
+          }
+        } else if (conv.conversation_type === 'group') {
+          // Groups stay separate (use conversation_id as key)
+          grouped.set(conv.conversation_id, {
+            peer_id: conv.conversation_id,
+            conversation_type: 'group',
+            group_name: conv.group_name,
+            conversation_ids: [conv.conversation_id],
+            last_message_at: lastMessageAt,
+            unread_count: conv.unread_count,
+            last_message: lastMessage
+          })
+        }
+      }
+
+      // Sort by last_message_at descending (or by last message timestamp if available)
+      return Array.from(grouped.values()).sort((a, b) => {
+        const aTime = a.last_message?.timestamp || a.last_message_at
+        const bTime = b.last_message?.timestamp || b.last_message_at
+        return bTime - aTime
+      })
+    },
+
     activeConversation: (state) =>
       state.conversations.find(c => c.conversation_id === state.activeConversationID),
 
-    activeMessages: (state) =>
-      state.activeConversationID ? (state.messages[state.activeConversationID] || []) : [],
+    // Get all messages for the active peer (aggregated from all conversations)
+    activeMessages: (state): ChatMessage[] => {
+      if (!state.activePeerID) return []
+
+      // Find all conversation IDs for this peer
+      const convIds = state.conversations
+        .filter(c =>
+          (c.conversation_type === '1on1' && c.peer_id === state.activePeerID) ||
+          (c.conversation_type === 'group' && c.conversation_id === state.activePeerID)
+        )
+        .map(c => c.conversation_id)
+
+      // Aggregate all messages from these conversations
+      const allMessages: ChatMessage[] = []
+      for (const convId of convIds) {
+        const msgs = state.messages[convId] || []
+        allMessages.push(...msgs)
+      }
+
+      // Sort by timestamp ascending
+      return allMessages.sort((a, b) => a.timestamp - b.timestamp)
+    },
+
+    // Get the primary conversation ID for the active peer (most recent)
+    primaryConversationID: (state): string | null => {
+      if (!state.activePeerID) return null
+
+      const convs = state.conversations
+        .filter(c =>
+          (c.conversation_type === '1on1' && c.peer_id === state.activePeerID) ||
+          (c.conversation_type === 'group' && c.conversation_id === state.activePeerID)
+        )
+        .sort((a, b) => (b.last_message_at || 0) - (a.last_message_at || 0))
+
+      return convs[0]?.conversation_id || null
+    },
 
     getConversation: (state) => (conversationID: string) =>
       state.conversations.find(c => c.conversation_id === conversationID),
@@ -273,6 +383,18 @@ export const useChatStore = defineStore('chat', {
     setActiveConversation(conversationID: string | null) {
       this.activeConversationID = conversationID
 
+      // Also set the peer ID based on the conversation
+      if (conversationID) {
+        const conversation = this.conversations.find(c => c.conversation_id === conversationID)
+        if (conversation) {
+          this.activePeerID = conversation.conversation_type === '1on1'
+            ? conversation.peer_id || null
+            : conversationID
+        }
+      } else {
+        this.activePeerID = null
+      }
+
       // Persist to localStorage
       if (conversationID) {
         localStorage.setItem('activeConversationID', conversationID)
@@ -289,7 +411,89 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
-    // Restore active conversation from localStorage
+    // Set active peer (for grouped view) and fetch all messages
+    async setActivePeer(peerID: string | null) {
+      this.activePeerID = peerID
+
+      // Persist to localStorage
+      if (peerID) {
+        localStorage.setItem('activePeerID', peerID)
+      } else {
+        localStorage.removeItem('activePeerID')
+      }
+
+      if (!peerID) {
+        this.activeConversationID = null
+        return
+      }
+
+      // Find all conversations for this peer
+      const convs = this.conversations.filter(c =>
+        (c.conversation_type === '1on1' && c.peer_id === peerID) ||
+        (c.conversation_type === 'group' && c.conversation_id === peerID)
+      )
+
+      // Set the primary (most recent) conversation as active
+      if (convs.length > 0) {
+        const sorted = [...convs].sort((a, b) => (b.last_message_at || 0) - (a.last_message_at || 0))
+        this.activeConversationID = sorted[0].conversation_id
+      }
+
+      // Fetch messages for all conversations with this peer
+      await this.fetchMessagesForPeer(peerID)
+
+      // Mark all conversations as read
+      for (const conv of convs) {
+        if (conv.unread_count > 0) {
+          this.markConversationAsRead(conv.conversation_id)
+        }
+      }
+    },
+
+    // Fetch messages for all conversations with a peer
+    async fetchMessagesForPeer(peerID: string) {
+      const convs = this.conversations.filter(c =>
+        (c.conversation_type === '1on1' && c.peer_id === peerID) ||
+        (c.conversation_type === 'group' && c.conversation_id === peerID)
+      )
+
+      // Fetch messages for each conversation
+      for (const conv of convs) {
+        try {
+          await this.fetchMessages(conv.conversation_id)
+        } catch (error: any) {
+          console.error(`Failed to fetch messages for conversation ${conv.conversation_id}:`, error)
+        }
+      }
+    },
+
+    // Restore active peer from localStorage
+    restoreActivePeer(): string | null {
+      const savedPeerID = localStorage.getItem('activePeerID')
+      if (savedPeerID) {
+        // Find conversations for this peer
+        const convs = this.conversations.filter(c =>
+          (c.conversation_type === '1on1' && c.peer_id === savedPeerID) ||
+          (c.conversation_type === 'group' && c.conversation_id === savedPeerID)
+        )
+
+        if (convs.length > 0) {
+          this.activePeerID = savedPeerID
+
+          // Also set the primary (most recent) conversation as active for the title
+          const sorted = [...convs].sort((a, b) => (b.last_message_at || 0) - (a.last_message_at || 0))
+          this.activeConversationID = sorted[0].conversation_id
+
+          return savedPeerID
+        } else {
+          // Clean up stale reference
+          localStorage.removeItem('activePeerID')
+        }
+      }
+      return null
+    },
+
+    // Restore active conversation from localStorage (legacy support)
     restoreActiveConversation(): string | null {
       const savedConversationID = localStorage.getItem('activeConversationID')
       if (savedConversationID) {
@@ -297,6 +501,13 @@ export const useChatStore = defineStore('chat', {
         const exists = this.conversations.some(c => c.conversation_id === savedConversationID)
         if (exists) {
           this.activeConversationID = savedConversationID
+          // Also set the peer ID
+          const conv = this.conversations.find(c => c.conversation_id === savedConversationID)
+          if (conv) {
+            this.activePeerID = conv.conversation_type === '1on1'
+              ? conv.peer_id || null
+              : savedConversationID
+          }
           return savedConversationID
         } else {
           // Clean up stale reference
@@ -339,6 +550,23 @@ export const useChatStore = defineStore('chat', {
         const index = this.conversations.findIndex(c => c.conversation_id === conversation.conversation_id)
         if (index !== -1) {
           this.conversations[index] = conversation
+        }
+      })
+
+      // Subscribe to message created (for multi-device sync)
+      const unsubMessageCreated = ws.subscribe(MessageType.CHAT_MESSAGE_CREATED, (payload: any) => {
+        console.log('Message created via WebSocket:', payload)
+        const message = payload as ChatMessage
+
+        // Add to messages list if not already present
+        if (!this.messages[message.conversation_id]) {
+          this.messages[message.conversation_id] = []
+        }
+
+        const exists = this.messages[message.conversation_id].some(m => m.message_id === message.message_id)
+        if (!exists) {
+          this.messages[message.conversation_id].push(message)
+          this.messages[message.conversation_id].sort((a, b) => a.timestamp - b.timestamp)
         }
       })
 
@@ -413,6 +641,7 @@ export const useChatStore = defineStore('chat', {
         unsubConversations()
         unsubConversationCreated()
         unsubConversationUpdated()
+        unsubMessageCreated()
         unsubMessageReceived()
         unsubMessageSent()
         unsubMessageDelivered()

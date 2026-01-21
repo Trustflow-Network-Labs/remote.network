@@ -257,7 +257,7 @@ func (cmh *ChatMessageHandler) SendChatMessageWithRetry(
 		return "", fmt.Errorf("failed to save ratchet state: %v", err)
 	}
 
-	// Store encrypted message in database (status: pending)
+	// Store encrypted message in database (status: created)
 	chatMessage := &database.ChatMessage{
 		MessageID:        messageID,
 		ConversationID:   conversationID,
@@ -266,7 +266,7 @@ func (cmh *ChatMessageHandler) SendChatMessageWithRetry(
 		Nonce:            nonce[:],
 		MessageNumber:    messageNum,
 		Timestamp:        time.Now().Unix(),
-		Status:           "pending",
+		Status:           "created",
 		DecryptedContent: plaintextContent, // Store plaintext for display
 	}
 
@@ -329,8 +329,10 @@ func (cmh *ChatMessageHandler) SendChatMessageWithRetry(
 		case ConnectionMethodDirect:
 			err := cmh.sendChatMessageDirect(toPeerID, messageData)
 			if err == nil {
-				cmh.logger.Info(fmt.Sprintf("💬 Message %s sent successfully to peer %s (direct)", messageID[:8], toPeerID[:8]), "chat_message_handler")
-				if err := cmh.dbManager.UpdateMessageStatus(messageID, "sent"); err != nil {
+				// For direct connections to public peers, skip "sent" and go straight to "delivered"
+				// since the message was received directly by the peer (not via relay)
+				cmh.logger.Info(fmt.Sprintf("💬 Message %s delivered directly to peer %s", messageID[:8], toPeerID[:8]), "chat_message_handler")
+				if err := cmh.dbManager.UpdateMessageStatus(messageID, "delivered"); err != nil {
 					cmh.logger.Warn(fmt.Sprintf("Failed to update message status: %v", err), "chat_message_handler")
 				}
 				return messageID, nil
@@ -341,6 +343,8 @@ func (cmh *ChatMessageHandler) SendChatMessageWithRetry(
 		case ConnectionMethodRelay:
 			err := cmh.sendChatMessageViaRelay(toPeerID, messageData)
 			if err == nil {
+				// For relay connections, "sent" means relay confirmed delivery
+				// "delivered" status will be set when recipient sends delivery confirmation
 				cmh.logger.Info(fmt.Sprintf("💬 Message %s sent via relay to peer %s", messageID[:8], toPeerID[:8]), "chat_message_handler")
 				if err := cmh.dbManager.UpdateMessageStatus(messageID, "sent"); err != nil {
 					cmh.logger.Warn(fmt.Sprintf("Failed to update message status: %v", err), "chat_message_handler")
@@ -373,10 +377,15 @@ func (cmh *ChatMessageHandler) SendDeliveryConfirmation(toPeerID, messageID, con
 		return err
 	}
 
-	// Try direct send (no retry for confirmations to avoid overhead)
+	// Try direct send first (no retry for confirmations to avoid overhead)
 	if err := cmh.quicPeer.SendMessageToPeer(toPeerID, msgBytes); err != nil {
-		cmh.logger.Debug(fmt.Sprintf("Failed to send delivery confirmation: %v", err), "chat_message_handler")
-		return err
+		cmh.logger.Debug(fmt.Sprintf("Direct delivery confirmation failed to peer %s: %v, trying relay", toPeerID[:8], err), "chat_message_handler")
+
+		// Try via relay if direct fails
+		if relayErr := cmh.sendMessageViaRelay(toPeerID, msgBytes, "chat_delivery_confirmation"); relayErr != nil {
+			cmh.logger.Debug(fmt.Sprintf("Failed to send delivery confirmation: direct=%v, relay=%v", err, relayErr), "chat_message_handler")
+			return fmt.Errorf("failed to send delivery confirmation: direct=%v, relay=%v", err, relayErr)
+		}
 	}
 
 	return nil
@@ -391,12 +400,61 @@ func (cmh *ChatMessageHandler) SendReadReceipt(toPeerID, messageID, conversation
 		return err
 	}
 
-	// Try direct send (no retry for read receipts)
+	// Try direct send first (no retry for read receipts)
 	if err := cmh.quicPeer.SendMessageToPeer(toPeerID, msgBytes); err != nil {
-		cmh.logger.Debug(fmt.Sprintf("Failed to send read receipt: %v", err), "chat_message_handler")
-		return err
+		cmh.logger.Debug(fmt.Sprintf("Direct read receipt failed to peer %s: %v, trying relay", toPeerID[:8], err), "chat_message_handler")
+
+		// Try via relay if direct fails
+		if relayErr := cmh.sendMessageViaRelay(toPeerID, msgBytes, "chat_read_receipt"); relayErr != nil {
+			cmh.logger.Debug(fmt.Sprintf("Failed to send read receipt: direct=%v, relay=%v", err, relayErr), "chat_message_handler")
+			return fmt.Errorf("failed to send read receipt: direct=%v, relay=%v", err, relayErr)
+		}
 	}
 
+	return nil
+}
+
+// SendGroupCreate sends a group creation message to a peer
+func (cmh *ChatMessageHandler) SendGroupCreate(toPeerID string, createData *ChatGroupCreateData) error {
+	msg := CreateChatGroupCreate(createData)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal group create: %v", err)
+	}
+
+	// Try direct first, then relay
+	if err := cmh.quicPeer.SendMessageToPeer(toPeerID, msgBytes); err != nil {
+		cmh.logger.Debug(fmt.Sprintf("Direct group create failed to peer %s: %v, trying relay", toPeerID[:8], err), "chat_message_handler")
+
+		// Try via relay
+		if relayErr := cmh.sendMessageViaRelay(toPeerID, msgBytes, "chat_group_create"); relayErr != nil {
+			return fmt.Errorf("failed to send group create: direct=%v, relay=%v", err, relayErr)
+		}
+	}
+
+	cmh.logger.Info(fmt.Sprintf("👥 Sent group create to peer %s for group %s", toPeerID[:8], createData.ConversationID[:8]), "chat_message_handler")
+	return nil
+}
+
+// SendSenderKeyDistribution sends sender key to a peer for group decryption
+func (cmh *ChatMessageHandler) SendSenderKeyDistribution(toPeerID string, data *ChatSenderKeyDistributionData) error {
+	msg := CreateChatSenderKeyDistribution(data)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal sender key distribution: %v", err)
+	}
+
+	// Try direct first, then relay
+	if err := cmh.quicPeer.SendMessageToPeer(toPeerID, msgBytes); err != nil {
+		cmh.logger.Debug(fmt.Sprintf("Direct sender key distribution failed to peer %s: %v, trying relay", toPeerID[:8], err), "chat_message_handler")
+
+		// Try via relay
+		if relayErr := cmh.sendMessageViaRelay(toPeerID, msgBytes, "chat_sender_key_distribution"); relayErr != nil {
+			return fmt.Errorf("failed to send sender key distribution: direct=%v, relay=%v", err, relayErr)
+		}
+	}
+
+	cmh.logger.Debug(fmt.Sprintf("🔑 Sent sender key to peer %s for group %s", toPeerID[:8], data.ConversationID[:8]), "chat_message_handler")
 	return nil
 }
 
@@ -975,6 +1033,149 @@ func (cmh *ChatMessageHandler) saveRatchetStateComplete(conversationID string, k
 	return nil
 }
 
+// SendGroupMessageWithRetry sends an encrypted group message with retry logic
+func (cmh *ChatMessageHandler) SendGroupMessageWithRetry(
+	groupID string,
+	plaintextContent string,
+) (string, error) {
+	// Generate message ID
+	messageID := uuid.New().String()
+
+	// Get group members to send to
+	members, err := cmh.dbManager.GetGroupMembers(groupID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get group members: %v", err)
+	}
+
+	if len(members) == 0 {
+		return "", fmt.Errorf("no members in group")
+	}
+
+	// Encrypt message using Sender Keys
+	ciphertext, nonce, messageNum, signature, err := cmh.cryptoManager.EncryptGroupMessage(
+		groupID,
+		[]byte(plaintextContent),
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt group message: %v", err)
+	}
+
+	// Persist updated sender key state to database after encryption
+	// The encryption advances the chain key and increments message_number
+	if err := cmh.persistOurSenderKeyState(groupID); err != nil {
+		cmh.logger.Warn(fmt.Sprintf("Failed to persist sender key state: %v", err), "chat_message_handler")
+	}
+
+	// Store encrypted message in database (status: created)
+	chatMessage := &database.ChatMessage{
+		MessageID:        messageID,
+		ConversationID:   groupID,
+		SenderPeerID:     cmh.ourPeerID,
+		EncryptedContent: ciphertext,
+		Nonce:            nonce[:],
+		MessageNumber:    messageNum,
+		Timestamp:        time.Now().Unix(),
+		Status:           "created",
+		DecryptedContent: plaintextContent, // Store plaintext for display
+	}
+
+	if err := cmh.dbManager.StoreMessage(chatMessage); err != nil {
+		return "", fmt.Errorf("failed to store message: %v", err)
+	}
+
+	// Create message data
+	messageData := &ChatGroupMessageData{
+		MessageID:        messageID,
+		ConversationID:   groupID,
+		SenderPeerID:     cmh.ourPeerID,
+		EncryptedContent: ciphertext,
+		Nonce:            nonce[:],
+		MessageNumber:    messageNum,
+		Signature:        signature,
+		Timestamp:        chatMessage.Timestamp,
+	}
+
+	// Send to all group members (except ourselves)
+	successCount := 0
+	for _, member := range members {
+		if member.PeerID == cmh.ourPeerID {
+			continue // Skip ourselves
+		}
+
+		// Try to send to this member
+		err := cmh.sendGroupMessageToMember(member.PeerID, messageData)
+		if err != nil {
+			cmh.logger.Debug(fmt.Sprintf("Failed to send group message to member %s: %v", member.PeerID[:8], err), "chat_message_handler")
+		} else {
+			successCount++
+		}
+	}
+
+	// Update status based on delivery success
+	if successCount > 0 {
+		if err := cmh.dbManager.UpdateMessageStatus(messageID, "sent"); err != nil {
+			cmh.logger.Warn(fmt.Sprintf("Failed to update message status: %v", err), "chat_message_handler")
+		}
+		cmh.logger.Info(fmt.Sprintf("👥 Group message %s sent to %d/%d members in group %s",
+			messageID[:8], successCount, len(members)-1, groupID[:8]), "chat_message_handler")
+		return messageID, nil
+	}
+
+	// All sends failed
+	if err := cmh.dbManager.UpdateMessageStatus(messageID, "failed"); err != nil {
+		cmh.logger.Warn(fmt.Sprintf("Failed to update message status: %v", err), "chat_message_handler")
+	}
+	return messageID, fmt.Errorf("failed to send group message to any members")
+}
+
+// sendGroupMessageToMember sends a group message to a single member
+func (cmh *ChatMessageHandler) sendGroupMessageToMember(memberPeerID string, messageData *ChatGroupMessageData) error {
+	msg := CreateChatGroupMessage(messageData)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal group message: %v", err)
+	}
+
+	// First, ensure we have a connection (or determine connection method)
+	connMethod, connErr := cmh.ensureConnection(memberPeerID)
+	if connErr != nil {
+		// Try store-and-forward for offline public peers
+		if cmh.quicPeer.localStoreForward != nil {
+			isPublic, typeErr := cmh.quicPeer.localStoreForward.IsPublicPeer(memberPeerID)
+			if typeErr == nil && isPublic {
+				if storeErr := cmh.quicPeer.localStoreForward.TryStoreMessage(memberPeerID, msgBytes); storeErr == nil {
+					cmh.logger.Debug(fmt.Sprintf("Group message queued for offline public peer %s via local store-and-forward", memberPeerID[:8]), "chat_message_handler")
+					return nil
+				}
+			}
+		}
+		return connErr
+	}
+
+	// Route based on connection method
+	switch connMethod {
+	case ConnectionMethodDirect:
+		err := cmh.quicPeer.SendMessageToPeer(memberPeerID, msgBytes)
+		if err != nil {
+			return fmt.Errorf("direct send failed: %v", err)
+		}
+		cmh.logger.Debug(fmt.Sprintf("Group message sent directly to peer %s", memberPeerID[:8]), "chat_message_handler")
+		return nil
+
+	case ConnectionMethodRelay:
+		err := cmh.sendMessageViaRelay(memberPeerID, msgBytes, "chat_group_message")
+		if err != nil {
+			cmh.invalidateRelayCache(memberPeerID)
+			return fmt.Errorf("relay send failed: %v", err)
+		}
+		cmh.logger.Debug(fmt.Sprintf("Group message sent via relay to peer %s", memberPeerID[:8]), "chat_message_handler")
+		return nil
+
+	default:
+		return fmt.Errorf("peer %s is not connectable", memberPeerID[:8])
+	}
+}
+
 // loadRatchetState loads and decrypts the ratchet state from database
 func (cmh *ChatMessageHandler) loadRatchetState(conversationID string) error {
 	// Check if already loaded in memory
@@ -1028,6 +1229,74 @@ func (cmh *ChatMessageHandler) loadRatchetState(conversationID string) error {
 
 	// Set in crypto manager
 	cmh.cryptoManager.SetRatchet(conversationID, ratchet)
+
+	return nil
+}
+
+// persistOurSenderKeyState saves the current sender key state to the database after encryption
+// This ensures the chain key and message_number are properly persisted for subsequent messages
+func (cmh *ChatMessageHandler) persistOurSenderKeyState(groupID string) error {
+	// Get current sender key state from memory
+	chainKey, messageNumber, err := cmh.cryptoManager.GetOurSenderKeyState(groupID)
+	if err != nil {
+		return fmt.Errorf("failed to get our sender key state: %v", err)
+	}
+
+	// Encrypt chain key for storage
+	encryptedChainKey, nonce, err := cmh.cryptoManager.EncryptSenderKeyForStorage(chainKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt chain key: %v", err)
+	}
+
+	// Store updated sender key
+	senderKey := &database.ChatSenderKey{
+		ConversationID:    groupID,
+		SenderPeerID:      cmh.ourPeerID,
+		EncryptedChainKey: encryptedChainKey,
+		Nonce:             nonce[:],
+		MessageNumber:     messageNumber,
+	}
+
+	if err := cmh.dbManager.StoreSenderKey(senderKey); err != nil {
+		return fmt.Errorf("failed to store sender key: %v", err)
+	}
+
+	cmh.logger.Debug(fmt.Sprintf("Persisted our sender key state for group %s: message_number=%d",
+		groupID[:8], messageNumber), "chat_message_handler")
+
+	return nil
+}
+
+// PersistSenderKeyState saves a peer's sender key state to the database after decryption
+// This ensures the chain key and message_number are properly persisted for subsequent messages
+func (cmh *ChatMessageHandler) PersistSenderKeyState(groupID, peerID string) error {
+	// Get current sender key state from memory
+	chainKey, messageNumber, err := cmh.cryptoManager.GetSenderKeyState(groupID, peerID)
+	if err != nil {
+		return fmt.Errorf("failed to get sender key state: %v", err)
+	}
+
+	// Encrypt chain key for storage
+	encryptedChainKey, nonce, err := cmh.cryptoManager.EncryptSenderKeyForStorage(chainKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt chain key: %v", err)
+	}
+
+	// Store updated sender key
+	senderKey := &database.ChatSenderKey{
+		ConversationID:    groupID,
+		SenderPeerID:      peerID,
+		EncryptedChainKey: encryptedChainKey,
+		Nonce:             nonce[:],
+		MessageNumber:     messageNumber,
+	}
+
+	if err := cmh.dbManager.StoreSenderKey(senderKey); err != nil {
+		return fmt.Errorf("failed to store sender key: %v", err)
+	}
+
+	cmh.logger.Debug(fmt.Sprintf("Persisted sender key state for peer %s in group %s: message_number=%d",
+		peerID[:8], groupID[:8], messageNumber), "chat_message_handler")
 
 	return nil
 }

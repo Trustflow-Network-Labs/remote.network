@@ -15,7 +15,7 @@ type ChatMessage struct {
 	Nonce            []byte `json:"nonce"`              // 24 bytes NaCl nonce
 	MessageNumber    int    `json:"message_number"`     // Ratchet counter
 	Timestamp        int64  `json:"timestamp"`
-	Status           string `json:"status"` // pending, sent, delivered, read, failed
+	Status           string `json:"status"` // created, sent, delivered, read, failed
 	SentAt           int64  `json:"sent_at"`
 	DeliveredAt      int64  `json:"delivered_at"`
 	ReadAt           int64  `json:"read_at"`
@@ -35,7 +35,7 @@ func (sqlm *SQLiteManager) InitChatMessagesTable() error {
 		nonce BLOB NOT NULL,
 		message_number INTEGER NOT NULL,
 		timestamp INTEGER NOT NULL,
-		status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'sent', 'delivered', 'read', 'failed')),
+		status TEXT DEFAULT 'created' CHECK(status IN ('created', 'sent', 'delivered', 'read', 'failed')),
 		sent_at INTEGER DEFAULT 0,
 		delivered_at INTEGER DEFAULT 0,
 		read_at INTEGER DEFAULT 0,
@@ -53,6 +53,10 @@ func (sqlm *SQLiteManager) InitChatMessagesTable() error {
 	// Add decrypted_content column to existing tables (migration)
 	alterQuery := `ALTER TABLE chat_messages ADD COLUMN decrypted_content TEXT DEFAULT ''`
 	_, _ = sqlm.db.Exec(alterQuery) // Ignore error if column already exists
+
+	// Migration: Update 'pending' status to 'created' for existing messages
+	migrateStatusQuery := `UPDATE chat_messages SET status = 'created' WHERE status = 'pending'`
+	_, _ = sqlm.db.Exec(migrateStatusQuery) // Ignore error if no rows to update
 
 	sqlm.logger.Info("chat_messages table initialized", "database")
 	return nil
@@ -237,13 +241,13 @@ func (sqlm *SQLiteManager) MarkConversationMessagesAsRead(conversationID string)
 	return sqlm.ResetUnreadCount(conversationID)
 }
 
-// GetPendingMessages retrieves all messages with 'pending' status for retry
+// GetPendingMessages retrieves all messages with 'created' status for retry
 func (sqlm *SQLiteManager) GetPendingMessages() ([]*ChatMessage, error) {
 	query := `
 	SELECT message_id, conversation_id, sender_peer_id, encrypted_content, nonce,
 	       message_number, timestamp, status, sent_at, delivered_at, read_at
 	FROM chat_messages
-	WHERE status = 'pending'
+	WHERE status = 'created'
 	ORDER BY timestamp ASC
 	`
 

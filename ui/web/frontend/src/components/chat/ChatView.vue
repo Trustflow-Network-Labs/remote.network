@@ -27,18 +27,18 @@
       </div>
 
       <div class="chat-container">
-        <!-- Conversations List -->
+        <!-- Conversations List (Grouped by peer) -->
         <ConversationList
-          :conversations="chatStore.conversations"
-          :active-conversation-id="chatStore.activeConversationID"
+          :grouped-conversations="chatStore.groupedConversations"
+          :active-peer-id="chatStore.activePeerID"
           :total-unread="chatStore.totalUnreadCount"
-          @select-conversation="selectConversation"
-          @delete-conversation="handleDeleteConversation"
+          @select-peer="selectPeer"
+          @delete-peer="handleDeletePeer"
         />
 
         <!-- Messages Area -->
         <div class="messages-area">
-          <div v-if="!chatStore.activeConversationID" class="empty-state">
+          <div v-if="!chatStore.activePeerID" class="empty-state">
             <i class="pi pi-comments"></i>
             <h3>Select a conversation</h3>
             <p>Choose a conversation from the list or start a new chat</p>
@@ -47,9 +47,19 @@
           <div v-else class="conversation-view">
             <!-- Conversation Header -->
             <div class="conversation-header">
-              <div class="conversation-info">
-                <h3>{{ conversationTitle }}</h3>
-                <p class="conversation-subtitle">{{ conversationSubtitle }}</p>
+              <div
+                class="conversation-info"
+                :class="{ clickable: isGroupConversation }"
+                @click="isGroupConversation && (showGroupMembersDialog = true)"
+              >
+                <h3>
+                  {{ conversationTitle }}
+                  <i v-if="isGroupConversation" class="pi pi-chevron-right group-chevron"></i>
+                </h3>
+                <p class="conversation-subtitle">
+                  {{ conversationSubtitle }}
+                  <span v-if="isGroupConversation" class="view-members-hint">(click to view members)</span>
+                </p>
               </div>
               <div class="conversation-actions">
                 <Button
@@ -67,6 +77,7 @@
               :messages="chatStore.activeMessages"
               :local-peer-id="nodeStore.peerId || ''"
               :loading="loadingMessages"
+              :is-group="chatStore.activeConversation?.conversation_type === 'group'"
             />
 
             <!-- Message Input -->
@@ -142,6 +153,13 @@
         v-model:visible="showGroupDialog"
         @created="handleGroupCreated"
       />
+
+      <!-- Group Members Dialog -->
+      <GroupMembersDialog
+        v-model:visible="showGroupMembersDialog"
+        :group-id="activeGroupId"
+        :group-name="chatStore.activeConversation?.group_name"
+      />
     </div>
   </AppLayout>
 </template>
@@ -156,6 +174,7 @@ import ConversationList from './ConversationList.vue'
 import MessageList from './MessageList.vue'
 import MessageInput from './MessageInput.vue'
 import GroupCreateDialog from './GroupCreateDialog.vue'
+import GroupMembersDialog from './GroupMembersDialog.vue'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import InputText from 'primevue/inputtext'
@@ -166,6 +185,7 @@ const toast = useToast()
 
 const showNewChatDialog = ref(false)
 const showGroupDialog = ref(false)
+const showGroupMembersDialog = ref(false)
 const newChatPeerID = ref('')
 const confirmDelete = ref(false)
 const loadingMessages = ref(false)
@@ -191,6 +211,17 @@ const conversationSubtitle = computed(() => {
   } else {
     return `1-on-1 with ${conv.peer_id ? shortenId(conv.peer_id) : 'peer'}`
   }
+})
+
+const isGroupConversation = computed(() => {
+  return chatStore.activeConversation?.conversation_type === 'group'
+})
+
+const activeGroupId = computed(() => {
+  const conv = chatStore.activeConversation
+  if (!conv || conv.conversation_type !== 'group') return ''
+  // For groups, the conversation_id is the group ID
+  return conv.conversation_id || ''
 })
 
 function shortenId(id: string): string {
@@ -230,16 +261,61 @@ async function selectConversation(conversationID: string) {
   }
 }
 
+async function selectPeer(peerID: string) {
+  // Load all messages for this peer
+  loadingMessages.value = true
+  try {
+    await chatStore.setActivePeer(peerID)
+  } catch (error: any) {
+    toast.add({
+      severity: 'error',
+      summary: 'Error',
+      detail: error.message || 'Failed to load messages',
+      life: 3000
+    })
+  } finally {
+    loadingMessages.value = false
+  }
+}
+
+async function handleDeletePeer(peerID: string) {
+  // Delete all conversations with this peer
+  const convs = chatStore.conversations.filter(c =>
+    (c.conversation_type === '1on1' && c.peer_id === peerID) ||
+    (c.conversation_type === 'group' && c.conversation_id === peerID)
+  )
+
+  try {
+    for (const conv of convs) {
+      await chatStore.deleteConversation(conv.conversation_id)
+    }
+    toast.add({
+      severity: 'success',
+      summary: 'Deleted',
+      detail: 'Conversation deleted',
+      life: 3000
+    })
+  } catch (error: any) {
+    toast.add({
+      severity: 'error',
+      summary: 'Error',
+      detail: error.message || 'Failed to delete conversation',
+      life: 3000
+    })
+  }
+}
+
 async function createNewChat() {
   if (!newChatPeerID.value) return
 
   try {
-    const conversation = await chatStore.createConversation(newChatPeerID.value)
+    await chatStore.createConversation(newChatPeerID.value)
     showNewChatDialog.value = false
+    const peerID = newChatPeerID.value
     newChatPeerID.value = ''
 
-    // Load messages for new conversation
-    await selectConversation(conversation.conversation_id)
+    // Select the peer (which will load all conversations with this peer)
+    await selectPeer(peerID)
 
     toast.add({
       severity: 'success',
@@ -315,6 +391,11 @@ async function handleGroupCreated(groupId: string) {
 }
 
 onMounted(async () => {
+  // Ensure node status is loaded first (needed for localPeerId to determine sent vs received)
+  if (!nodeStore.peerId) {
+    await nodeStore.fetchNodeStatus()
+  }
+
   // Fetch conversations
   await refreshConversations()
 
@@ -324,17 +405,17 @@ onMounted(async () => {
   // Fetch unread count
   await chatStore.fetchUnreadCount()
 
-  // Restore previously active conversation (if any)
-  const restoredConversationID = chatStore.restoreActiveConversation()
-  if (restoredConversationID) {
-    // Load messages for restored conversation
+  // Restore previously active peer (if any)
+  const restoredPeerID = chatStore.restoreActivePeer()
+  if (restoredPeerID) {
+    // Load messages for restored peer
     loadingMessages.value = true
     try {
-      await chatStore.fetchMessages(restoredConversationID)
+      await chatStore.fetchMessagesForPeer(restoredPeerID)
     } catch (error: any) {
-      console.error('Failed to load messages for restored conversation:', error)
-      // Clear the invalid conversation
-      chatStore.setActiveConversation(null)
+      console.error('Failed to load messages for restored peer:', error)
+      // Clear the invalid peer
+      chatStore.setActivePeer(null)
     } finally {
       loadingMessages.value = false
     }
@@ -434,12 +515,42 @@ onUnmounted(() => {
       margin: 0 0 0.25rem 0;
       font-size: 1.1rem;
       color: vars.$color-text-primary;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+
+      .group-chevron {
+        font-size: 0.8rem;
+        opacity: 0.6;
+        transition: transform 0.2s ease;
+      }
     }
 
     .conversation-subtitle {
       margin: 0;
       font-size: 0.85rem;
       color: vars.$color-text-secondary;
+
+      .view-members-hint {
+        font-size: 0.75rem;
+        opacity: 0.7;
+      }
+    }
+
+    &.clickable {
+      cursor: pointer;
+      padding: 0.5rem;
+      margin: -0.5rem;
+      border-radius: 8px;
+      transition: background-color 0.2s ease;
+
+      &:hover {
+        background-color: rgba(0, 0, 0, 0.05);
+
+        h3 .group-chevron {
+          transform: translateX(3px);
+        }
+      }
     }
   }
 }
