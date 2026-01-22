@@ -256,18 +256,49 @@ export const useChatStore = defineStore('chat', {
     async sendMessage(conversationID: string, content: string) {
       this.error = null
 
+      // Get local peer ID for the optimistic message
+      const localPeerID = localStorage.getItem('peer_id') || ''
+
+      // Create optimistic message with temporary ID
+      const tempID = `temp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+      const optimisticMessage: ChatMessage = {
+        message_id: tempID,
+        conversation_id: conversationID,
+        sender_peer_id: localPeerID,
+        content: content,
+        status: 'created',
+        timestamp: Math.floor(Date.now() / 1000),
+        message_number: 0,
+      }
+
+      // Add message to local list immediately
+      if (!this.messages[conversationID]) {
+        this.messages[conversationID] = []
+      }
+      this.messages[conversationID].push(optimisticMessage)
+
+      // Update conversation last_message_at immediately
+      const conversation = this.conversations.find(c => c.conversation_id === conversationID)
+      if (conversation) {
+        conversation.last_message_at = optimisticMessage.timestamp
+        conversation.last_message = optimisticMessage
+      }
+
+      // Send message in background (don't await in caller)
       try {
         const response = await api.sendMessage(conversationID, content)
         const message = response.message
 
-        // Add message to local list
-        if (!this.messages[conversationID]) {
-          this.messages[conversationID] = []
+        // Replace temporary message with real one
+        const messages = this.messages[conversationID]
+        if (messages) {
+          const tempIndex = messages.findIndex(m => m.message_id === tempID)
+          if (tempIndex !== -1) {
+            messages[tempIndex] = message
+          }
         }
-        this.messages[conversationID].push(message)
 
-        // Update conversation last_message_at
-        const conversation = this.conversations.find(c => c.conversation_id === conversationID)
+        // Update conversation with real message
         if (conversation) {
           conversation.last_message_at = message.timestamp
           conversation.last_message = message
@@ -275,6 +306,15 @@ export const useChatStore = defineStore('chat', {
 
         return message
       } catch (error: any) {
+        // Update optimistic message to failed status
+        const messages = this.messages[conversationID]
+        if (messages) {
+          const tempMessage = messages.find(m => m.message_id === tempID)
+          if (tempMessage) {
+            tempMessage.status = 'failed'
+          }
+        }
+
         this.error = error.response?.data?.message || error.message
         throw error
       }
@@ -349,14 +389,53 @@ export const useChatStore = defineStore('chat', {
     async sendGroupMessage(groupID: string, content: string) {
       this.error = null
 
+      // Get local peer ID for the optimistic message
+      const localPeerID = localStorage.getItem('peer_id') || ''
+
+      // Create optimistic message with temporary ID
+      const tempID = `temp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+      const optimisticMessage: ChatMessage = {
+        message_id: tempID,
+        conversation_id: groupID,
+        sender_peer_id: localPeerID,
+        content: content,
+        status: 'created',
+        timestamp: Math.floor(Date.now() / 1000),
+        message_number: 0,
+      }
+
+      // Add message to local list immediately
+      if (!this.messages[groupID]) {
+        this.messages[groupID] = []
+      }
+      this.messages[groupID].push(optimisticMessage)
+
+      // Update conversation last_message_at immediately
+      const conversation = this.conversations.find(c => c.conversation_id === groupID)
+      if (conversation) {
+        conversation.last_message_at = optimisticMessage.timestamp
+        conversation.last_message = optimisticMessage
+      }
+
+      // Send message in background (don't await in caller)
       try {
         const response = await api.sendGroupMessage(groupID, content)
 
-        // Refresh messages to get the sent message
+        // Replace temporary message with real one by fetching updated messages
+        // Group messages come back with just message_id, so we need to fetch
         await this.fetchMessages(groupID)
 
         return response
       } catch (error: any) {
+        // Update optimistic message to failed status
+        const messages = this.messages[groupID]
+        if (messages) {
+          const tempMessage = messages.find(m => m.message_id === tempID)
+          if (tempMessage) {
+            tempMessage.status = 'failed'
+          }
+        }
+
         this.error = error.response?.data?.message || error.message
         throw error
       }

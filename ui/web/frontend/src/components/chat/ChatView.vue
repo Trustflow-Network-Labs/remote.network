@@ -83,7 +83,6 @@
             <!-- Message Input -->
             <MessageInput
               @send="handleSendMessage"
-              :disabled="sendingMessage"
             />
           </div>
         </div>
@@ -189,7 +188,6 @@ const showGroupMembersDialog = ref(false)
 const newChatPeerID = ref('')
 const confirmDelete = ref(false)
 const loadingMessages = ref(false)
-const sendingMessage = ref(false)
 
 const conversationTitle = computed(() => {
   const conv = chatStore.activeConversation
@@ -333,22 +331,22 @@ async function createNewChat() {
   }
 }
 
-async function handleSendMessage(content: string) {
+function handleSendMessage(content: string) {
   if (!chatStore.activeConversationID || !content.trim()) return
 
-  sendingMessage.value = true
-  try {
-    await chatStore.sendMessage(chatStore.activeConversationID, content)
-  } catch (error: any) {
-    toast.add({
-      severity: 'error',
-      summary: 'Error',
-      detail: error.message || 'Failed to send message',
-      life: 3000
+  // Fire-and-forget: message appears immediately with 'created' status
+  // Status updates will come through WebSocket or when API responds
+  chatStore.sendMessage(chatStore.activeConversationID, content)
+    .catch((error: any) => {
+      // Error is already handled in store (message status set to 'failed')
+      // Show toast notification for user feedback
+      toast.add({
+        severity: 'error',
+        summary: 'Message Failed',
+        detail: error.message || 'Failed to send message',
+        life: 5000
+      })
     })
-  } finally {
-    sendingMessage.value = false
-  }
 }
 
 async function handleDeleteConversation(conversationID: string) {
