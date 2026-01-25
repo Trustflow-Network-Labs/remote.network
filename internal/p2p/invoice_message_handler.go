@@ -2,10 +2,13 @@ package p2p
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -22,6 +25,10 @@ type InvoiceMessageHandler struct {
 	maxRetries    int
 	retryBackoff  time.Duration
 
+	// E2E encryption for invoices
+	invoiceCrypto     *crypto.InvoiceCryptoManager
+	requireEncryption bool // If true, refuse to send/receive unencrypted invoices
+
 	// Relay connection cache (peerID -> relay info)
 	relayCache   map[string]*RelayCache
 	relayCacheMu sync.RWMutex
@@ -35,15 +42,22 @@ func NewInvoiceMessageHandler(
 ) *InvoiceMessageHandler {
 	maxRetries := config.GetConfigInt("invoice_max_retries", 3, 0, 10)
 	retryBackoff := time.Duration(config.GetConfigInt("invoice_retry_backoff_ms", 2000, 500, 10000)) * time.Millisecond
+	requireEncryption := config.GetConfigBool("invoice_require_encryption", false) // Default: accept both
 
 	return &InvoiceMessageHandler{
-		logger:       logger,
-		config:       config,
-		quicPeer:     quicPeer,
-		maxRetries:   maxRetries,
-		retryBackoff: retryBackoff,
-		relayCache:   make(map[string]*RelayCache),
+		logger:            logger,
+		config:            config,
+		quicPeer:          quicPeer,
+		maxRetries:        maxRetries,
+		retryBackoff:      retryBackoff,
+		requireEncryption: requireEncryption,
+		relayCache:        make(map[string]*RelayCache),
 	}
+}
+
+// SetInvoiceCrypto sets the invoice crypto manager for E2E encryption
+func (imh *InvoiceMessageHandler) SetInvoiceCrypto(invoiceCrypto *crypto.InvoiceCryptoManager) {
+	imh.invoiceCrypto = invoiceCrypto
 }
 
 // SetDependencies sets the additional dependencies needed for relay forwarding
@@ -210,18 +224,188 @@ func (imh *InvoiceMessageHandler) SendInvoiceNotificationWithRetry(
 	return fmt.Errorf("failed to send invoice notification after %d attempts: %v", imh.maxRetries+1, lastErr)
 }
 
-// Direct sending methods (delegate to QUICPeer)
+// Direct sending methods (delegate to QUICPeer with optional encryption)
 
 func (imh *InvoiceMessageHandler) sendInvoiceRequestDirect(toPeerID string, invoiceData *InvoiceRequestData) error {
+	// Try to send encrypted if crypto is available
+	if imh.invoiceCrypto != nil && imh.knownPeers != nil {
+		recipientPubKey, err := imh.getRecipientPublicKey(toPeerID)
+		if err == nil {
+			return imh.sendEncryptedInvoiceRequest(toPeerID, invoiceData, recipientPubKey)
+		}
+		imh.logger.Debug(fmt.Sprintf("Could not get public key for peer %s, falling back to unencrypted: %v", toPeerID[:8], err), "invoice_message_handler")
+	}
+
+	// Fall back to unencrypted
 	return imh.quicPeer.SendInvoiceRequestDirect(toPeerID, invoiceData)
 }
 
 func (imh *InvoiceMessageHandler) sendInvoiceResponseDirect(toPeerID string, invoiceID string, accepted bool, message string) error {
+	// Try to send encrypted if crypto is available
+	if imh.invoiceCrypto != nil && imh.knownPeers != nil {
+		recipientPubKey, err := imh.getRecipientPublicKey(toPeerID)
+		if err == nil {
+			return imh.sendEncryptedInvoiceResponse(toPeerID, invoiceID, accepted, message, recipientPubKey)
+		}
+		imh.logger.Debug(fmt.Sprintf("Could not get public key for peer %s, falling back to unencrypted: %v", toPeerID[:8], err), "invoice_message_handler")
+	}
+
+	// Fall back to unencrypted
 	return imh.quicPeer.SendInvoiceResponseDirect(toPeerID, invoiceID, accepted, message)
 }
 
 func (imh *InvoiceMessageHandler) sendInvoiceNotificationDirect(toPeerID string, invoiceID string, status string, message string) error {
+	// Try to send encrypted if crypto is available
+	if imh.invoiceCrypto != nil && imh.knownPeers != nil {
+		recipientPubKey, err := imh.getRecipientPublicKey(toPeerID)
+		if err == nil {
+			return imh.sendEncryptedInvoiceNotification(toPeerID, invoiceID, status, message, recipientPubKey)
+		}
+		imh.logger.Debug(fmt.Sprintf("Could not get public key for peer %s, falling back to unencrypted: %v", toPeerID[:8], err), "invoice_message_handler")
+	}
+
+	// Fall back to unencrypted
 	return imh.quicPeer.SendInvoiceNotificationDirect(toPeerID, invoiceID, status, message)
+}
+
+// getRecipientPublicKey retrieves the Ed25519 public key for a peer from known peers
+func (imh *InvoiceMessageHandler) getRecipientPublicKey(peerID string) (ed25519.PublicKey, error) {
+	peer, err := imh.knownPeers.GetKnownPeer(peerID, "remote-network-mesh")
+	if err != nil {
+		return nil, fmt.Errorf("peer not found: %v", err)
+	}
+	if peer == nil || len(peer.PublicKey) == 0 {
+		return nil, fmt.Errorf("peer %s has no public key", peerID[:8])
+	}
+	return peer.PublicKey, nil
+}
+
+// sendEncryptedInvoiceRequest encrypts and sends an invoice request
+func (imh *InvoiceMessageHandler) sendEncryptedInvoiceRequest(toPeerID string, invoiceData *InvoiceRequestData, recipientPubKey ed25519.PublicKey) error {
+	// Serialize invoice data to JSON
+	plaintext, err := json.Marshal(invoiceData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal invoice request: %v", err)
+	}
+
+	// Encrypt the invoice data
+	ciphertext, nonce, ephemeralPubKey, signature, err := imh.invoiceCrypto.EncryptInvoice(plaintext, recipientPubKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt invoice request: %v", err)
+	}
+
+	// Create encrypted message
+	encryptedData := &EncryptedInvoiceRequestData{
+		SenderPeerID:     imh.ourPeerID,
+		EphemeralPubKey:  ephemeralPubKey[:],
+		EncryptedPayload: ciphertext,
+		Nonce:            nonce[:],
+		Signature:        signature,
+		Timestamp:        time.Now().Unix(),
+	}
+
+	msg := CreateEncryptedInvoiceRequest(encryptedData)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal encrypted invoice request: %v", err)
+	}
+
+	if err := imh.quicPeer.SendMessageToPeer(toPeerID, msgBytes); err != nil {
+		return fmt.Errorf("failed to send encrypted invoice request to peer %s: %v", toPeerID[:8], err)
+	}
+
+	imh.logger.Info(fmt.Sprintf("Sent encrypted invoice request %s to peer %s", invoiceData.InvoiceID, toPeerID[:8]), "invoice_message_handler")
+	return nil
+}
+
+// sendEncryptedInvoiceResponse encrypts and sends an invoice response
+func (imh *InvoiceMessageHandler) sendEncryptedInvoiceResponse(toPeerID string, invoiceID string, accepted bool, message string, recipientPubKey ed25519.PublicKey) error {
+	// Serialize response data to JSON
+	responseData := &InvoiceResponseData{
+		InvoiceID: invoiceID,
+		Accepted:  accepted,
+		Message:   message,
+	}
+	plaintext, err := json.Marshal(responseData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal invoice response: %v", err)
+	}
+
+	// Encrypt the response data
+	ciphertext, nonce, ephemeralPubKey, signature, err := imh.invoiceCrypto.EncryptInvoice(plaintext, recipientPubKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt invoice response: %v", err)
+	}
+
+	// Create encrypted message
+	encryptedData := &EncryptedInvoiceResponseData{
+		SenderPeerID:     imh.ourPeerID,
+		EphemeralPubKey:  ephemeralPubKey[:],
+		EncryptedPayload: ciphertext,
+		Nonce:            nonce[:],
+		Signature:        signature,
+		Timestamp:        time.Now().Unix(),
+	}
+
+	msg := CreateEncryptedInvoiceResponse(encryptedData)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal encrypted invoice response: %v", err)
+	}
+
+	if err := imh.quicPeer.SendMessageToPeer(toPeerID, msgBytes); err != nil {
+		return fmt.Errorf("failed to send encrypted invoice response to peer %s: %v", toPeerID[:8], err)
+	}
+
+	status := "rejected"
+	if accepted {
+		status = "accepted"
+	}
+	imh.logger.Info(fmt.Sprintf("Sent encrypted invoice %s response to peer %s: %s", invoiceID, toPeerID[:8], status), "invoice_message_handler")
+	return nil
+}
+
+// sendEncryptedInvoiceNotification encrypts and sends an invoice notification
+func (imh *InvoiceMessageHandler) sendEncryptedInvoiceNotification(toPeerID string, invoiceID string, status string, message string, recipientPubKey ed25519.PublicKey) error {
+	// Serialize notification data to JSON
+	notifyData := &InvoiceNotifyData{
+		InvoiceID: invoiceID,
+		Status:    status,
+		Message:   message,
+	}
+	plaintext, err := json.Marshal(notifyData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal invoice notification: %v", err)
+	}
+
+	// Encrypt the notification data
+	ciphertext, nonce, ephemeralPubKey, signature, err := imh.invoiceCrypto.EncryptInvoice(plaintext, recipientPubKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt invoice notification: %v", err)
+	}
+
+	// Create encrypted message
+	encryptedData := &EncryptedInvoiceNotifyData{
+		SenderPeerID:     imh.ourPeerID,
+		EphemeralPubKey:  ephemeralPubKey[:],
+		EncryptedPayload: ciphertext,
+		Nonce:            nonce[:],
+		Signature:        signature,
+		Timestamp:        time.Now().Unix(),
+	}
+
+	msg := CreateEncryptedInvoiceNotify(encryptedData)
+	msgBytes, err := msg.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal encrypted invoice notification: %v", err)
+	}
+
+	if err := imh.quicPeer.SendMessageToPeer(toPeerID, msgBytes); err != nil {
+		return fmt.Errorf("failed to send encrypted invoice notification to peer %s: %v", toPeerID[:8], err)
+	}
+
+	imh.logger.Info(fmt.Sprintf("Sent encrypted invoice %s notification to peer %s: %s", invoiceID, toPeerID[:8], status), "invoice_message_handler")
+	return nil
 }
 
 // Relay sending methods
@@ -234,15 +418,57 @@ func (imh *InvoiceMessageHandler) sendInvoiceRequestViaRelay(toPeerID string, in
 		return fmt.Errorf("relay dependencies not set")
 	}
 
-	// Create invoice request message
-	msg := CreateInvoiceRequest(invoiceData)
-	msgBytes, err := msg.Marshal()
-	if err != nil {
-		return fmt.Errorf("failed to marshal invoice request: %v", err)
+	var msgBytes []byte
+	var messageType string
+
+	// Try to encrypt if crypto is available
+	if imh.invoiceCrypto != nil && imh.knownPeers != nil {
+		recipientPubKey, err := imh.getRecipientPublicKey(toPeerID)
+		if err == nil {
+			// Serialize and encrypt
+			plaintext, err := json.Marshal(invoiceData)
+			if err != nil {
+				return fmt.Errorf("failed to marshal invoice request: %v", err)
+			}
+
+			ciphertext, nonce, ephemeralPubKey, signature, err := imh.invoiceCrypto.EncryptInvoice(plaintext, recipientPubKey)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt invoice request: %v", err)
+			}
+
+			encryptedData := &EncryptedInvoiceRequestData{
+				SenderPeerID:     imh.ourPeerID,
+				EphemeralPubKey:  ephemeralPubKey[:],
+				EncryptedPayload: ciphertext,
+				Nonce:            nonce[:],
+				Signature:        signature,
+				Timestamp:        time.Now().Unix(),
+			}
+
+			msg := CreateEncryptedInvoiceRequest(encryptedData)
+			msgBytes, err = msg.Marshal()
+			if err != nil {
+				return fmt.Errorf("failed to marshal encrypted invoice request: %v", err)
+			}
+			messageType = "encrypted_invoice_request"
+		} else {
+			imh.logger.Debug(fmt.Sprintf("Could not get public key for peer %s, sending unencrypted via relay: %v", toPeerID[:8], err), "invoice_message_handler")
+		}
+	}
+
+	// Fall back to unencrypted if encryption failed or not available
+	if msgBytes == nil {
+		msg := CreateInvoiceRequest(invoiceData)
+		var err error
+		msgBytes, err = msg.Marshal()
+		if err != nil {
+			return fmt.Errorf("failed to marshal invoice request: %v", err)
+		}
+		messageType = "invoice_request"
 	}
 
 	// Send via relay with retry logic
-	return imh.sendMessageViaRelay(toPeerID, msgBytes, "invoice_request")
+	return imh.sendMessageViaRelay(toPeerID, msgBytes, messageType)
 }
 
 func (imh *InvoiceMessageHandler) sendInvoiceResponseViaRelay(toPeerID string, invoiceID string, accepted bool, message string) error {
@@ -252,13 +478,61 @@ func (imh *InvoiceMessageHandler) sendInvoiceResponseViaRelay(toPeerID string, i
 		return fmt.Errorf("relay dependencies not set")
 	}
 
-	msg := CreateInvoiceResponse(invoiceID, accepted, message)
-	msgBytes, err := msg.Marshal()
-	if err != nil {
-		return fmt.Errorf("failed to marshal invoice response: %v", err)
+	var msgBytes []byte
+	var messageType string
+
+	// Try to encrypt if crypto is available
+	if imh.invoiceCrypto != nil && imh.knownPeers != nil {
+		recipientPubKey, err := imh.getRecipientPublicKey(toPeerID)
+		if err == nil {
+			// Serialize and encrypt
+			responseData := &InvoiceResponseData{
+				InvoiceID: invoiceID,
+				Accepted:  accepted,
+				Message:   message,
+			}
+			plaintext, err := json.Marshal(responseData)
+			if err != nil {
+				return fmt.Errorf("failed to marshal invoice response: %v", err)
+			}
+
+			ciphertext, nonce, ephemeralPubKey, signature, err := imh.invoiceCrypto.EncryptInvoice(plaintext, recipientPubKey)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt invoice response: %v", err)
+			}
+
+			encryptedData := &EncryptedInvoiceResponseData{
+				SenderPeerID:     imh.ourPeerID,
+				EphemeralPubKey:  ephemeralPubKey[:],
+				EncryptedPayload: ciphertext,
+				Nonce:            nonce[:],
+				Signature:        signature,
+				Timestamp:        time.Now().Unix(),
+			}
+
+			msg := CreateEncryptedInvoiceResponse(encryptedData)
+			msgBytes, err = msg.Marshal()
+			if err != nil {
+				return fmt.Errorf("failed to marshal encrypted invoice response: %v", err)
+			}
+			messageType = "encrypted_invoice_response"
+		} else {
+			imh.logger.Debug(fmt.Sprintf("Could not get public key for peer %s, sending unencrypted via relay: %v", toPeerID[:8], err), "invoice_message_handler")
+		}
 	}
 
-	return imh.sendMessageViaRelay(toPeerID, msgBytes, "invoice_response")
+	// Fall back to unencrypted if encryption failed or not available
+	if msgBytes == nil {
+		msg := CreateInvoiceResponse(invoiceID, accepted, message)
+		var err error
+		msgBytes, err = msg.Marshal()
+		if err != nil {
+			return fmt.Errorf("failed to marshal invoice response: %v", err)
+		}
+		messageType = "invoice_response"
+	}
+
+	return imh.sendMessageViaRelay(toPeerID, msgBytes, messageType)
 }
 
 func (imh *InvoiceMessageHandler) sendInvoiceNotificationViaRelay(toPeerID string, invoiceID string, status string, message string) error {
@@ -268,13 +542,61 @@ func (imh *InvoiceMessageHandler) sendInvoiceNotificationViaRelay(toPeerID strin
 		return fmt.Errorf("relay dependencies not set")
 	}
 
-	msg := CreateInvoiceNotify(invoiceID, status, message)
-	msgBytes, err := msg.Marshal()
-	if err != nil {
-		return fmt.Errorf("failed to marshal invoice notification: %v", err)
+	var msgBytes []byte
+	var messageType string
+
+	// Try to encrypt if crypto is available
+	if imh.invoiceCrypto != nil && imh.knownPeers != nil {
+		recipientPubKey, err := imh.getRecipientPublicKey(toPeerID)
+		if err == nil {
+			// Serialize and encrypt
+			notifyData := &InvoiceNotifyData{
+				InvoiceID: invoiceID,
+				Status:    status,
+				Message:   message,
+			}
+			plaintext, err := json.Marshal(notifyData)
+			if err != nil {
+				return fmt.Errorf("failed to marshal invoice notification: %v", err)
+			}
+
+			ciphertext, nonce, ephemeralPubKey, signature, err := imh.invoiceCrypto.EncryptInvoice(plaintext, recipientPubKey)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt invoice notification: %v", err)
+			}
+
+			encryptedData := &EncryptedInvoiceNotifyData{
+				SenderPeerID:     imh.ourPeerID,
+				EphemeralPubKey:  ephemeralPubKey[:],
+				EncryptedPayload: ciphertext,
+				Nonce:            nonce[:],
+				Signature:        signature,
+				Timestamp:        time.Now().Unix(),
+			}
+
+			msg := CreateEncryptedInvoiceNotify(encryptedData)
+			msgBytes, err = msg.Marshal()
+			if err != nil {
+				return fmt.Errorf("failed to marshal encrypted invoice notification: %v", err)
+			}
+			messageType = "encrypted_invoice_notify"
+		} else {
+			imh.logger.Debug(fmt.Sprintf("Could not get public key for peer %s, sending unencrypted via relay: %v", toPeerID[:8], err), "invoice_message_handler")
+		}
 	}
 
-	return imh.sendMessageViaRelay(toPeerID, msgBytes, "invoice_notify")
+	// Fall back to unencrypted if encryption failed or not available
+	if msgBytes == nil {
+		msg := CreateInvoiceNotify(invoiceID, status, message)
+		var err error
+		msgBytes, err = msg.Marshal()
+		if err != nil {
+			return fmt.Errorf("failed to marshal invoice notification: %v", err)
+		}
+		messageType = "invoice_notify"
+	}
+
+	return imh.sendMessageViaRelay(toPeerID, msgBytes, messageType)
 }
 
 // sendMessageViaRelay sends a one-way message via relay (no response expected)

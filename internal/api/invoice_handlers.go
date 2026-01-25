@@ -198,6 +198,11 @@ func (s *APIServer) handleAcceptInvoice(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Emit local WebSocket event to update UI immediately
+	if s.eventEmitter != nil {
+		s.eventEmitter.BroadcastInvoiceUpdate(invoiceID, "accepted")
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
@@ -236,6 +241,11 @@ func (s *APIServer) handleRejectInvoice(w http.ResponseWriter, r *http.Request) 
 			"message": fmt.Sprintf("%v", err),
 		})
 		return
+	}
+
+	// Emit local WebSocket event to update UI immediately
+	if s.eventEmitter != nil {
+		s.eventEmitter.BroadcastInvoiceUpdate(invoiceID, "rejected")
 	}
 
 	w.Header().Set("Content-Type", "application/json")

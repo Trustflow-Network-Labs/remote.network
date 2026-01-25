@@ -408,52 +408,66 @@
       </Dialog>
 
       <!-- Invoice Details Dialog -->
-      <Dialog v-model:visible="showDetailsDialog" header="Invoice Details" :style="{width: '500px'}" modal>
+      <Dialog v-model:visible="showDetailsDialog" header="Invoice Details" :style="{width: '550px'}" modal>
         <div class="invoice-details-full" v-if="selectedInvoice">
-          <div class="detail-row">
-            <strong>Invoice ID:</strong>
-            <span>{{ selectedInvoice.invoice_id }}</span>
-          </div>
-          <div class="detail-row">
-            <strong>From:</strong>
-            <span>{{ selectedInvoice.from_peer_id }}</span>
-          </div>
-          <div class="detail-row">
-            <strong>To:</strong>
-            <span>{{ selectedInvoice.to_peer_id }}</span>
-          </div>
-          <div class="detail-row">
-            <strong>Amount:</strong>
-            <span>{{ selectedInvoice.amount }} {{ selectedInvoice.currency }}</span>
-          </div>
-          <div class="detail-row">
-            <strong>Network:</strong>
-            <span>{{ selectedInvoice.network }}</span>
-          </div>
-          <div class="detail-row">
-            <strong>Status:</strong>
-            <Tag :value="selectedInvoice.status.toUpperCase()" :severity="getStatusSeverity(selectedInvoice.status)" />
-          </div>
-          <div class="detail-row">
-            <strong>Description:</strong>
-            <span>{{ selectedInvoice.description || 'N/A' }}</span>
-          </div>
-          <div class="detail-row">
-            <strong>Created:</strong>
-            <span>{{ formatDateFull(selectedInvoice.created_at) }}</span>
-          </div>
-          <div class="detail-row" v-if="selectedInvoice.expires_at">
-            <strong>Expires:</strong>
-            <span>{{ formatDateFull(selectedInvoice.expires_at) }}</span>
-          </div>
-          <div class="detail-row" v-if="selectedInvoice.accepted_at">
-            <strong>Accepted:</strong>
-            <span>{{ formatDateFull(selectedInvoice.accepted_at) }}</span>
-          </div>
-          <div class="detail-row" v-if="selectedInvoice.settled_at">
-            <strong>Settled:</strong>
-            <span>{{ formatDateFull(selectedInvoice.settled_at) }}</span>
-          </div>
+          <table class="details-table">
+            <tbody>
+              <tr>
+                <td class="label-cell">Invoice ID</td>
+                <td class="value-cell monospace">{{ selectedInvoice.invoice_id }}</td>
+              </tr>
+              <tr>
+                <td class="label-cell">From</td>
+                <td class="value-cell monospace">{{ selectedInvoice.from_peer_id }}</td>
+              </tr>
+              <tr>
+                <td class="label-cell">To</td>
+                <td class="value-cell monospace">{{ selectedInvoice.to_peer_id }}</td>
+              </tr>
+              <tr>
+                <td class="label-cell">Amount</td>
+                <td class="value-cell"><strong>{{ formatAmount(selectedInvoice.amount) }}</strong> {{ selectedInvoice.currency }}</td>
+              </tr>
+              <tr>
+                <td class="label-cell">Network</td>
+                <td class="value-cell">{{ getNetworkDisplay(selectedInvoice.network) }}</td>
+              </tr>
+              <tr>
+                <td class="label-cell">Status</td>
+                <td class="value-cell">
+                  <Tag :value="selectedInvoice.status.toUpperCase()" :severity="getStatusSeverity(selectedInvoice.status)" />
+                </td>
+              </tr>
+              <tr>
+                <td class="label-cell">Description</td>
+                <td class="value-cell">{{ selectedInvoice.description || 'N/A' }}</td>
+              </tr>
+              <tr v-if="getInvoiceRejectionReason(selectedInvoice)">
+                <td class="label-cell">Rejection Reason</td>
+                <td class="value-cell text-danger">{{ getInvoiceRejectionReason(selectedInvoice) }}</td>
+              </tr>
+              <tr v-if="getInvoiceFailureReason(selectedInvoice)">
+                <td class="label-cell">Failure Reason</td>
+                <td class="value-cell text-danger">{{ getInvoiceFailureReason(selectedInvoice) }}</td>
+              </tr>
+              <tr>
+                <td class="label-cell">Created</td>
+                <td class="value-cell">{{ formatDateFull(selectedInvoice.created_at) }}</td>
+              </tr>
+              <tr v-if="selectedInvoice.expires_at">
+                <td class="label-cell">Expires</td>
+                <td class="value-cell">{{ formatDateFull(selectedInvoice.expires_at) }}</td>
+              </tr>
+              <tr v-if="selectedInvoice.accepted_at">
+                <td class="label-cell">Accepted</td>
+                <td class="value-cell">{{ formatDateFull(selectedInvoice.accepted_at) }}</td>
+              </tr>
+              <tr v-if="selectedInvoice.settled_at">
+                <td class="label-cell">Settled</td>
+                <td class="value-cell">{{ formatDateFull(selectedInvoice.settled_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <template #footer>
           <Button label="Close" icon="pi pi-times" @click="showDetailsDialog = false" />
@@ -790,6 +804,16 @@ const formatAmount = (amount: any) => {
   return isNaN(num) ? '0.000000' : num.toFixed(6)
 }
 
+const getInvoiceRejectionReason = (invoice: any) => {
+  if (!invoice.metadata) return null
+  return invoice.metadata.rejection_reason || null
+}
+
+const getInvoiceFailureReason = (invoice: any) => {
+  if (!invoice.metadata) return null
+  return invoice.metadata.failure_reason || null
+}
+
 // Lifecycle
 onMounted(async () => {
   await Promise.all([
@@ -974,24 +998,44 @@ onUnmounted(() => {
   }
 
   .invoice-details-full {
-    .detail-row {
-      display: flex;
-      justify-content: space-between;
-      padding: 0.75rem;
-      border-bottom: 1px solid #e9ecef;
+    .details-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
 
-      &:last-child {
-        border-bottom: none;
+      tr {
+        border-bottom: 1px solid #e9ecef;
+
+        &:last-child {
+          border-bottom: none;
+        }
       }
 
-      strong {
+      td {
+        padding: 0.75rem 0.5rem;
+        vertical-align: top;
+      }
+
+      .label-cell {
         color: #6c757d;
-        min-width: 120px;
+        font-weight: 600;
+        white-space: nowrap;
+        width: 130px;
+        padding-right: 1rem;
       }
 
-      span {
-        text-align: right;
+      .value-cell {
         word-break: break-all;
+        color: var(--p-text-color);
+
+        &.monospace {
+          font-family: monospace;
+          font-size: 0.85rem;
+        }
+
+        &.text-danger {
+          color: #dc3545;
+        }
       }
     }
   }

@@ -79,6 +79,11 @@ const (
 	MessageTypeInvoiceResponse MessageType = "invoice_response"
 	MessageTypeInvoiceNotify   MessageType = "invoice_notify"
 
+	// P2P Encrypted Invoice payments (E2E encrypted)
+	MessageTypeEncryptedInvoiceRequest  MessageType = "encrypted_invoice_request"
+	MessageTypeEncryptedInvoiceResponse MessageType = "encrypted_invoice_response"
+	MessageTypeEncryptedInvoiceNotify   MessageType = "encrypted_invoice_notify"
+
 	// P2P Encrypted Chat
 	MessageTypeChatKeyExchange            MessageType = "chat_key_exchange"
 	MessageTypeChatKeyExchangeAck         MessageType = "chat_key_exchange_ack"
@@ -951,6 +956,58 @@ func CreateInvoiceNotify(invoiceID, status, message string) *QUICMessage {
 		Status:    status,
 		Message:   message,
 	})
+}
+
+// ============================================================================
+// Encrypted Invoice Messages (E2E encrypted using one-shot ECDH)
+// ============================================================================
+
+// EncryptedInvoiceRequestData represents an E2E encrypted invoice request
+// The EncryptedPayload contains a serialized InvoiceRequestData
+type EncryptedInvoiceRequestData struct {
+	SenderPeerID     string `json:"sender_peer_id"`     // Sender's peer ID for key lookup
+	EphemeralPubKey  []byte `json:"ephemeral_pub_key"`  // 32 bytes X25519 ephemeral public key
+	EncryptedPayload []byte `json:"encrypted_payload"`  // NaCl secretbox encrypted InvoiceRequestData JSON
+	Nonce            []byte `json:"nonce"`              // 24 bytes random nonce
+	Signature        []byte `json:"signature"`          // Ed25519 signature over (ephemeral_pub_key || encrypted_payload || nonce)
+	Timestamp        int64  `json:"timestamp"`          // Unix timestamp for replay protection
+}
+
+// EncryptedInvoiceResponseData represents an E2E encrypted invoice response
+// The EncryptedPayload contains a serialized InvoiceResponseData
+type EncryptedInvoiceResponseData struct {
+	SenderPeerID     string `json:"sender_peer_id"`     // Sender's peer ID for key lookup
+	EphemeralPubKey  []byte `json:"ephemeral_pub_key"`  // 32 bytes X25519 ephemeral public key
+	EncryptedPayload []byte `json:"encrypted_payload"`  // NaCl secretbox encrypted InvoiceResponseData JSON
+	Nonce            []byte `json:"nonce"`              // 24 bytes random nonce
+	Signature        []byte `json:"signature"`          // Ed25519 signature
+	Timestamp        int64  `json:"timestamp"`          // Unix timestamp for replay protection
+}
+
+// EncryptedInvoiceNotifyData represents an E2E encrypted invoice notification
+// The EncryptedPayload contains a serialized InvoiceNotifyData
+type EncryptedInvoiceNotifyData struct {
+	SenderPeerID     string `json:"sender_peer_id"`     // Sender's peer ID for key lookup
+	EphemeralPubKey  []byte `json:"ephemeral_pub_key"`  // 32 bytes X25519 ephemeral public key
+	EncryptedPayload []byte `json:"encrypted_payload"`  // NaCl secretbox encrypted InvoiceNotifyData JSON
+	Nonce            []byte `json:"nonce"`              // 24 bytes random nonce
+	Signature        []byte `json:"signature"`          // Ed25519 signature
+	Timestamp        int64  `json:"timestamp"`          // Unix timestamp for replay protection
+}
+
+// CreateEncryptedInvoiceRequest creates an encrypted invoice request message
+func CreateEncryptedInvoiceRequest(data *EncryptedInvoiceRequestData) *QUICMessage {
+	return NewQUICMessage(MessageTypeEncryptedInvoiceRequest, data)
+}
+
+// CreateEncryptedInvoiceResponse creates an encrypted invoice response message
+func CreateEncryptedInvoiceResponse(data *EncryptedInvoiceResponseData) *QUICMessage {
+	return NewQUICMessage(MessageTypeEncryptedInvoiceResponse, data)
+}
+
+// CreateEncryptedInvoiceNotify creates an encrypted invoice notification message
+func CreateEncryptedInvoiceNotify(data *EncryptedInvoiceNotifyData) *QUICMessage {
+	return NewQUICMessage(MessageTypeEncryptedInvoiceNotify, data)
 }
 
 // ChatKeyExchangeData represents a Double Ratchet key exchange message

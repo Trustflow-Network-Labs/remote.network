@@ -1,10 +1,12 @@
 package p2p
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/utils"
 )
@@ -15,6 +17,14 @@ type InvoiceHandler struct {
 	logger       *utils.LogsManager
 	peerID       string
 	eventEmitter EventEmitter // For WebSocket notifications
+
+	// E2E encryption support
+	invoiceCrypto     *crypto.InvoiceCryptoManager
+	knownPeers        *KnownPeersManager
+	requireEncryption bool // If true, refuse to accept unencrypted invoices
+
+	// Timestamp tolerance for replay protection (default: 5 minutes)
+	timestampTolerance time.Duration
 }
 
 // EventEmitter interface for WebSocket notifications
@@ -33,11 +43,27 @@ func NewInvoiceHandler(
 	eventEmitter EventEmitter,
 ) *InvoiceHandler {
 	return &InvoiceHandler{
-		db:           db,
-		logger:       logger,
-		peerID:       peerID,
-		eventEmitter: eventEmitter,
+		db:                 db,
+		logger:             logger,
+		peerID:             peerID,
+		eventEmitter:       eventEmitter,
+		timestampTolerance: 5 * time.Minute, // Default: 5 minutes for replay protection
 	}
+}
+
+// SetInvoiceCrypto sets the invoice crypto manager for E2E decryption
+func (ih *InvoiceHandler) SetInvoiceCrypto(invoiceCrypto *crypto.InvoiceCryptoManager) {
+	ih.invoiceCrypto = invoiceCrypto
+}
+
+// SetKnownPeersManager sets the known peers manager for public key lookups
+func (ih *InvoiceHandler) SetKnownPeersManager(knownPeers *KnownPeersManager) {
+	ih.knownPeers = knownPeers
+}
+
+// SetRequireEncryption sets whether to require encryption for invoices
+func (ih *InvoiceHandler) SetRequireEncryption(require bool) {
+	ih.requireEncryption = require
 }
 
 // HandleInvoiceRequest processes an incoming invoice request from a peer
@@ -156,8 +182,8 @@ func (ih *InvoiceHandler) HandleInvoiceResponse(msg *QUICMessage, remoteAddr str
 			ih.eventEmitter.EmitInvoiceAccepted(responseData.InvoiceID)
 		}
 	} else {
-		// Update invoice status to rejected
-		if err := ih.db.UpdatePaymentInvoiceStatus(responseData.InvoiceID, "rejected"); err != nil {
+		// Update invoice status to rejected and store rejection reason
+		if err := ih.db.UpdatePaymentInvoiceStatusWithReason(responseData.InvoiceID, "rejected", responseData.Message); err != nil {
 			ih.logger.Warn(fmt.Sprintf("Failed to update invoice status: %v", err), "invoice_handler")
 		}
 		ih.logger.Info(fmt.Sprintf("Invoice %s rejected by %s: %s",
@@ -234,4 +260,309 @@ func (ih *InvoiceHandler) HandleRelayedInvoiceResponse(msg *QUICMessage, remoteP
 // HandleRelayedInvoiceNotify processes a relayed invoice notification
 func (ih *InvoiceHandler) HandleRelayedInvoiceNotify(msg *QUICMessage, remotePeerID string) {
 	ih.HandleInvoiceNotify(msg, "relay", remotePeerID)
+}
+
+// ============================================================================
+// Encrypted Invoice Handlers
+// ============================================================================
+
+// HandleEncryptedInvoiceRequest processes an E2E encrypted invoice request
+func (ih *InvoiceHandler) HandleEncryptedInvoiceRequest(msg *QUICMessage, remoteAddr string, remotePeerID string) *QUICMessage {
+	ih.logger.Debug(fmt.Sprintf("Handling encrypted invoice request from %s (%s)", remotePeerID[:8], remoteAddr), "invoice_handler")
+
+	// Check if crypto is available
+	if ih.invoiceCrypto == nil {
+		ih.logger.Warn("Received encrypted invoice but crypto manager not initialized", "invoice_handler")
+		return CreateInvoiceResponse("", false, "Encryption not supported")
+	}
+
+	// Parse encrypted data
+	dataBytes, err := json.Marshal(msg.Data)
+	if err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to marshal encrypted invoice data: %v", err), "invoice_handler")
+		return CreateInvoiceResponse("", false, "Invalid encrypted data")
+	}
+
+	var encryptedData EncryptedInvoiceRequestData
+	if err := json.Unmarshal(dataBytes, &encryptedData); err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to parse encrypted invoice request: %v", err), "invoice_handler")
+		return CreateInvoiceResponse("", false, "Invalid encrypted data")
+	}
+
+	// Validate timestamp for replay protection
+	timestamp := time.Unix(encryptedData.Timestamp, 0)
+	if time.Since(timestamp) > ih.timestampTolerance {
+		ih.logger.Warn(fmt.Sprintf("Encrypted invoice timestamp too old: %v", timestamp), "invoice_handler")
+		return CreateInvoiceResponse("", false, "Message timestamp expired")
+	}
+
+	// Get sender's public key for signature verification
+	senderPubKey, err := ih.getSenderPublicKey(encryptedData.SenderPeerID)
+	if err != nil {
+		ih.logger.Warn(fmt.Sprintf("Could not get public key for sender %s: %v", encryptedData.SenderPeerID[:8], err), "invoice_handler")
+		return CreateInvoiceResponse("", false, "Unknown sender")
+	}
+
+	// Validate sender matches the remote peer
+	if encryptedData.SenderPeerID != remotePeerID {
+		ih.logger.Warn(fmt.Sprintf("Sender mismatch: claimed %s, actual %s", encryptedData.SenderPeerID[:8], remotePeerID[:8]), "invoice_handler")
+		return CreateInvoiceResponse("", false, "Sender mismatch")
+	}
+
+	// Convert ephemeral public key to array
+	var ephemeralPubKey [32]byte
+	if len(encryptedData.EphemeralPubKey) != 32 {
+		ih.logger.Warn("Invalid ephemeral public key size", "invoice_handler")
+		return CreateInvoiceResponse("", false, "Invalid encryption parameters")
+	}
+	copy(ephemeralPubKey[:], encryptedData.EphemeralPubKey)
+
+	// Convert nonce to array
+	var nonce [24]byte
+	if len(encryptedData.Nonce) != 24 {
+		ih.logger.Warn("Invalid nonce size", "invoice_handler")
+		return CreateInvoiceResponse("", false, "Invalid encryption parameters")
+	}
+	copy(nonce[:], encryptedData.Nonce)
+
+	// Decrypt the invoice data
+	plaintext, err := ih.invoiceCrypto.DecryptInvoice(
+		encryptedData.EncryptedPayload,
+		nonce,
+		ephemeralPubKey,
+		encryptedData.Signature,
+		senderPubKey,
+	)
+	if err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to decrypt invoice request: %v", err), "invoice_handler")
+		return CreateInvoiceResponse("", false, "Decryption failed")
+	}
+
+	// Parse the decrypted invoice data
+	var invoiceData InvoiceRequestData
+	if err := json.Unmarshal(plaintext, &invoiceData); err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to parse decrypted invoice data: %v", err), "invoice_handler")
+		return CreateInvoiceResponse("", false, "Invalid invoice data")
+	}
+
+	// Create a synthetic QUICMessage with the decrypted data
+	decryptedMsg := &QUICMessage{
+		Type:      MessageTypeInvoiceRequest,
+		Version:   msg.Version,
+		Timestamp: msg.Timestamp,
+		RequestID: msg.RequestID,
+		Data:      invoiceData,
+	}
+
+	ih.logger.Info(fmt.Sprintf("Successfully decrypted invoice request %s from %s", invoiceData.InvoiceID, remotePeerID[:8]), "invoice_handler")
+
+	// Process with the standard handler
+	return ih.HandleInvoiceRequest(decryptedMsg, remoteAddr, remotePeerID)
+}
+
+// HandleEncryptedInvoiceResponse processes an E2E encrypted invoice response
+func (ih *InvoiceHandler) HandleEncryptedInvoiceResponse(msg *QUICMessage, remoteAddr string, remotePeerID string) {
+	ih.logger.Debug(fmt.Sprintf("Handling encrypted invoice response from %s (%s)", remotePeerID[:8], remoteAddr), "invoice_handler")
+
+	// Check if crypto is available
+	if ih.invoiceCrypto == nil {
+		ih.logger.Warn("Received encrypted invoice response but crypto manager not initialized", "invoice_handler")
+		return
+	}
+
+	// Parse encrypted data
+	dataBytes, err := json.Marshal(msg.Data)
+	if err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to marshal encrypted invoice response: %v", err), "invoice_handler")
+		return
+	}
+
+	var encryptedData EncryptedInvoiceResponseData
+	if err := json.Unmarshal(dataBytes, &encryptedData); err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to parse encrypted invoice response: %v", err), "invoice_handler")
+		return
+	}
+
+	// Validate timestamp for replay protection
+	timestamp := time.Unix(encryptedData.Timestamp, 0)
+	if time.Since(timestamp) > ih.timestampTolerance {
+		ih.logger.Warn(fmt.Sprintf("Encrypted invoice response timestamp too old: %v", timestamp), "invoice_handler")
+		return
+	}
+
+	// Get sender's public key for signature verification
+	senderPubKey, err := ih.getSenderPublicKey(encryptedData.SenderPeerID)
+	if err != nil {
+		ih.logger.Warn(fmt.Sprintf("Could not get public key for sender %s: %v", encryptedData.SenderPeerID[:8], err), "invoice_handler")
+		return
+	}
+
+	// Validate sender matches the remote peer
+	if encryptedData.SenderPeerID != remotePeerID {
+		ih.logger.Warn(fmt.Sprintf("Sender mismatch: claimed %s, actual %s", encryptedData.SenderPeerID[:8], remotePeerID[:8]), "invoice_handler")
+		return
+	}
+
+	// Convert ephemeral public key and nonce to arrays
+	var ephemeralPubKey [32]byte
+	var nonce [24]byte
+	if len(encryptedData.EphemeralPubKey) != 32 || len(encryptedData.Nonce) != 24 {
+		ih.logger.Warn("Invalid encryption parameters", "invoice_handler")
+		return
+	}
+	copy(ephemeralPubKey[:], encryptedData.EphemeralPubKey)
+	copy(nonce[:], encryptedData.Nonce)
+
+	// Decrypt the response data
+	plaintext, err := ih.invoiceCrypto.DecryptInvoice(
+		encryptedData.EncryptedPayload,
+		nonce,
+		ephemeralPubKey,
+		encryptedData.Signature,
+		senderPubKey,
+	)
+	if err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to decrypt invoice response: %v", err), "invoice_handler")
+		return
+	}
+
+	// Parse the decrypted response data
+	var responseData InvoiceResponseData
+	if err := json.Unmarshal(plaintext, &responseData); err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to parse decrypted invoice response: %v", err), "invoice_handler")
+		return
+	}
+
+	// Create a synthetic QUICMessage with the decrypted data
+	decryptedMsg := &QUICMessage{
+		Type:      MessageTypeInvoiceResponse,
+		Version:   msg.Version,
+		Timestamp: msg.Timestamp,
+		RequestID: msg.RequestID,
+		Data:      responseData,
+	}
+
+	ih.logger.Info(fmt.Sprintf("Successfully decrypted invoice response for %s from %s", responseData.InvoiceID, remotePeerID[:8]), "invoice_handler")
+
+	// Process with the standard handler
+	ih.HandleInvoiceResponse(decryptedMsg, remoteAddr, remotePeerID)
+}
+
+// HandleEncryptedInvoiceNotify processes an E2E encrypted invoice notification
+func (ih *InvoiceHandler) HandleEncryptedInvoiceNotify(msg *QUICMessage, remoteAddr string, remotePeerID string) {
+	ih.logger.Debug(fmt.Sprintf("Handling encrypted invoice notification from %s (%s)", remotePeerID[:8], remoteAddr), "invoice_handler")
+
+	// Check if crypto is available
+	if ih.invoiceCrypto == nil {
+		ih.logger.Warn("Received encrypted invoice notification but crypto manager not initialized", "invoice_handler")
+		return
+	}
+
+	// Parse encrypted data
+	dataBytes, err := json.Marshal(msg.Data)
+	if err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to marshal encrypted invoice notification: %v", err), "invoice_handler")
+		return
+	}
+
+	var encryptedData EncryptedInvoiceNotifyData
+	if err := json.Unmarshal(dataBytes, &encryptedData); err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to parse encrypted invoice notification: %v", err), "invoice_handler")
+		return
+	}
+
+	// Validate timestamp for replay protection
+	timestamp := time.Unix(encryptedData.Timestamp, 0)
+	if time.Since(timestamp) > ih.timestampTolerance {
+		ih.logger.Warn(fmt.Sprintf("Encrypted invoice notification timestamp too old: %v", timestamp), "invoice_handler")
+		return
+	}
+
+	// Get sender's public key for signature verification
+	senderPubKey, err := ih.getSenderPublicKey(encryptedData.SenderPeerID)
+	if err != nil {
+		ih.logger.Warn(fmt.Sprintf("Could not get public key for sender %s: %v", encryptedData.SenderPeerID[:8], err), "invoice_handler")
+		return
+	}
+
+	// Validate sender matches the remote peer
+	if encryptedData.SenderPeerID != remotePeerID {
+		ih.logger.Warn(fmt.Sprintf("Sender mismatch: claimed %s, actual %s", encryptedData.SenderPeerID[:8], remotePeerID[:8]), "invoice_handler")
+		return
+	}
+
+	// Convert ephemeral public key and nonce to arrays
+	var ephemeralPubKey [32]byte
+	var nonce [24]byte
+	if len(encryptedData.EphemeralPubKey) != 32 || len(encryptedData.Nonce) != 24 {
+		ih.logger.Warn("Invalid encryption parameters", "invoice_handler")
+		return
+	}
+	copy(ephemeralPubKey[:], encryptedData.EphemeralPubKey)
+	copy(nonce[:], encryptedData.Nonce)
+
+	// Decrypt the notification data
+	plaintext, err := ih.invoiceCrypto.DecryptInvoice(
+		encryptedData.EncryptedPayload,
+		nonce,
+		ephemeralPubKey,
+		encryptedData.Signature,
+		senderPubKey,
+	)
+	if err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to decrypt invoice notification: %v", err), "invoice_handler")
+		return
+	}
+
+	// Parse the decrypted notification data
+	var notifyData InvoiceNotifyData
+	if err := json.Unmarshal(plaintext, &notifyData); err != nil {
+		ih.logger.Warn(fmt.Sprintf("Failed to parse decrypted invoice notification: %v", err), "invoice_handler")
+		return
+	}
+
+	// Create a synthetic QUICMessage with the decrypted data
+	decryptedMsg := &QUICMessage{
+		Type:      MessageTypeInvoiceNotify,
+		Version:   msg.Version,
+		Timestamp: msg.Timestamp,
+		RequestID: msg.RequestID,
+		Data:      notifyData,
+	}
+
+	ih.logger.Info(fmt.Sprintf("Successfully decrypted invoice notification for %s from %s", notifyData.InvoiceID, remotePeerID[:8]), "invoice_handler")
+
+	// Process with the standard handler
+	ih.HandleInvoiceNotify(decryptedMsg, remoteAddr, remotePeerID)
+}
+
+// getSenderPublicKey retrieves the Ed25519 public key for a peer from known peers
+func (ih *InvoiceHandler) getSenderPublicKey(peerID string) (ed25519.PublicKey, error) {
+	if ih.knownPeers == nil {
+		return nil, fmt.Errorf("known peers manager not initialized")
+	}
+
+	peer, err := ih.knownPeers.GetKnownPeer(peerID, "remote-network-mesh")
+	if err != nil {
+		return nil, fmt.Errorf("peer not found: %v", err)
+	}
+	if peer == nil || len(peer.PublicKey) == 0 {
+		return nil, fmt.Errorf("peer %s has no public key", peerID[:8])
+	}
+	return peer.PublicKey, nil
+}
+
+// HandleRelayedEncryptedInvoiceRequest processes an encrypted invoice request via relay
+func (ih *InvoiceHandler) HandleRelayedEncryptedInvoiceRequest(msg *QUICMessage, remotePeerID string) *QUICMessage {
+	return ih.HandleEncryptedInvoiceRequest(msg, "relay", remotePeerID)
+}
+
+// HandleRelayedEncryptedInvoiceResponse processes an encrypted invoice response via relay
+func (ih *InvoiceHandler) HandleRelayedEncryptedInvoiceResponse(msg *QUICMessage, remotePeerID string) {
+	ih.HandleEncryptedInvoiceResponse(msg, "relay", remotePeerID)
+}
+
+// HandleRelayedEncryptedInvoiceNotify processes an encrypted invoice notification via relay
+func (ih *InvoiceHandler) HandleRelayedEncryptedInvoiceNotify(msg *QUICMessage, remotePeerID string) {
+	ih.HandleEncryptedInvoiceNotify(msg, "relay", remotePeerID)
 }

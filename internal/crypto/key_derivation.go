@@ -19,6 +19,7 @@ const (
 	InfoMessageKey   = "RemoteNetworkChatMessageKey"
 	InfoMasterKey    = "RemoteNetworkChatMasterKey"
 	InfoSenderKey    = "RemoteNetworkChatSenderKey"
+	InfoInvoiceKey   = "RemoteNetworkInvoiceKey"
 )
 
 // DeriveRootKey derives a new root key and chain key from the current root key and DH output

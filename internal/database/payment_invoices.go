@@ -358,6 +358,36 @@ func (sm *SQLiteManager) UpdatePaymentInvoiceStatus(invoiceID string, status str
 	return err
 }
 
+// UpdatePaymentInvoiceStatusWithReason updates invoice status and stores a reason in metadata
+// Used for rejections where we want to store the rejection reason
+func (sm *SQLiteManager) UpdatePaymentInvoiceStatusWithReason(invoiceID string, status string, reason string) error {
+	var timestampField string
+	switch status {
+	case "rejected":
+		timestampField = "rejected_at"
+	default:
+		// For other statuses, delegate to regular update
+		return sm.UpdatePaymentInvoiceStatus(invoiceID, status)
+	}
+
+	// If no reason provided, use regular update
+	if reason == "" {
+		return sm.UpdatePaymentInvoiceStatus(invoiceID, status)
+	}
+
+	// Update status, timestamp, and store reason in metadata
+	query := fmt.Sprintf(`
+	UPDATE payment_invoices
+	SET status = ?,
+		%s = strftime('%%s', 'now'),
+		metadata = json_set(COALESCE(metadata, '{}'), '$.rejection_reason', ?)
+	WHERE invoice_id = ?
+	`, timestampField)
+
+	_, err := sm.db.Exec(query, status, reason, invoiceID)
+	return err
+}
+
 // UpdatePaymentInvoiceAccepted updates invoice with payment details
 func (sm *SQLiteManager) UpdatePaymentInvoiceAccepted(
 	invoiceID string,

@@ -787,6 +787,40 @@ func (q *QUICPeer) handleStream(stream *quic.Stream, remoteAddr string) {
 		} else {
 			q.logger.Warn("Received invoice_notify but invoice handler is not initialized", "quic")
 		}
+	case MessageTypeEncryptedInvoiceRequest:
+		// E2E encrypted invoice request
+		if q.invoiceHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			response = q.invoiceHandler.HandleEncryptedInvoiceRequest(msg, remoteAddr, peerID)
+		} else {
+			q.logger.Warn("Received encrypted_invoice_request but invoice handler is not initialized", "quic")
+			response = CreateInvoiceResponse("", false, "invoice system not available")
+		}
+	case MessageTypeEncryptedInvoiceResponse:
+		// E2E encrypted invoice response
+		if q.invoiceHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.invoiceHandler.HandleEncryptedInvoiceResponse(msg, remoteAddr, peerID)
+		} else {
+			q.logger.Warn("Received encrypted_invoice_response but invoice handler is not initialized", "quic")
+		}
+	case MessageTypeEncryptedInvoiceNotify:
+		// E2E encrypted invoice notification
+		if q.invoiceHandler != nil {
+			peerID := remoteAddr
+			if connInfo := q.GetConnectionInfo(remoteAddr); connInfo != nil && connInfo.PeerID != "" {
+				peerID = connInfo.PeerID
+			}
+			q.invoiceHandler.HandleEncryptedInvoiceNotify(msg, remoteAddr, peerID)
+		} else {
+			q.logger.Warn("Received encrypted_invoice_notify but invoice handler is not initialized", "quic")
+		}
 	case MessageTypeChatKeyExchange:
 		// Chat key exchange (Double Ratchet initialization)
 		if q.chatHandler != nil {
@@ -1680,6 +1714,32 @@ func (q *QUICPeer) HandleRelayedMessage(msg *QUICMessage, sourcePeerID string) *
 			q.invoiceHandler.HandleInvoiceNotify(msg, sourcePeerID, sourcePeerID)
 		} else {
 			q.logger.Warn("Received invoice_notify via relay but invoice handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeEncryptedInvoiceRequest:
+		// Encrypted invoice request forwarded via relay
+		if q.invoiceHandler != nil {
+			return q.invoiceHandler.HandleRelayedEncryptedInvoiceRequest(msg, sourcePeerID)
+		}
+		q.logger.Warn("Received encrypted_invoice_request via relay but invoice handler not initialized", "quic")
+		return CreateInvoiceResponse("", false, "invoice system not available")
+
+	case MessageTypeEncryptedInvoiceResponse:
+		// Encrypted invoice response forwarded via relay
+		if q.invoiceHandler != nil {
+			q.invoiceHandler.HandleRelayedEncryptedInvoiceResponse(msg, sourcePeerID)
+		} else {
+			q.logger.Warn("Received encrypted_invoice_response via relay but invoice handler not initialized", "quic")
+		}
+		return nil
+
+	case MessageTypeEncryptedInvoiceNotify:
+		// Encrypted invoice notification forwarded via relay
+		if q.invoiceHandler != nil {
+			q.invoiceHandler.HandleRelayedEncryptedInvoiceNotify(msg, sourcePeerID)
+		} else {
+			q.logger.Warn("Received encrypted_invoice_notify via relay but invoice handler not initialized", "quic")
 		}
 		return nil
 
