@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/p2p"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/types"
@@ -30,6 +33,11 @@ func formatPeerID(peerID string) string {
 	return peerID
 }
 
+// PeerPublicKeyProvider provides access to peer public keys
+type PeerPublicKeyProvider interface {
+	GetPeerPublicKey(peerID string) (ed25519.PublicKey, error)
+}
+
 // IncomingTransfer tracks an active incoming file transfer
 type IncomingTransfer struct {
 	TransferID          string
@@ -42,10 +50,16 @@ type IncomingTransfer struct {
 	ReceivedChunks      map[int]bool
 	File                *os.File
 	BytesReceived       int64
-	Passphrase          string // For encrypted transfers (memory-only, cleared after use)
-	Encrypted           bool   // Whether this transfer is encrypted
-	InterfaceType       string // Interface type (STDOUT, MOUNT, PACKAGE, etc.)
-	DestinationFileName string // Optional: rename file/folder at destination
+
+	// ECDH encryption fields (replaces Passphrase)
+	Encrypted            bool      // Whether this transfer is encrypted
+	EphemeralPubKey      []byte    // 32 bytes X25519 ephemeral public key from sender
+	KeyExchangeSignature []byte    // Ed25519 signature for authentication
+	KeyExchangeTimestamp int64     // Unix timestamp for replay protection
+	DerivedKey           *[32]byte // Computed decryption key, cleared after use
+
+	InterfaceType       string    // Interface type (STDOUT, MOUNT, PACKAGE, etc.)
+	DestinationFileName string    // Optional: rename file/folder at destination
 	StartedAt           time.Time
 	LastChunkAt         time.Time
 	mu                  sync.Mutex
@@ -57,14 +71,17 @@ type DataServiceWorker struct {
 	cm                *utils.ConfigManager
 	logger            *utils.LogsManager
 	jobHandler        *p2p.JobMessageHandler
-	peerID            string // Local peer ID
-	chunkSize         int    // Size of data chunks for streaming
+	peerID            string    // Local peer ID
+	chunkSize         int       // Size of data chunks for streaming
 	incomingTransfers map[string]*IncomingTransfer // transferID -> transfer state
 	transfersMu       sync.RWMutex
 	ctx               context.Context
 	cancel            context.CancelFunc
 	monitoringStarted bool
 	monitoringMu      sync.Mutex
+	keyPair           *crypto.KeyPair                      // Node's Ed25519 identity keys
+	dataCrypto        *crypto.DataTransferCryptoManager    // ECDH key exchange for data transfers
+	peerManager       PeerPublicKeyProvider                 // Interface to get peer public keys
 }
 
 // NewDataServiceWorker creates a new DATA service worker
@@ -92,6 +109,14 @@ func (dsw *DataServiceWorker) SetJobHandler(jobHandler *p2p.JobMessageHandler) {
 func (dsw *DataServiceWorker) SetPeerID(peerID string) {
 	dsw.peerID = peerID
 	dsw.logger.Info(fmt.Sprintf("Peer ID set for data service worker: %s", peerID[:8]), "data_worker")
+}
+
+// SetCryptoComponents sets the crypto components for ECDH encryption
+func (dsw *DataServiceWorker) SetCryptoComponents(keyPair *crypto.KeyPair, peerManager PeerPublicKeyProvider) {
+	dsw.keyPair = keyPair
+	dsw.dataCrypto = crypto.NewDataTransferCryptoManager(keyPair)
+	dsw.peerManager = peerManager
+	dsw.logger.Info("Crypto components set for data service worker", "data_worker")
 }
 
 // Start starts background monitoring for the data service worker
@@ -406,18 +431,74 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 	// Generate transfer ID
 	transferID := dsw.GenerateTransferID(job.ID, peer.PeerID)
 
-	// Get encryption key if data is encrypted
-	var keyData string
+	// Try to get recipient's public key for ECDH encryption
+	// Note: Peer should be in known_peers from job orchestration phase
+	recipientPubKey, err := dsw.peerManager.GetPeerPublicKey(peer.PeerID)
+
+	// Variables for transfer - will be set based on whether we can encrypt
+	var encryptedHash string
+	var encryptedSize int64
+	var ephemeralPubKey [32]byte
+	var signature []byte
+	var timestamp int64
 	var encrypted bool
-	if dataDetails.EncryptionKeyID != nil {
-		encryptionKey, err := dsw.db.GetEncryptionKey(dataDetails.ServiceID)
+	var tempDir string
+
+	if err != nil {
+		// Peer not in known_peers - log warning and fall back to unencrypted transfer
+		// This can happen if the orchestrator/peer hasn't been properly discovered yet
+		dsw.logger.Warn(fmt.Sprintf("Cannot encrypt data for peer %s: %v. Sending unencrypted (compressed only). This may indicate the peer needs to be discovered first.", formatPeerID(peer.PeerID), err), "data_worker")
+
+		// Use original file (compressed but not encrypted)
+		encryptedHash = dataDetails.Hash
+		encryptedSize = fileSize
+		encrypted = false
+	} else {
+		// Successfully got public key - proceed with ECDH encryption
+		var encryptionKey [32]byte
+		ephemeralPubKey, signature, timestamp, encryptionKey, err = dsw.dataCrypto.GenerateKeyExchange(recipientPubKey)
 		if err != nil {
-			dsw.logger.Warn(fmt.Sprintf("Failed to get encryption key for service %d: %v - proceeding without encryption", dataDetails.ServiceID, err), "data_worker")
-		} else if encryptionKey != nil {
-			keyData = encryptionKey.KeyData
-			encrypted = true
-			dsw.logger.Info(fmt.Sprintf("Including encryption key for transfer %s", transferID), "data_worker")
+			return fmt.Errorf("failed to generate ECDH key exchange: %w", err)
 		}
+		dsw.logger.Info(fmt.Sprintf("Generated ECDH key exchange for transfer to peer %s", formatPeerID(peer.PeerID)), "data_worker")
+
+		// Create temp directory for encrypted file
+		tempDir = filepath.Join(os.TempDir(), fmt.Sprintf("data-transfer-%d-%d", job.ID, time.Now().Unix()))
+		if err := os.MkdirAll(tempDir, 0755); err != nil {
+			return fmt.Errorf("failed to create temp directory: %w", err)
+		}
+		defer os.RemoveAll(tempDir)
+
+		// Encrypt the file using ECDH-derived key
+		encryptedPath := filepath.Join(tempDir, "data.encrypted")
+		if err := dsw.encryptFileStreaming(filePath, encryptedPath, encryptionKey); err != nil {
+			return fmt.Errorf("failed to encrypt file: %w", err)
+		}
+
+		// Get encrypted file info
+		encryptedFileInfo, err := os.Stat(encryptedPath)
+		if err != nil {
+			return fmt.Errorf("failed to get encrypted file info: %w", err)
+		}
+		encryptedSize = encryptedFileInfo.Size()
+
+		// Calculate hash of encrypted file
+		encryptedHash, err = utils.HashFileToCID(encryptedPath)
+		if err != nil {
+			return fmt.Errorf("failed to calculate encrypted file hash: %w", err)
+		}
+
+		// Close original file and open encrypted file for transfer
+		file.Close()
+		file, err = os.Open(encryptedPath)
+		if err != nil {
+			return fmt.Errorf("failed to open encrypted file: %w", err)
+		}
+
+		// Update size and chunk count for encrypted file
+		fileSize = encryptedSize
+		totalChunks = int((fileSize + int64(dsw.chunkSize) - 1) / int64(dsw.chunkSize))
+		encrypted = true
 	}
 
 	// Check if job handler is available for actual transfer
@@ -480,10 +561,12 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 			SourcePath:                filePath,
 			DestinationPath:           peer.PeerPath,
 			DestinationFileName:       destFileName,      // Optional: rename file/folder at destination
-			DataHash:                  dataDetails.Hash,
-			SizeBytes:                 fileSize,
-			Passphrase:                keyData,
+			DataHash:                  encryptedHash,     // File hash (encrypted if ECDH available, otherwise compressed)
+			SizeBytes:                 encryptedSize,     // File size (encrypted if ECDH available, otherwise compressed)
 			Encrypted:                 encrypted,
+			EphemeralPubKey:           ephemeralPubKey[:],
+			KeyExchangeSignature:      signature,
+			KeyExchangeTimestamp:      timestamp,
 		}
 
 		dsw.logger.Info(fmt.Sprintf("Sending transfer request for transfer ID %s to peer %s (encrypted: %v)", transferID, formatPeerID(peer.PeerID), encrypted), "data_worker")
@@ -507,11 +590,11 @@ func (dsw *DataServiceWorker) transferDataToPeer(job *database.JobExecution, fil
 		JobExecutionID:    job.ID,
 		SourcePeerID:      dsw.peerID,
 		DestinationPeerID: peer.PeerID,
-		FilePath:          filePath,
+		FilePath:          filePath, // Original file path (may be encrypted temp file or original compressed file)
 		TotalChunks:       totalChunks,
 		ChunkSize:         dsw.chunkSize,
 		TotalBytes:        fileSize,
-		FileHash:          dataDetails.Hash,
+		FileHash:          encryptedHash,
 		Encrypted:         encrypted,
 		ChunksSent:        make([]int, 0),
 		ChunksReceived:    make([]int, 0),
@@ -833,12 +916,13 @@ func (dsw *DataServiceWorker) InitializeIncomingTransfer(transferID string, jobE
 }
 
 // InitializeIncomingTransferWithPassphrase creates a new incoming transfer state with optional encryption
+// Deprecated: Use InitializeIncomingTransferFull with ECDH parameters instead
 func (dsw *DataServiceWorker) InitializeIncomingTransferWithPassphrase(transferID string, jobExecutionID int64, sourcePeerID string, targetPath string, expectedHash string, expectedSize int64, totalChunks int, passphrase string, encrypted bool) error {
-	return dsw.InitializeIncomingTransferFull(transferID, jobExecutionID, sourcePeerID, targetPath, expectedHash, expectedSize, totalChunks, passphrase, encrypted, "", "")
+	return dsw.InitializeIncomingTransferFull(transferID, jobExecutionID, sourcePeerID, targetPath, expectedHash, expectedSize, totalChunks, encrypted, nil, nil, 0, "", "")
 }
 
-// InitializeIncomingTransferFull creates a new incoming transfer state with all options
-func (dsw *DataServiceWorker) InitializeIncomingTransferFull(transferID string, jobExecutionID int64, sourcePeerID string, targetPath string, expectedHash string, expectedSize int64, totalChunks int, passphrase string, encrypted bool, interfaceType string, destinationFileName string) error {
+// InitializeIncomingTransferFull creates a new incoming transfer state with all options including ECDH encryption
+func (dsw *DataServiceWorker) InitializeIncomingTransferFull(transferID string, jobExecutionID int64, sourcePeerID string, targetPath string, expectedHash string, expectedSize int64, totalChunks int, encrypted bool, ephemeralPubKey []byte, keyExchangeSignature []byte, keyExchangeTimestamp int64, interfaceType string, destinationFileName string) error {
 	dsw.transfersMu.Lock()
 	defer dsw.transfersMu.Unlock()
 
@@ -882,26 +966,58 @@ func (dsw *DataServiceWorker) InitializeIncomingTransferFull(transferID string, 
 
 	// Create transfer state
 	transfer := &IncomingTransfer{
-		TransferID:          transferID,
-		JobExecutionID:      jobExecutionID,
-		SourcePeerID:        sourcePeerID,
-		TargetPath:          actualFilePath, // Use actual file path, not directory path
-		ExpectedHash:        expectedHash,
-		ExpectedSize:        expectedSize,
-		TotalChunks:         totalChunks,
-		ReceivedChunks:      make(map[int]bool),
-		File:                file,
-		BytesReceived:       0,
-		Passphrase:          passphrase, // Store passphrase temporarily in memory
-		Encrypted:           encrypted,
-		InterfaceType:       interfaceType,
-		DestinationFileName: destinationFileName, // Optional: rename file/folder at destination
-		StartedAt:           time.Now(),
-		LastChunkAt:         time.Now(),
+		TransferID:           transferID,
+		JobExecutionID:       jobExecutionID,
+		SourcePeerID:         sourcePeerID,
+		TargetPath:           actualFilePath, // Use actual file path, not directory path
+		ExpectedHash:         expectedHash,
+		ExpectedSize:         expectedSize,
+		TotalChunks:          totalChunks,
+		ReceivedChunks:       make(map[int]bool),
+		File:                 file,
+		BytesReceived:        0,
+		Encrypted:            encrypted,
+		EphemeralPubKey:      ephemeralPubKey,
+		KeyExchangeSignature: keyExchangeSignature,
+		KeyExchangeTimestamp: keyExchangeTimestamp,
+		InterfaceType:        interfaceType,
+		DestinationFileName:  destinationFileName, // Optional: rename file/folder at destination
+		StartedAt:            time.Now(),
+		LastChunkAt:          time.Now(),
+	}
+
+	// If encrypted, derive the decryption key from ECDH parameters
+	if encrypted && len(ephemeralPubKey) == 32 && dsw.dataCrypto != nil && dsw.peerManager != nil {
+		// Get sender's public key
+		senderPubKey, err := dsw.peerManager.GetPeerPublicKey(sourcePeerID)
+		if err != nil {
+			file.Close()
+			return fmt.Errorf("failed to get sender public key: %w", err)
+		}
+
+		// Convert ephemeral public key to [32]byte
+		var ephKey [32]byte
+		copy(ephKey[:], ephemeralPubKey)
+
+		// Derive decryption key using ECDH
+		derivedKey, err := dsw.dataCrypto.DeriveDecryptionKey(
+			ephKey,
+			keyExchangeSignature,
+			keyExchangeTimestamp,
+			senderPubKey,
+		)
+		if err != nil {
+			file.Close()
+			return fmt.Errorf("ECDH key derivation failed: %w", err)
+		}
+
+		// Store derived key (will be cleared after decryption)
+		transfer.DerivedKey = &derivedKey
+		dsw.logger.Info(fmt.Sprintf("Derived decryption key for transfer %s", transferID), "data_worker")
 	}
 
 	dsw.incomingTransfers[transferID] = transfer
-	dsw.logger.Info(fmt.Sprintf("Incoming transfer %s initialized", transferID), "data_worker")
+	dsw.logger.Info(fmt.Sprintf("Incoming transfer %s initialized (encrypted: %v)", transferID, encrypted), "data_worker")
 
 	return nil
 }
@@ -1107,9 +1223,10 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 			// Delete corrupted file
 			os.Remove(transfer.TargetPath)
 			delete(dsw.incomingTransfers, transferID)
-			// Clear passphrase from memory
-			if transfer.Passphrase != "" {
-				transfer.Passphrase = ""
+			// Clear derived key from memory
+			if transfer.DerivedKey != nil {
+				crypto.ZeroKey(transfer.DerivedKey)
+				transfer.DerivedKey = nil
 			}
 			return fmt.Errorf("hash validation failed: %v", err)
 		}
@@ -1118,22 +1235,23 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 
 	// Decrypt file if encrypted (AFTER hash validation)
 	if transfer.Encrypted {
-		if transfer.Passphrase == "" {
-			dsw.logger.Error(fmt.Sprintf("Transfer %s marked as encrypted but passphrase is EMPTY!", transferID), "data_worker")
+		if transfer.DerivedKey == nil {
+			dsw.logger.Error(fmt.Sprintf("Transfer %s marked as encrypted but decryption key is missing!", transferID), "data_worker")
 			os.Remove(transfer.TargetPath)
 			delete(dsw.incomingTransfers, transferID)
-			return fmt.Errorf("encrypted transfer missing passphrase")
+			return fmt.Errorf("encrypted transfer missing decryption key")
 		}
 
 		dsw.logger.Info(fmt.Sprintf("Decrypting transfer %s", transferID), "data_worker")
 
-		err := dsw.decryptFile(transfer.TargetPath, transfer.Passphrase)
+		err := dsw.decryptFile(transfer.TargetPath, transfer)
 		if err != nil {
 			dsw.logger.Error(fmt.Sprintf("Decryption failed for transfer %s: %v", transferID, err), "data_worker")
 			os.Remove(transfer.TargetPath)
 			delete(dsw.incomingTransfers, transferID)
-			// Clear passphrase from memory
-			transfer.Passphrase = ""
+			// Clear derived key from memory
+			crypto.ZeroKey(transfer.DerivedKey)
+			transfer.DerivedKey = nil
 			return fmt.Errorf("decryption failed: %v", err)
 		}
 
@@ -1154,9 +1272,10 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 		dsw.logger.Error(fmt.Sprintf("Failed to create extraction directory for transfer %s: %v", transferID, err), "data_worker")
 		os.Remove(transfer.TargetPath)
 		delete(dsw.incomingTransfers, transferID)
-		// Clear passphrase from memory
-		if transfer.Passphrase != "" {
-			transfer.Passphrase = ""
+		// Clear derived key from memory
+		if transfer.DerivedKey != nil {
+			crypto.ZeroKey(transfer.DerivedKey)
+			transfer.DerivedKey = nil
 		}
 		return fmt.Errorf("failed to create extraction directory: %v", err)
 	}
@@ -1209,8 +1328,9 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 			dsw.logger.Error(fmt.Sprintf("Transfer package extraction failed for %s: %v", transferID, err), "data_worker")
 			os.Remove(transfer.TargetPath)
 			delete(dsw.incomingTransfers, transferID)
-			if transfer.Passphrase != "" {
-				transfer.Passphrase = ""
+			if transfer.DerivedKey != nil {
+				crypto.ZeroKey(transfer.DerivedKey)
+				transfer.DerivedKey = nil
 			}
 			return fmt.Errorf("transfer package extraction failed: %v", err)
 		}
@@ -1229,9 +1349,10 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 			os.Remove(transfer.TargetPath)
 			os.RemoveAll(extractDir)
 			delete(dsw.incomingTransfers, transferID)
-			// Clear passphrase from memory
-			if transfer.Passphrase != "" {
-				transfer.Passphrase = ""
+			// Clear derived key from memory
+			if transfer.DerivedKey != nil {
+				crypto.ZeroKey(transfer.DerivedKey)
+				transfer.DerivedKey = nil
 			}
 			return fmt.Errorf("decompression failed: %v", err)
 		}
@@ -1279,10 +1400,11 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 		dsw.logger.Info(fmt.Sprintf("Transfer %s decompressed successfully to %s", transferID, extractDir), "data_worker")
 	}
 
-	// Clear passphrase from memory immediately after use
-	if transfer.Passphrase != "" {
-		transfer.Passphrase = ""
-		dsw.logger.Debug(fmt.Sprintf("Passphrase cleared from memory for transfer %s", transferID), "data_worker")
+	// Clear derived key from memory immediately after use
+	if transfer.DerivedKey != nil {
+		crypto.ZeroKey(transfer.DerivedKey)
+		transfer.DerivedKey = nil
+		dsw.logger.Debug(fmt.Sprintf("Decryption key cleared from memory for transfer %s", transferID), "data_worker")
 	}
 
 	// Update job status to COMPLETED
@@ -1318,7 +1440,45 @@ func (dsw *DataServiceWorker) finalizeTransfer(transferID string) error {
 // decryptFile decrypts a file using AES-256-GCM
 // The keyData parameter should be in format "passphrase|hexkeydata" where hexkeydata is [16 bytes salt][32 bytes derived key]
 // This matches the format used by file_processor and stored in the encryption_keys table
-func (dsw *DataServiceWorker) decryptFile(filePath string, keyData string) error {
+// decryptFile decrypts a file using ECDH-derived key from transfer
+func (dsw *DataServiceWorker) decryptFile(filePath string, transfer *IncomingTransfer) error {
+	// Verify derived key is available
+	if transfer.DerivedKey == nil {
+		return fmt.Errorf("no decryption key available")
+	}
+
+	// Use streaming decryption with ECDH-derived key
+	tempOutputPath := filePath + ".decrypted"
+	err := dsw.decryptFileStreaming(filePath, tempOutputPath, transfer.DerivedKey[:])
+	if err != nil {
+		return fmt.Errorf("streaming decryption failed: %v", err)
+	}
+
+	// Replace encrypted file with decrypted file
+	if err := os.Remove(filePath); err != nil {
+		os.Remove(tempOutputPath)
+		return fmt.Errorf("failed to remove encrypted file: %v", err)
+	}
+	if err := os.Rename(tempOutputPath, filePath); err != nil {
+		return fmt.Errorf("failed to rename decrypted file: %v", err)
+	}
+
+	// Get final file size for logging
+	fileInfo, _ := os.Stat(filePath)
+	decryptedSize := int64(0)
+	if fileInfo != nil {
+		decryptedSize = fileInfo.Size()
+	}
+
+	dsw.logger.Info(fmt.Sprintf("Successfully decrypted file: %s (%d bytes decrypted)",
+		filePath, decryptedSize), "data_worker")
+
+	return nil
+}
+
+// decryptFileWithPassphrase decrypts a file using legacy passphrase-based encryption
+// Deprecated: Used for backward compatibility with local transfers
+func (dsw *DataServiceWorker) decryptFileWithPassphrase(filePath string, keyData string) error {
 	// Parse keyData format: "passphrase|hexkeydata"
 	parts := dsw.splitKeyData(keyData)
 	if len(parts) != 2 {
@@ -1338,13 +1498,7 @@ func (dsw *DataServiceWorker) decryptFile(filePath string, keyData string) error
 	}
 	key := decodedKeyData[16:48] // Extract 32-byte AES-256 key
 
-	// Read encrypted file
-	ciphertext, err := os.ReadFile(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to read encrypted file: %v", err)
-	}
-
-	// Use streaming decryption to match file_processor's streaming encryption
+	// Use streaming decryption
 	tempOutputPath := filePath + ".decrypted"
 	err = dsw.decryptFileStreaming(filePath, tempOutputPath, key)
 	if err != nil {
@@ -1367,8 +1521,8 @@ func (dsw *DataServiceWorker) decryptFile(filePath string, keyData string) error
 		decryptedSize = fileInfo.Size()
 	}
 
-	dsw.logger.Info(fmt.Sprintf("Successfully decrypted file: %s (%d bytes encrypted -> %d bytes decrypted)",
-		filePath, len(ciphertext), decryptedSize), "data_worker")
+	dsw.logger.Info(fmt.Sprintf("Successfully decrypted file: %s (%d bytes decrypted)",
+		filePath, decryptedSize), "data_worker")
 
 	return nil
 }
@@ -1447,6 +1601,69 @@ func (dsw *DataServiceWorker) decryptFileStreaming(inputPath, outputPath string,
 		}
 
 		totalDecrypted += int64(len(plainChunk))
+		counter++
+	}
+
+	return nil
+}
+
+// encryptFileStreaming encrypts a file using AES-256-GCM in chunks
+func (dsw *DataServiceWorker) encryptFileStreaming(inputPath, outputPath string, key [32]byte) error {
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		return fmt.Errorf("failed to open input file: %w", err)
+	}
+	defer inputFile.Close()
+
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	if _, err := outputFile.Write(nonce); err != nil {
+		return fmt.Errorf("failed to write nonce: %w", err)
+	}
+
+	const chunkSize = 64 * 1024
+	buffer := make([]byte, chunkSize)
+	counter := uint64(0)
+
+	for {
+		n, err := inputFile.Read(buffer)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read chunk: %w", err)
+		}
+		if n == 0 {
+			break
+		}
+
+		chunkNonce := make([]byte, len(nonce))
+		copy(chunkNonce, nonce)
+		for i := 0; i < 8 && i < len(chunkNonce); i++ {
+			chunkNonce[i] ^= byte(counter >> (i * 8))
+		}
+
+		cipherChunk := gcm.Seal(nil, chunkNonce, buffer[:n], nil)
+		if _, err := outputFile.Write(cipherChunk); err != nil {
+			return fmt.Errorf("failed to write encrypted chunk: %w", err)
+		}
+
 		counter++
 	}
 
@@ -1633,9 +1850,11 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 		dsw.logger.Info("Hash validation successful", "data_worker")
 	}
 
-	// Decrypt file if encrypted
+	// Decrypt file if encrypted at rest (legacy DATA services only)
+	// New DATA services are not encrypted at rest, only compressed
 	var decryptedFile string
 	if dataDetails.EncryptionKeyID != nil {
+		// Legacy: decrypt using database-stored key (files created before ECDH-only implementation)
 		encryptionKey, err := dsw.db.GetEncryptionKey(dataDetails.ServiceID)
 		if err != nil {
 			return fmt.Errorf("failed to get encryption key: %v", err)
@@ -1644,8 +1863,8 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 			return fmt.Errorf("encryption key not found for service %d", dataDetails.ServiceID)
 		}
 
-		dsw.logger.Info("Decrypting file", "data_worker")
-		if err := dsw.decryptFile(tempFile, encryptionKey.KeyData); err != nil {
+		dsw.logger.Info("Decrypting legacy encrypted-at-rest file", "data_worker")
+		if err := dsw.decryptFileWithPassphrase(tempFile, encryptionKey.KeyData); err != nil {
 			return fmt.Errorf("decryption failed: %v", err)
 		}
 
@@ -1653,8 +1872,10 @@ func (dsw *DataServiceWorker) handleLocalDataTransfer(jobExecutionID int64, file
 		decryptedFile = tempFile
 		dsw.logger.Info(fmt.Sprintf("File decrypted in place at %s", decryptedFile), "data_worker")
 	} else {
-		// No encryption
+		// New: file is not encrypted at rest (only compressed)
+		// Encryption only happens during transfer via ECDH
 		decryptedFile = tempFile
+		dsw.logger.Info("File is not encrypted at rest (compressed only)", "data_worker")
 	}
 	defer os.Remove(decryptedFile) // Clean up decrypted temp file
 

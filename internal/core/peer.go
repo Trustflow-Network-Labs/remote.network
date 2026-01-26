@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"io"
 	"net"
@@ -898,7 +899,8 @@ func (pm *PeerManager) InitializeJobSystem() error {
 	if pm.jobManager.dataWorker != nil {
 		pm.jobManager.dataWorker.SetJobHandler(jobHandler)
 		pm.jobManager.dataWorker.SetPeerID(pm.GetPeerID())
-		pm.logger.Info("JobHandler and PeerID set on DataServiceWorker", "core")
+		pm.jobManager.dataWorker.SetCryptoComponents(pm.keyPair, pm)
+		pm.logger.Info("JobHandler, PeerID, and crypto components set on DataServiceWorker", "core")
 	}
 
 	// Set up relay reconnection callback for transfer resumption
@@ -1875,6 +1877,44 @@ func (pm *PeerManager) GetMetadataQuery() *p2p.MetadataQueryService {
 // GetPeerID returns the persistent Ed25519-based peer ID
 func (pm *PeerManager) GetPeerID() string {
 	return pm.keyPair.PeerID()
+}
+
+// GetKeyPair returns the keypair for this peer
+func (pm *PeerManager) GetKeyPair() *crypto.KeyPair {
+	return pm.keyPair
+}
+
+// GetPeerPublicKey returns the Ed25519 public key for a given peer ID
+// Returns error if peer is not found in the known peers list
+func (pm *PeerManager) GetPeerPublicKey(peerID string) (ed25519.PublicKey, error) {
+	// Get configured topics
+	topics := pm.config.GetTopics("subscribe_topics", []string{"remote-network-mesh"})
+
+	var peer *p2p.KnownPeer
+	var err error
+
+	// Try each configured topic
+	for _, topic := range topics {
+		peer, err = pm.knownPeers.GetKnownPeer(peerID, topic)
+		if err == nil && peer != nil {
+			break
+		}
+	}
+
+	// If not found in any configured topic, try empty topic as fallback
+	if peer == nil {
+		peer, err = pm.knownPeers.GetKnownPeer(peerID, "")
+	}
+
+	if err != nil || peer == nil {
+		return nil, fmt.Errorf("peer %s not found in known peers", peerID[:min(8, len(peerID))])
+	}
+
+	if len(peer.PublicKey) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid public key size for peer %s", peerID[:min(8, len(peerID))])
+	}
+
+	return ed25519.PublicKey(peer.PublicKey), nil
 }
 
 // FetchPeerCapabilities fetches full system capabilities from a peer via QUIC.

@@ -126,7 +126,6 @@ func (fp *FileProcessor) ProcessUploadedFile(uploadGroupID string, serviceID int
 		fp.logger.Error(fmt.Sprintf("Failed to compress files: %v", err), "file_processor")
 		return fmt.Errorf("failed to compress files: %w", err)
 	}
-	defer os.Remove(compressedPath) // Clean up after encryption
 
 	// Get compressed file size
 	compressedInfo, err := os.Stat(compressedPath)
@@ -138,48 +137,17 @@ func (fp *FileProcessor) ProcessUploadedFile(uploadGroupID string, serviceID int
 	compressionRatio := float64(compressedSize) / float64(originalSize) * 100.0
 	fp.logger.Info(fmt.Sprintf("Compression complete: %d bytes -> %d bytes (%.1f%% of original)", originalSize, compressedSize, compressionRatio), "file_processor")
 
-	// Step 2: Generate encryption key and passphrase
-	fp.logger.Info("Generating encryption key...", "file_processor")
-	passphrase, keyData, err := fp.generateEncryptionKey()
-	if err != nil {
-		fp.logger.Error(fmt.Sprintf("Failed to generate encryption key: %v", err), "file_processor")
-		return fmt.Errorf("failed to generate encryption key: %w", err)
+	// Step 2: Move compressed file to final location
+	finalPath := filepath.Join(fp.storageDir, fmt.Sprintf("service_%d.tar.gz", serviceID))
+	if err := os.Rename(compressedPath, finalPath); err != nil {
+		fp.logger.Error(fmt.Sprintf("Failed to move compressed file: %v", err), "file_processor")
+		return fmt.Errorf("failed to move compressed file: %w", err)
 	}
-	fp.logger.Info("Encryption key generated successfully", "file_processor")
+	fp.logger.Info(fmt.Sprintf("Compressed file moved to final location: %s", finalPath), "file_processor")
 
-	// Store encryption key in database
-	// Format: passphrase|keydata (separated by |)
-	encryptionKey := &database.EncryptionKey{
-		ServiceID:      serviceID,
-		PassphraseHash: utils.HashPassphrase(passphrase),
-		KeyData:        passphrase + "|" + hex.EncodeToString(keyData), // Store both passphrase and key data
-	}
-	if err := fp.dbManager.AddEncryptionKey(encryptionKey); err != nil {
-		fp.logger.Error(fmt.Sprintf("Failed to store encryption key: %v", err), "file_processor")
-		return fmt.Errorf("failed to store encryption key: %w", err)
-	}
-	fp.logger.Info("Encryption key stored in database", "file_processor")
-
-	// Step 3: Encrypt the compressed file
-	fp.logger.Info(fmt.Sprintf("Encrypting compressed file: %s -> %s", compressedPath, fmt.Sprintf("service_%d_encrypted.dat", serviceID)), "file_processor")
-	encryptedPath := filepath.Join(fp.storageDir, fmt.Sprintf("service_%d_encrypted.dat", serviceID))
-	if err := fp.encryptFile(compressedPath, encryptedPath, keyData); err != nil {
-		fp.logger.Error(fmt.Sprintf("Failed to encrypt file: %v", err), "file_processor")
-		return fmt.Errorf("failed to encrypt file: %w", err)
-	}
-
-	// Get encrypted file size
-	encryptedInfo, err := os.Stat(encryptedPath)
-	if err != nil {
-		fp.logger.Error(fmt.Sprintf("Failed to get encrypted file info: %v", err), "file_processor")
-		return fmt.Errorf("failed to get encrypted file info: %w", err)
-	}
-	encryptedSize := encryptedInfo.Size()
-	fp.logger.Info(fmt.Sprintf("Encryption complete: %d bytes (compressed) -> %d bytes (encrypted)", compressedSize, encryptedSize), "file_processor")
-
-	// Step 4: Calculate BLAKE3 hash of encrypted file
-	fp.logger.Info("Calculating BLAKE3 hash of encrypted file...", "file_processor")
-	fileHash, err := utils.HashFileToCID(encryptedPath)
+	// Step 3: Calculate BLAKE3 hash of compressed file
+	fp.logger.Info("Calculating BLAKE3 hash of compressed file...", "file_processor")
+	fileHash, err := utils.HashFileToCID(finalPath)
 	if err != nil {
 		fp.logger.Error(fmt.Sprintf("Failed to calculate file hash: %v", err), "file_processor")
 		return fmt.Errorf("failed to calculate file hash: %w", err)
@@ -198,11 +166,11 @@ func (fp *FileProcessor) ProcessUploadedFile(uploadGroupID string, serviceID int
 	dataDetails := &database.DataServiceDetails{
 		ServiceID:         serviceID,
 		FilePath:          serviceName,
-		EncryptedPath:     encryptedPath,
+		EncryptedPath:     finalPath,
 		Hash:              fileHash,
 		CompressionType:   "tar.gz",
-		EncryptionKeyID:   &encryptionKey.ID,
-		SizeBytes:         encryptedSize,
+		EncryptionKeyID:   nil, // No at-rest encryption
+		SizeBytes:         compressedSize,
 		OriginalSizeBytes: originalSize,
 		UploadCompleted:   true,
 	}
@@ -235,9 +203,8 @@ func (fp *FileProcessor) ProcessUploadedFile(uploadGroupID string, serviceID int
 		"  Files: %d\n"+
 		"  Original size: %d bytes\n"+
 		"  Compressed: %d bytes (%.1f%%)\n"+
-		"  Encrypted: %d bytes\n"+
 		"  Hash: %s",
-		fileCount, originalSize, compressedSize, compressionRatio, encryptedSize, fileHash), "file_processor")
+		fileCount, originalSize, compressedSize, compressionRatio, fileHash), "file_processor")
 
 	return nil
 }

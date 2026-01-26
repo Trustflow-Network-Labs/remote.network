@@ -14,12 +14,13 @@ const (
 	NonceSize        = 24 // NaCl secretbox nonce size
 
 	// HKDF info strings (domain separation)
-	InfoRootKey      = "RemoteNetworkChatRootKey"
-	InfoChainKey     = "RemoteNetworkChatChainKey"
-	InfoMessageKey   = "RemoteNetworkChatMessageKey"
-	InfoMasterKey    = "RemoteNetworkChatMasterKey"
-	InfoSenderKey    = "RemoteNetworkChatSenderKey"
-	InfoInvoiceKey   = "RemoteNetworkInvoiceKey"
+	InfoRootKey         = "RemoteNetworkChatRootKey"
+	InfoChainKey        = "RemoteNetworkChatChainKey"
+	InfoMessageKey      = "RemoteNetworkChatMessageKey"
+	InfoMasterKey       = "RemoteNetworkChatMasterKey"
+	InfoSenderKey       = "RemoteNetworkChatSenderKey"
+	InfoInvoiceKey      = "RemoteNetworkInvoiceKey"
+	InfoDataTransferKey = "RemoteNetworkDataTransferKey"
 )
 
 // DeriveRootKey derives a new root key and chain key from the current root key and DH output

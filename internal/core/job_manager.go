@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/crypto/pbkdf2"
 
+	"github.com/Trustflow-Network-Labs/remote-network-node/internal/crypto"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/database"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/dependencies"
 	"github.com/Trustflow-Network-Labs/remote-network-node/internal/payment"
@@ -45,8 +46,9 @@ type JobManager struct {
 	tickerStopChan     chan bool
 	wg                 sync.WaitGroup
 	mu                 sync.RWMutex
-	runningJobs        map[int64]bool // Track running job IDs
-	escrowManager      *payment.EscrowManager // x402 payment escrow manager
+	runningJobs        map[int64]bool                     // Track running job IDs
+	escrowManager      *payment.EscrowManager             // x402 payment escrow manager
+	dataCrypto         *crypto.DataTransferCryptoManager  // ECDH key exchange for data transfers
 }
 
 // EventEmitter interface for broadcasting events (avoids circular dependency)
@@ -97,6 +99,9 @@ func NewJobManager(ctx context.Context, db *database.SQLiteManager, cm *utils.Co
 	x402Client := payment.NewX402Client(cm, logger)
 	escrowManager := payment.NewEscrowManager(db, x402Client, cm, logger)
 
+	// Initialize data transfer crypto manager
+	dataCrypto := crypto.NewDataTransferCryptoManager(peerManager.GetKeyPair())
+
 	jm := &JobManager{
 		ctx:               jobCtx,
 		cancel:            cancel,
@@ -113,6 +118,7 @@ func NewJobManager(ctx context.Context, db *database.SQLiteManager, cm *utils.Co
 		tickerStopChan:   make(chan bool),
 		runningJobs:      make(map[int64]bool),
 		escrowManager:    escrowManager,
+		dataCrypto:       dataCrypto,
 	}
 
 	return jm
@@ -1348,13 +1354,7 @@ func (jm *JobManager) generateTransferPassphrase() (passphrase string, keyData [
 }
 
 // encryptFileStreaming encrypts a file using AES-256-GCM in chunks (memory-efficient)
-func (jm *JobManager) encryptFileStreaming(inputPath, outputPath string, keyData []byte) error {
-	// Extract key from keyData (skip first 16 bytes which is salt)
-	if len(keyData) < 48 {
-		return fmt.Errorf("invalid key data length")
-	}
-	key := keyData[16:48]
-
+func (jm *JobManager) encryptFileStreaming(inputPath, outputPath string, key [32]byte) error {
 	// Open input file
 	inputFile, err := os.Open(inputPath)
 	if err != nil {
@@ -1370,7 +1370,7 @@ func (jm *JobManager) encryptFileStreaming(inputPath, outputPath string, keyData
 	defer outputFile.Close()
 
 	// Create AES cipher
-	block, err := aes.NewCipher(key)
+	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return fmt.Errorf("failed to create cipher: %w", err)
 	}
@@ -1439,18 +1439,24 @@ func (jm *JobManager) transferPackageRemotely(job *database.JobExecution, peer *
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Generate one-time passphrase for encryption
-	passphrase, keyData, err := jm.generateTransferPassphrase()
+	// Get recipient's Ed25519 public key for ECDH
+	recipientPubKey, err := jm.peerManager.GetPeerPublicKey(peer.PeerID)
 	if err != nil {
-		return fmt.Errorf("failed to generate passphrase: %w", err)
+		return fmt.Errorf("failed to get recipient public key: %w", err)
 	}
-	jm.logger.Info("Generated one-time encryption passphrase for package transfer", "job_manager")
 
-	// Encrypt the package (already compressed)
+	// Generate ECDH key exchange parameters
+	ephemeralPubKey, signature, timestamp, encryptionKey, err := jm.dataCrypto.GenerateKeyExchange(recipientPubKey)
+	if err != nil {
+		return fmt.Errorf("failed to generate ECDH key exchange: %w", err)
+	}
+	jm.logger.Info("Generated ECDH key exchange for package transfer", "job_manager")
+
+	// Encrypt the package (already compressed) using derived key
 	encryptedPath := filepath.Join(tempDir, "package.tar.gz.encrypted")
-	jm.logger.Info("Encrypting transfer package", "job_manager")
+	jm.logger.Info("Encrypting transfer package with ECDH-derived key", "job_manager")
 
-	if err := jm.encryptFileStreaming(packagePath, encryptedPath, keyData); err != nil {
+	if err := jm.encryptFileStreaming(packagePath, encryptedPath, encryptionKey); err != nil {
 		return fmt.Errorf("failed to encrypt package: %w", err)
 	}
 
@@ -1487,9 +1493,6 @@ func (jm *JobManager) transferPackageRemotely(job *database.JobExecution, peer *
 	if jobHandler == nil {
 		return fmt.Errorf("job handler not available")
 	}
-
-	// Format passphrase as expected: "passphrase|hexkeydata"
-	keyDataFormatted := fmt.Sprintf("%s|%s", passphrase, hex.EncodeToString(keyData))
 
 	// Determine destination path - use "input/" for transfer packages
 	destPath := peer.PeerPath
@@ -1539,8 +1542,10 @@ func (jm *JobManager) transferPackageRemotely(job *database.JobExecution, peer *
 		DestinationPath:           destPath,
 		DataHash:                  hash,
 		SizeBytes:                 encryptedSize,
-		Passphrase:                keyDataFormatted,
 		Encrypted:                 true,
+		EphemeralPubKey:           ephemeralPubKey[:],
+		KeyExchangeSignature:      signature,
+		KeyExchangeTimestamp:      timestamp,
 	}
 
 	jm.logger.Info(fmt.Sprintf("Sending transfer package request for transfer ID %s to peer %s",
@@ -2923,7 +2928,7 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 		// Use transfer ID from request (sender generates it)
 		transferID := request.TransferID
 
-		// Initialize incoming transfer with hierarchical path and interface type
+		// Initialize incoming transfer with hierarchical path and ECDH encryption
 		err := jm.dataWorker.InitializeIncomingTransferFull(
 			transferID,
 			transferJobID, // Job ID to associate with this transfer
@@ -2932,8 +2937,10 @@ func (jm *JobManager) HandleJobDataTransferRequest(request *types.JobDataTransfe
 			request.DataHash,
 			request.SizeBytes,
 			totalChunks,
-			request.Passphrase,
 			request.Encrypted,
+			request.EphemeralPubKey,
+			request.KeyExchangeSignature,
+			request.KeyExchangeTimestamp,
 			request.InterfaceType,       // Pass interface type for package detection
 			request.DestinationFileName, // Optional: rename file/folder at destination
 		)

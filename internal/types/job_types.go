@@ -165,8 +165,12 @@ type JobDataTransferRequest struct {
 	DestinationFileName       string `json:"destination_file_name,omitempty"`        // Optional: rename file/folder at destination
 	DataHash                  string `json:"data_hash,omitempty"`
 	SizeBytes                 int64  `json:"size_bytes,omitempty"`
-	Passphrase                string `json:"passphrase,omitempty"`                   // For encrypted data (not stored, memory-only)
+
+	// ECDH encryption fields (replaces passphrase)
 	Encrypted                 bool   `json:"encrypted,omitempty"`                    // Whether data is encrypted
+	EphemeralPubKey           []byte `json:"ephemeral_pub_key,omitempty"`            // 32 bytes X25519 public key
+	KeyExchangeSignature      []byte `json:"key_exchange_signature,omitempty"`       // Ed25519 signature
+	KeyExchangeTimestamp      int64  `json:"key_exchange_timestamp,omitempty"`       // Unix timestamp for replay protection
 }
 
 // JobDataTransferResponse represents a response to a data transfer request
