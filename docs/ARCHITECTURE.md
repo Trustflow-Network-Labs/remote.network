@@ -914,15 +914,21 @@ After QUIC connection established:
 
 ## References
 
+### External Standards
 - [BEP_5: DHT Protocol](http://www.bittorrent.org/beps/bep_0005.html)
 - [BEP_42: DHT Security Extension](http://www.bittorrent.org/beps/bep_0042.html)
 - [BEP_44: Storing Arbitrary Data in DHT](http://www.bittorrent.org/beps/bep_0044.html)
 - [QUIC Protocol](https://www.rfc-editor.org/rfc/rfc9000.html)
 - [Ed25519 Signature Scheme](https://ed25519.cr.yp.to/)
+
+### Internal Documentation
 - [Hole Punching Protocol](hole-punching-protocol.md)
+- [Encryption Architecture](ENCRYPTION_ARCHITECTURE.md) - Invoice and DATA service encryption
+- [Keystore Setup](KEYSTORE_SETUP.md) - Node identity key management
+- [Chat Messaging](CHAT_MESSAGING.md) - Double Ratchet encryption for messaging
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: January 2025
+**Document Version**: 1.1
+**Last Updated**: 2026-01-26
 **Status**: Production

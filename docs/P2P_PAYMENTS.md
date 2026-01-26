@@ -616,6 +616,38 @@ CREATE TABLE job_payments (
 
 ## Security Considerations
 
+### End-to-End Encryption
+
+**All invoice messages are end-to-end encrypted** using one-shot ECDH with ephemeral keys:
+
+**Encryption Features:**
+- ✅ **Forward Secrecy**: Past invoices remain secure even if long-term keys compromised
+- ✅ **Authentication**: Ed25519 signatures verify sender identity
+- ✅ **Integrity**: NaCl Secretbox (XSalsa20-Poly1305) prevents tampering
+- ✅ **Confidentiality**: Only sender and recipient can read invoice content
+
+**What's Protected:**
+- Invoice amounts and currency
+- Payment descriptions
+- Recipient peer IDs
+- Network information
+- All invoice metadata
+
+**Technical Details:**
+```
+Invoice Encryption Flow:
+1. Generate ephemeral X25519 key pair (forward secrecy)
+2. ECDH key exchange with recipient's public key
+3. Derive encryption key using HKDF-SHA256
+4. Encrypt with NaCl Secretbox (XSalsa20 + Poly1305)
+5. Sign with Ed25519 for authentication
+6. Send encrypted invoice via QUIC
+```
+
+**Learn more:** See [ENCRYPTION_ARCHITECTURE.md](./ENCRYPTION_ARCHITECTURE.md) for complete cryptographic details.
+
+---
+
 ### Invoice Validation
 
 **Before accepting an invoice, verify:**
@@ -915,6 +947,19 @@ tail -f ~/.cache/remote-network/logs/api.log
 
 ---
 
+## Related Documentation
+
+### Payment System
+- [PAYMENT_SYSTEM_OVERVIEW.md](./PAYMENT_SYSTEM_OVERVIEW.md) - Payment system architecture
+- [WALLET_MANAGEMENT.md](./WALLET_MANAGEMENT.md) - Wallet management guide
+- [X402_PAYMENT_PROTOCOL.md](./X402_PAYMENT_PROTOCOL.md) - Payment protocol specification
+
+### Security & Encryption
+- [ENCRYPTION_ARCHITECTURE.md](./ENCRYPTION_ARCHITECTURE.md) - Invoice encryption details
+- [KEYSTORE_SETUP.md](./KEYSTORE_SETUP.md) - Node identity key management
+
+---
+
 ## Support
 
 For P2P payment issues:
@@ -926,4 +971,4 @@ For P2P payment issues:
 
 ---
 
-**Last Updated**: 2025-12-28
+**Last Updated**: 2026-01-26

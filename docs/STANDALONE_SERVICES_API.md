@@ -487,6 +487,53 @@ Output files:
 
 ## Security Considerations
 
+### 0. Data Transfer Encryption
+
+**All DATA service file transfers are end-to-end encrypted** using ECDH key exchange:
+
+**Encryption Features:**
+- ✅ **Forward Secrecy**: Ephemeral X25519 keys generated per transfer
+- ✅ **Authentication**: Ed25519 signatures verify sender identity
+- ✅ **Integrity**: AES-256-GCM prevents tampering during transfer
+- ✅ **Replay Protection**: Timestamp validation (5-minute window)
+
+**Protected Data:**
+- Input files sent to workers
+- Output files returned from workers
+- Job execution artifacts
+- Service binaries during upload
+
+**How it works:**
+```
+Data Transfer Encryption Flow:
+1. Sender generates ephemeral X25519 key pair
+2. ECDH key exchange with recipient's public key
+3. Derive AES-256 key using HKDF-SHA256
+4. Sign key exchange with Ed25519 (timestamp-based replay protection)
+5. Encrypt file chunks with AES-256-GCM
+6. Stream encrypted chunks to recipient
+7. Recipient verifies timestamp and signature
+8. Recipient derives same AES-256 key via ECDH
+9. Decrypt file chunks with derived key
+```
+
+**Use Cases:**
+- **Standalone Service Uploads**: Binary files encrypted during WebSocket upload
+- **Job Input Data**: Input files encrypted before sending to executor
+- **Job Output Data**: Results encrypted before returning to requester
+- **MOUNT Interface Data**: Directory contents encrypted during transfer
+
+**Technical Details:**
+- **Key Exchange**: X25519 ECDH with ephemeral keys
+- **File Encryption**: AES-256-GCM streaming encryption
+- **Authentication**: Ed25519 signature over (ephemeral_pub_key || timestamp)
+- **Key Derivation**: HKDF-SHA256 with domain separation ("DATA_TRANSFER_KEY_V1")
+- **Replay Window**: 5 minutes (past) + 1 minute (future clock skew)
+
+**Learn more:** See [ENCRYPTION_ARCHITECTURE.md](./ENCRYPTION_ARCHITECTURE.md) for complete cryptographic details.
+
+---
+
 ### 1. File Permissions
 
 - Uploaded executables are stored with `0755` permissions
@@ -556,12 +603,17 @@ Standalone services run with the same privileges as the node process. For better
 
 ## Related Documentation
 
-- [Workflow Creation Guide](WORKFLOWS.md)
-- [Job Execution Flow](JOB_EXECUTION.md)
-- [Docker Services](DOCKER_SERVICES.md)
+### Service Documentation
+- [Workflow Creation Guide](workflow-creation-and-execution.md)
+- [Docker Services](DOCKER_SERVICE_QUICKSTART.md)
 - [WebSocket API](WEBSOCKET_API.md)
+- [VERIFIABLE_COMPUTE_DESIGN.md](VERIFIABLE_COMPUTE_DESIGN.md)
+
+### Security & Encryption
+- [ENCRYPTION_ARCHITECTURE.md](./ENCRYPTION_ARCHITECTURE.md) - DATA service encryption details
+- [KEYSTORE_SETUP.md](./KEYSTORE_SETUP.md) - Node identity key management
 
 ---
 
-**Last Updated:** 2025-01-17
-**Version:** 1.0
+**Last Updated:** 2026-01-26
+**Version:** 1.1

@@ -391,6 +391,26 @@ New Payment Request
 
 ## Security Considerations
 
+### Invoice Encryption
+
+**All payment invoice messages are end-to-end encrypted** to protect sensitive payment information:
+
+**Encryption Method:**
+- One-shot ECDH with ephemeral X25519 keys
+- NaCl Secretbox authenticated encryption (XSalsa20-Poly1305)
+- Ed25519 signature authentication
+- Forward secrecy protection
+
+**Protected Data:**
+- Invoice amounts and currency
+- Payment descriptions
+- Recipient information
+- Network details
+
+**See:** [ENCRYPTION_ARCHITECTURE.md](./ENCRYPTION_ARCHITECTURE.md) for complete technical details.
+
+---
+
 ### Wallet Security
 
 **✅ Best Practices:**
@@ -661,8 +681,11 @@ remote-network invoice reject <invoice-id> --reason "Insufficient funds"
 - [P2P_PAYMENTS.md](./P2P_PAYMENTS.md) - Peer-to-peer invoice payments
 - [X402_PAYMENT_PROTOCOL.md](./X402_PAYMENT_PROTOCOL.md) - Protocol specification
 
-### Related Systems
+### Security & Encryption
+- [ENCRYPTION_ARCHITECTURE.md](./ENCRYPTION_ARCHITECTURE.md) - Invoice encryption details
 - [KEYSTORE_SETUP.md](./KEYSTORE_SETUP.md) - Node identity encryption
+
+### Related Systems
 - [VERIFIABLE_COMPUTE_DESIGN.md](./VERIFIABLE_COMPUTE_DESIGN.md) - Job execution integration
 - [API_REFERENCE.md](./API_REFERENCE.md) - HTTP/WebSocket APIs
 - [WEBSOCKET_API.md](./WEBSOCKET_API.md) - Real-time notifications
@@ -679,4 +702,4 @@ For payment system issues:
 
 ---
 
-**Last Updated**: 2025-12-28
+**Last Updated**: 2026-01-26

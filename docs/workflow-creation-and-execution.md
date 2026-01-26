@@ -2182,3 +2182,21 @@ For additional debugging, enable verbose logging in:
 - `internal/core/job_manager.go` - Job execution
 - `internal/workers/data_worker.go` - Data transfers
 - `internal/p2p/job_handler.go` - P2P job messaging
+
+---
+
+## Related Documentation
+
+### Workflow & Services
+- [STANDALONE_SERVICES_API.md](./STANDALONE_SERVICES_API.md) - Standalone service creation and management
+- [DOCKER_SERVICE_QUICKSTART.md](./DOCKER_SERVICE_QUICKSTART.md) - Docker service setup
+- [VERIFIABLE_COMPUTE_DESIGN.md](./VERIFIABLE_COMPUTE_DESIGN.md) - Verifiable computation architecture
+
+### Security & Encryption
+- [ENCRYPTION_ARCHITECTURE.md](./ENCRYPTION_ARCHITECTURE.md) - DATA service encryption details
+- [KEYSTORE_SETUP.md](./KEYSTORE_SETUP.md) - Node identity key management
+
+### API & Architecture
+- [API_REFERENCE.md](./API_REFERENCE.md) - HTTP/WebSocket API reference
+- [WEBSOCKET_API.md](./WEBSOCKET_API.md) - Real-time WebSocket events
+- [ARCHITECTURE.md](./ARCHITECTURE.md) - System architecture overview
