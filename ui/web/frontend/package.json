@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@emoji-mart/data": "^1.2.1",
     "@faker-js/faker": "^10.1.0",
     "@noble/curves": "^2.0.1",
     "@primeuix/themes": "^1.1.1",
@@ -24,7 +25,8 @@
     "primevue": "^4.3.4",
     "vue": "^3.5.13",
     "vue-i18n": "^11.1.5",
-    "vue-router": "^4.5.0"
+    "vue-router": "^4.5.0",
+    "vue3-emoji-picker": "^1.1.8"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",

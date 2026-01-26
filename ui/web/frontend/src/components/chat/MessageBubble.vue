@@ -9,8 +9,13 @@
       <div v-if="isGroup && !isSent" class="sender-name">
         {{ senderDisplayName }}
       </div>
-      <div class="message-content">
-        {{ message.content }}
+      <div class="message-content" :class="{ 'emoji-large': isEmojiOnlyMessage }">
+        <span v-if="isEmojiOnlyMessage" role="img" :aria-label="message.content">
+          {{ message.content }}
+        </span>
+        <template v-else>
+          {{ message.content }}
+        </template>
       </div>
 
       <div class="message-meta">
@@ -52,6 +57,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { ChatMessage } from '../../services/api'
+import { shouldEnlargeEmojis } from '../../utils/emoji'
 
 interface Props {
   message: ChatMessage
@@ -61,6 +67,11 @@ interface Props {
 }
 
 const props = defineProps<Props>()
+
+// Check if the message contains only emojis (1-3) and should be enlarged
+const isEmojiOnlyMessage = computed(() => {
+  return shouldEnlargeEmojis(props.message.content)
+})
 
 // Shorten peer ID for display
 const senderDisplayName = computed(() => {
@@ -203,6 +214,11 @@ function formatTimestamp(timestamp: number): string {
   line-height: 1.4;
   white-space: pre-wrap;
   margin-bottom: 0.25rem;
+
+  &.emoji-large {
+    font-size: 2.5rem;
+    line-height: 1.2;
+  }
 }
 
 .message-meta {
