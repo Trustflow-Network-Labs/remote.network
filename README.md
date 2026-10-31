@@ -1,5 +1,12 @@
 # Remote Network Node
 
+> [!IMPORTANT]
+> **Archived.** This is the 2025 Trustflow prototype of remote.network, kept
+> read-only for reference (MIT). remote.network has since been rebuilt; the
+> current node agent is at
+> [github.com/dzunic-systems/remote.network](https://github.com/dzunic-systems/remote.network)
+> and the project lives at [remote.network](https://remote.network).
+
 > **Decentralized P2P compute network for trust-based data exchange and secure computation.**
 
 [![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8.svg)](https://golang.org)
